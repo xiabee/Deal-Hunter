@@ -26,11 +26,14 @@ die() { printf '\033[1;31m✗\033[0m %s\n' "$*" >&2; exit 1; }
 [[ -f "$BIN_SRC" ]] || die "找不到二进制 $BIN_SRC，请先执行 make build-linux"
 command -v systemctl >/dev/null || die "需要 systemd"
 
-# The binary must run on this machine; a wrong-arch artifact fails loudly here.
-if ! "$BIN_SRC" version >/dev/null 2>&1; then
-	die "$BIN_SRC 无法在本机执行（架构不匹配？用 make build-linux 或 GOARCH=arm64 重新编译）"
+# The binary must run on this machine; a wrong-arch or non-executable artifact
+# fails here with the real reason rather than a guess.
+chmod +x "$BIN_SRC" 2>/dev/null || true
+if ! ver_out="$("$BIN_SRC" version 2>&1)"; then
+	echo "$ver_out" >&2
+	die "$BIN_SRC 无法在本机执行（上面是系统给出的原因；如是架构问题，用 GOARCH=arm64 重新编译）"
 fi
-log "安装源：$("$BIN_SRC" version)"
+log "安装源：$ver_out"
 
 log "创建服务账户 $RUNUSER"
 id -u "$RUNUSER" >/dev/null 2>&1 || useradd --system --home "$STATE" --shell /usr/sbin/nologin "$RUNUSER"
@@ -46,8 +49,11 @@ fi
 install -m 0755 "$BIN_SRC" "$PREFIX/deal-hunter"
 
 if [[ ! -f "$ETC/config.json" ]]; then
-	install -m 0644 "$REPO_ROOT/config/deal-hunter.example.json" "$ETC/config.json"
-	log "已放置默认配置 $ETC/config.json（可直接编辑，信息源按需增删）"
+	# The starter config omits "sources" on purpose so the built-in collector set
+	# stays active; the fully-commented example is installed alongside as a guide.
+	install -m 0644 "$REPO_ROOT/config/deal-hunter.starter.json" "$ETC/config.json"
+	install -m 0644 "$REPO_ROOT/config/deal-hunter.example.json" "$ETC/config.example.json"
+	log "已放置 $ETC/config.json（沿用内置 15 个信息源），参考 $ETC/config.example.json"
 else
 	cp -a "$ETC/config.json" "$ETC/config.json.bak-$STAMP"
 	log "保留现有配置，备份为 config.json.bak-$STAMP"
