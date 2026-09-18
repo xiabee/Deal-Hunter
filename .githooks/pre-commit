@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Optional pre-commit gate. Enable with:
+#   git config core.hooksPath .githooks
+#
+# It runs the fast local CI (format, vet, tests, secret scan) before a commit
+# is accepted, so the office builder only ever sees work that already passes.
+set -euo pipefail
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if [[ "${SKIP_CI:-0}" == "1" ]]; then
+	echo "pre-commit: SKIP_CI=1 set, skipping the gate" >&2
+	exit 0
+fi
+
+echo "pre-commit: gofmt + vet + tests + secret scan"
+gofmt_out="$(gofmt -l cmd internal || true)"
+if [[ -n "$gofmt_out" ]]; then
+	echo "pre-commit: run 'make fmt' first; unformatted:" >&2
+	printf '  %s\n' $gofmt_out >&2
+	exit 1
+fi
+go vet ./... >/dev/null
+go test ./... >/dev/null
+go run ./cmd/dealhunter secretscan -C . >/dev/null
+echo "pre-commit: OK"

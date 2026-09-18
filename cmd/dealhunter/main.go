@@ -1,0 +1,659 @@
+// Command dealhunter is the Deal-Hunter single binary: a collector daemon, a
+// read-only status API and the operational subcommands used by CI and deploys.
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"io"
+	"log/slog"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"sort"
+	"strings"
+	"syscall"
+	"text/tabwriter"
+	"time"
+
+	"github.com/xiabee/deal-hunter/internal/config"
+	"github.com/xiabee/deal-hunter/internal/httpapi"
+	"github.com/xiabee/deal-hunter/internal/httpx"
+	"github.com/xiabee/deal-hunter/internal/keywords"
+	"github.com/xiabee/deal-hunter/internal/model"
+	"github.com/xiabee/deal-hunter/internal/pipeline"
+	"github.com/xiabee/deal-hunter/internal/scheduler"
+	"github.com/xiabee/deal-hunter/internal/secretlint"
+	"github.com/xiabee/deal-hunter/internal/sources"
+	"github.com/xiabee/deal-hunter/internal/store"
+	"github.com/xiabee/deal-hunter/internal/version"
+)
+
+const usage = `Deal-Hunter — 全网羊毛雷达（Go 单二进制）
+
+用法：
+  dealhunter [全局参数] <命令> [命令参数]
+
+命令：
+  run           常驻运行：定时采集 + 推送 + 只读状态服务
+  once          立刻跑一轮后退出（-serve 可同时拉起 API）
+  serve         只提供只读状态 API，不采集
+  probe         采集单个信息源并打印结果（不写库、不推送）
+  sources       列出全部信息源
+  deals         打印最近入库的发现
+  digest        立刻发送/落盘一次盘点摘要
+  notify-test   向所有已配置通道发送自检消息
+  doctor        配置、密钥、目录、外连可达性体检
+  secretscan    扫描仓库中的凭证与内网拓扑信息（开源发布门禁）
+  compact       压缩历史库
+  version       打印版本
+
+全局参数：
+  -config FILE  配置文件（默认 $DH_CONFIG 或 ./config/deal-hunter.json）
+  -data DIR     数据目录（覆盖 DH_DATA_DIR）
+  -log LEVEL    debug|info|warn|error
+  -json         日志使用 JSON 格式（适合 journald 采集）
+`
+
+func main() { os.Exit(cli(context.Background(), os.Args[1:], os.Stdout, os.Stderr)) }
+
+func cli(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	globals := flag.NewFlagSet("global", flag.ContinueOnError)
+	globals.SetOutput(stderr)
+	configPath := globals.String("config", "", "配置文件路径")
+	dataDir := globals.String("data", "", "数据目录")
+	logLevel := globals.String("log", "", "日志级别")
+	logJSON := globals.Bool("json", false, "JSON 日志")
+	_ = globals.Parse(normalizeGlobals(args))
+
+	rest := globals.Args()
+	if len(rest) == 0 || rest[0] == "help" || rest[0] == "-h" || rest[0] == "--help" {
+		fmt.Fprint(stdout, usage)
+		if len(rest) == 0 {
+			return 2
+		}
+		return 0
+	}
+	cmd, cmdArgs := rest[0], rest[1:]
+
+	cfg, err := loadConfig(*configPath, *dataDir)
+	if err != nil {
+		fmt.Fprintf(stderr, "配置错误：%v\n", err)
+		return 2
+	}
+	level := cfg.LogLevel
+	if *logLevel != "" {
+		level = *logLevel
+	}
+	log := newLogger(level, *logJSON, stdout)
+
+	dispatch := map[string]func(context.Context, []string) int{
+		"run":         func(c context.Context, a []string) int { return cmdRun(c, cfg, log, stdout, a) },
+		"once":        func(c context.Context, a []string) int { return cmdOnce(c, cfg, log, stdout, a) },
+		"serve":       func(c context.Context, a []string) int { return cmdServe(c, cfg, log, stdout, a) },
+		"probe":       func(c context.Context, a []string) int { return cmdProbe(c, cfg, log, stdout, a) },
+		"sources":     func(_ context.Context, _ []string) int { return cmdSources(cfg, stdout) },
+		"deals":       func(_ context.Context, a []string) int { return cmdDeals(cfg, stdout, a) },
+		"digest":      func(c context.Context, _ []string) int { return cmdDigest(c, cfg, log, stdout) },
+		"notify-test": func(c context.Context, _ []string) int { return cmdNotifyTest(c, cfg, log, stdout) },
+		"doctor":      func(c context.Context, a []string) int { return cmdDoctor(c, cfg, log, stdout, a) },
+		"secretscan":  func(_ context.Context, a []string) int { return cmdSecretScan(stdout, stderr, a) },
+		"compact":     func(_ context.Context, a []string) int { return cmdCompact(cfg, log, stdout, a) },
+		"version":     func(_ context.Context, _ []string) int { fmt.Fprintln(stdout, version.String()); return 0 },
+	}
+	fn, ok := dispatch[cmd]
+	if !ok {
+		fmt.Fprintf(stderr, "未知命令 %q\n\n%s", cmd, usage)
+		return 2
+	}
+	return fn(withSignals(ctx), cmdArgs)
+}
+
+// normalizeGlobals hoists global flags that appear after the subcommand.
+func normalizeGlobals(args []string) []string {
+	globalNames := map[string]bool{"-config": true, "--config": true, "-data": true, "--data": true,
+		"-log": true, "--log": true, "-json": true, "--json": true}
+	var globals, others []string
+	sawCmd := false
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		name, _, isFlag := strings.Cut(a, "=")
+		if isFlag && globalNames[name] {
+			globals = append(globals, a)
+			continue
+		}
+		if !sawCmd && !strings.HasPrefix(a, "-") {
+			sawCmd = true
+		}
+		if globalNames[a] && i+1 < len(args) {
+			globals = append(globals, a, args[i+1])
+			i++
+			continue
+		}
+		others = append(others, a)
+	}
+	return append(globals, others...)
+}
+
+func withSignals(ctx context.Context) context.Context {
+	c, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	_ = stop // cancelled when the process exits
+	return c
+}
+
+func loadConfig(path, dataOverride string) (*config.Config, error) {
+	if path == "" {
+		path = os.Getenv(config.EnvConfig)
+	}
+	if path == "" {
+		if _, err := os.Stat("config/deal-hunter.json"); err == nil {
+			path = "config/deal-hunter.json"
+		}
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return nil, err
+	}
+	if dataOverride != "" {
+		cfg.DataDir = dataOverride
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+func newLogger(level string, jsonOut bool, w io.Writer) *slog.Logger {
+	opts := &slog.HandlerOptions{Level: slog.LevelInfo}
+	switch strings.ToLower(level) {
+	case "debug":
+		opts.Level = slog.LevelDebug
+	case "warn", "warning":
+		opts.Level = slog.LevelWarn
+	case "error":
+		opts.Level = slog.LevelError
+	}
+	var h slog.Handler = slog.NewTextHandler(w, opts)
+	if jsonOut {
+		h = slog.NewJSONHandler(w, opts)
+	}
+	return slog.New(h)
+}
+
+func cmdRun(ctx context.Context, cfg *config.Config, log *slog.Logger, stdout io.Writer, args []string) int {
+	fs := flag.NewFlagSet("run", flag.ContinueOnError)
+	fs.SetOutput(stdout)
+	skipFirst := fs.Bool("no-first", false, "启动时不立刻执行第一轮")
+	_ = fs.Parse(args)
+
+	app, err := pipeline.New(cfg, log)
+	if err != nil {
+		fmt.Fprintf(stdout, "启动失败：%v\n", err)
+		return 1
+	}
+	defer app.Close()
+	log.Info("deal-hunter starting", "version", version.Version, "data", cfg.DataDir,
+		"interval", cfg.Interval.String(), "sources", len(cfg.EnabledSources()), "backends", app.Backends())
+
+	api := httpapi.New(cfg, app, log)
+	errCh := make(chan error, 1)
+	go func() { errCh <- api.Serve(ctx) }()
+
+	loop := &scheduler.Loop{App: app, Cfg: cfg, Log: log, SkipFirst: *skipFirst}
+	runErr := make(chan error, 1)
+	go func() { runErr <- loop.Run(ctx) }()
+
+	select {
+	case err := <-runErr:
+		if err != nil && ctx.Err() == nil {
+			log.Error("scheduler stopped", "err", err)
+			return 1
+		}
+	case err := <-errCh:
+		if err != nil {
+			log.Error("api stopped", "err", err)
+			return 1
+		}
+	}
+	<-time.After(50 * time.Millisecond)
+	log.Info("shutdown complete")
+	return 0
+}
+
+func cmdOnce(ctx context.Context, cfg *config.Config, log *slog.Logger, stdout io.Writer, args []string) int {
+	fs := flag.NewFlagSet("once", flag.ContinueOnError)
+	fs.SetOutput(stdout)
+	serve := fs.Bool("serve", false, "采集后保持 API 常驻")
+	hold := fs.Duration("hold", 0, "配合 -serve 保持运行的时长，0 表示直到收到信号")
+	_ = fs.Parse(args)
+
+	app, err := pipeline.New(cfg, log)
+	if err != nil {
+		fmt.Fprintf(stdout, "启动失败：%v\n", err)
+		return 1
+	}
+	defer app.Close()
+
+	run, _ := app.RunOnce(ctx, "once")
+	printRun(stdout, run)
+
+	if !*serve {
+		return 0
+	}
+	api := httpapi.New(cfg, app, log)
+	log.Info("serving read-only API", "addr", api.Addr())
+	if *hold > 0 {
+		c, cancel := context.WithTimeout(ctx, *hold)
+		defer cancel()
+		ctx = c
+	}
+	return exitFromError(api.Serve(ctx))
+}
+
+func cmdServe(ctx context.Context, cfg *config.Config, log *slog.Logger, stdout io.Writer, args []string) int {
+	app, err := pipeline.New(cfg, log)
+	if err != nil {
+		fmt.Fprintf(stdout, "启动失败：%v\n", err)
+		return 1
+	}
+	defer app.Close()
+	api := httpapi.New(cfg, app, log)
+	log.Info("serving read-only API", "addr", api.Addr())
+	return exitFromError(api.Serve(ctx))
+}
+
+func cmdProbe(ctx context.Context, cfg *config.Config, log *slog.Logger, stdout io.Writer, args []string) int {
+	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
+	fs.SetOutput(stdout)
+	name := fs.String("source", "", "要探测的信息源名称（必填）")
+	limit := fs.Int("n", 15, "最多打印条数")
+	_ = fs.Parse(args)
+	if *name == "" {
+		fmt.Fprintln(stdout, "probe 需要 -source <name>；用 `sources` 查看可用名称")
+		return 2
+	}
+	var found *config.Source
+	for i := range cfg.Sources {
+		if cfg.Sources[i].Name == *name {
+			found = &cfg.Sources[i]
+			break
+		}
+	}
+	if found == nil {
+		fmt.Fprintf(stdout, "未找到信息源 %q\n", *name)
+		return 1
+	}
+	// Deliberately no store: probing must not advance production cursors.
+	src, err := sources.New(sources.Deps{Cfg: *found, HTTP: newFetcher(cfg), Defaults: cfg.HTTP, Log: log, Now: time.Now})
+	if err != nil {
+		fmt.Fprintf(stdout, "构造信息源失败：%v\n", err)
+		return 1
+	}
+	c, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	start := time.Now()
+	deals, err := src.Fetch(c)
+	if err != nil {
+		fmt.Fprintf(stdout, "✗ %s 采集失败：%v\n", found.Name, err)
+		return 1
+	}
+	dict := keywords.Default()
+	fmt.Fprintf(stdout, "✓ %s (%s) 命中 %d 条，耗时 %s\n", found.Name, found.Kind, len(deals), time.Since(start).Round(time.Millisecond))
+	w := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "命中词\t分数\t标题\t链接")
+	for i, d := range deals {
+		if i >= *limit {
+			break
+		}
+		annotate(d, dict)
+		fmt.Fprintf(w, "%s\t%d\t%s\t%s\n", strings.Join(kinds(d), ","), d.Score, truncate(d.Title, 46), truncate(d.URL, 52))
+	}
+	_ = w.Flush()
+	return 0
+}
+
+func newFetcher(cfg *config.Config) *httpx.Client {
+	return httpx.New(httpx.Options{
+		UserAgent:    cfg.HTTP.UserAgent,
+		Timeout:      cfg.HTTP.Timeout.D(),
+		MaxBody:      int64(cfg.HTTP.MaxBodyKB) * 1024,
+		PerHostMin:   time.Duration(cfg.HTTP.PerHostMili) * time.Millisecond,
+		Retries:      cfg.HTTP.Retries,
+		AllowPrivate: cfg.HTTP.AllowPrivateHosts,
+	})
+}
+
+// annotate mirrors the pipeline's scoring so probe output matches production.
+func annotate(d *model.Deal, dict *keywords.Dict) {
+	d.EnsureFingerprint()
+	text := d.TextBlob()
+	d.Offers = dict.Scan(text)
+	if res := dict.DiscountPct(text); res > 0 {
+		d.DiscountPct = res
+	}
+	d.Vendors = dict.Vendors(text)
+	for _, o := range d.Offers {
+		if o.Kind == model.KindFree {
+			d.IsFree = true
+		}
+	}
+	d.Score = 40 + len(d.Offers)*10 + 10*boolInt(len(d.Vendors) > 0) + boolInt(d.IsFree)*20
+	if d.Score > 100 {
+		d.Score = 100
+	}
+}
+
+func kinds(d *model.Deal) []string {
+	var out []string
+	for _, o := range d.Offers {
+		out = append(out, string(o.Kind))
+	}
+	return out
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+func cmdSources(cfg *config.Config, stdout io.Writer) int {
+	w := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "状态\t名称\t类型\t可信度\t官方源\tURL")
+	for _, s := range cfg.Sources {
+		state := "on "
+		if s.Disabled {
+			state = "off"
+		}
+		sites := "-"
+		if len(s.Sites) > 0 {
+			sites = strings.Join(s.Sites, ",")
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\t%s\n", state, s.Name, s.Kind, s.Trust, sites, s.URL)
+	}
+	_ = w.Flush()
+	fmt.Fprintf(stdout, "\n共 %d 个信息源，启用 %d 个\n", len(cfg.Sources), len(cfg.EnabledSources()))
+	return 0
+}
+
+func cmdDeals(cfg *config.Config, stdout io.Writer, args []string) int {
+	fs := flag.NewFlagSet("deals", flag.ContinueOnError)
+	fs.SetOutput(stdout)
+	n := fs.Int("n", 25, "条数")
+	minScore := fs.Int("min", 0, "最低分数")
+	_ = fs.Parse(args)
+
+	st, err := store.Open(cfg.DataDir)
+	if err != nil {
+		fmt.Fprintf(stdout, "打开数据目录失败：%v\n", err)
+		return 1
+	}
+	defer st.Close()
+	w := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "分数\t推送\t来源\t标题\t发现时间")
+	shown := 0
+	for _, d := range st.Recent(5000) {
+		if d.Score < *minScore {
+			continue
+		}
+		pushed := ""
+		if d.Meta["pushed"] == "true" {
+			pushed = "📣"
+		}
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\n", d.Score, pushed, truncate(d.Source, 18), truncate(d.Title, 52),
+			d.DiscoveredAt.Local().Format("01-02 15:04"))
+		if shown++; shown >= *n {
+			break
+		}
+	}
+	_ = w.Flush()
+	if shown == 0 {
+		fmt.Fprintln(stdout, "暂无记录：先跑 `dealhunter once`")
+	}
+	return 0
+}
+
+func cmdDigest(ctx context.Context, cfg *config.Config, log *slog.Logger, stdout io.Writer) int {
+	app, err := pipeline.New(cfg, log)
+	if err != nil {
+		fmt.Fprintf(stdout, "启动失败：%v\n", err)
+		return 1
+	}
+	defer app.Close()
+	if err := app.SendDigest(ctx); err != nil {
+		fmt.Fprintf(stdout, "摘要发送失败：%v\n", err)
+		return 1
+	}
+	fmt.Fprintln(stdout, "✓ 摘要已发送（或无待推送内容）")
+	return 0
+}
+
+func cmdNotifyTest(ctx context.Context, cfg *config.Config, log *slog.Logger, stdout io.Writer) int {
+	app, err := pipeline.New(cfg, log)
+	if err != nil {
+		fmt.Fprintf(stdout, "启动失败：%v\n", err)
+		return 1
+	}
+	defer app.Close()
+	fmt.Fprintf(stdout, "通道：%s\n", strings.Join(app.Backends(), ", "))
+	if err := app.NotifyTest(ctx); err != nil {
+		fmt.Fprintf(stdout, "✗ 自检失败：%v\n", err)
+		return 1
+	}
+	fmt.Fprintln(stdout, "✓ 自检消息已送达所有通道")
+	return 0
+}
+
+type check struct {
+	Name   string
+	Status string // ok | warn | fail
+	Detail string
+}
+
+func cmdDoctor(ctx context.Context, cfg *config.Config, log *slog.Logger, stdout io.Writer, args []string) int {
+	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	fs.SetOutput(stdout)
+	net := fs.Bool("net", true, "逐个信息源做外连探测")
+	_ = fs.Parse(args)
+
+	var checks []check
+	add := func(name, status, detail string) {
+		checks = append(checks, check{Name: name, Status: status, Detail: detail})
+	}
+
+	add("config", "ok", fmt.Sprintf("interval=%s alert_min=%d store_min=%d", cfg.Interval, cfg.Notify.Feishu.MinScore, cfg.Filter.MinScore))
+	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
+		add("data_dir", "fail", err.Error())
+	} else if probe := filepath.Join(cfg.DataDir, ".write-test"); os.WriteFile(probe, []byte("x"), 0o600) != nil {
+		add("data_dir", "fail", "不可写："+probe)
+	} else {
+		_ = os.Remove(probe)
+		add("data_dir", "ok", cfg.DataDir)
+	}
+
+	bindNote := "回环地址，仅本机可访问"
+	switch {
+	case strings.HasPrefix(cfg.Server.Bind, "127.") || strings.Contains(cfg.Server.Bind, "localhost"):
+	case strings.Contains(cfg.Server.Bind, ":"):
+		bindNote = "非回环绑定，请确认仅 Tailscale 可达"
+	}
+	if !cfg.Server.Enabled {
+		bindNote = "API 已关闭"
+	}
+	add("server_bind", "ok", cfg.Server.Bind+" · "+bindNote)
+
+	if cfg.Notify.Feishu.WebhookURL == "" {
+		add("feishu", "warn", "未设置 "+config.EnvFeishuWebhook+"，无法直接推送")
+	} else {
+		status := "ok"
+		if !strings.HasPrefix(cfg.Notify.Feishu.WebhookURL, "https://") {
+			status = "fail"
+		}
+		host := cfg.Notify.Feishu.WebhookURL
+		if i := strings.Index(host[strings.Index(host, "//")+2:], "/"); i > 0 {
+			host = host[:strings.Index(host, "//")+2+i]
+		}
+		secretState := "未启用签名"
+		if cfg.Notify.Feishu.Secret != "" {
+			secretState = "已启用签名"
+		}
+		add("feishu", status, host+" · "+secretState)
+	}
+	if cfg.Notify.OpenClaw.Enabled {
+		dir := cfg.Notify.OpenClaw.SkillDir
+		if dir == "" {
+			dir = filepath.Join(cfg.DataDir, "outreach")
+		}
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			add("openclaw_drop", "fail", err.Error())
+		} else {
+			add("openclaw_drop", "ok", dir)
+		}
+	}
+
+	st, err := store.Open(cfg.DataDir)
+	if err != nil {
+		add("store", "fail", err.Error())
+	} else {
+		stats := st.Stats()
+		add("store", "ok", fmt.Sprintf("已见 %d · 已推送 %d · 游标 %d · %d KB", stats.DealsSeen, stats.PushedSeen, stats.StateKeys, stats.DirSizeKB))
+		st.Close()
+	}
+
+	if *net {
+		cli := newFetcher(cfg)
+		okCount := 0
+		for _, sc := range cfg.EnabledSources() {
+			c, cancel := context.WithTimeout(ctx, 25*time.Second)
+			resp, err := cli.Get(c, sc.URL, sc.Headers)
+			cancel()
+			switch {
+			case err != nil:
+				add("source:"+sc.Name, "warn", err.Error())
+			case resp.Status >= 400:
+				add("source:"+sc.Name, "warn", fmt.Sprintf("HTTP %d", resp.Status))
+			default:
+				okCount++
+				add("source:"+sc.Name, "ok", fmt.Sprintf("HTTP %d · %d KB", resp.Status, len(resp.Body)/1024))
+			}
+		}
+		add("egress", map[bool]string{true: "ok", false: "warn"}[okCount > 0],
+			fmt.Sprintf("%d/%d 个信息源可达", okCount, len(cfg.EnabledSources())))
+	}
+
+	w := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "结果\t检查项\t详情")
+	fails := 0
+	sorted := append([]check(nil), checks...)
+	sort.SliceStable(sorted, func(i, j int) bool { return rank(sorted[i].Status) < rank(sorted[j].Status) })
+	for _, c := range sorted {
+		icon := map[string]string{"ok": "✓", "warn": "!", "fail": "✗"}[c.Status]
+		if c.Status == "fail" {
+			fails++
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\n", icon, c.Name, truncate(c.Detail, 110))
+	}
+	_ = w.Flush()
+	if fails > 0 {
+		fmt.Fprintf(stdout, "\n体检未通过：%d 项失败\n", fails)
+		return 1
+	}
+	fmt.Fprintln(stdout, "\n体检通过")
+	return 0
+}
+
+func rank(s string) int {
+	return map[string]int{"fail": 0, "warn": 1, "ok": 2}[s]
+}
+
+func cmdSecretScan(stdout, stderr io.Writer, args []string) int {
+	fs := flag.NewFlagSet("secretscan", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("C", ".", "扫描根目录")
+	max := fs.Int("n", 40, "最多打印条数")
+	_ = fs.Parse(args)
+
+	findings, err := secretlint.Scan(secretlint.DefaultOptions(*dir))
+	if err != nil {
+		fmt.Fprintf(stderr, "扫描失败：%v\n", err)
+		return 2
+	}
+	if len(findings) == 0 {
+		fmt.Fprintf(stdout, "✓ secretscan: 未发现凭证或内网拓扑信息（%s）\n", *dir)
+		return 0
+	}
+	fmt.Fprintf(stderr, "✗ secretscan: 发现 %d 处敏感内容：\n", len(findings))
+	for i, f := range findings {
+		if i >= *max {
+			fmt.Fprintf(stderr, "  … 另有 %d 处\n", len(findings)-*max)
+			break
+		}
+		fmt.Fprintf(stderr, "  %s  %s:%d  %s\n", f.Rule, f.Path, f.Line, f.Snippet)
+	}
+	fmt.Fprintln(stderr, "\n如为有意保留的示例值，请在该行末尾加 secretlint:ignore 并说明原因。")
+	return 1
+}
+
+func cmdCompact(cfg *config.Config, log *slog.Logger, stdout io.Writer, args []string) int {
+	fs := flag.NewFlagSet("compact", flag.ContinueOnError)
+	fs.SetOutput(stdout)
+	days := fs.Int("days", 60, "保留天数")
+	_ = fs.Parse(args)
+	st, err := store.Open(cfg.DataDir)
+	if err != nil {
+		fmt.Fprintf(stdout, "打开数据目录失败：%v\n", err)
+		return 1
+	}
+	defer st.Close()
+	before := st.Stats().DealsSeen
+	if err := st.Compact(*days); err != nil {
+		fmt.Fprintf(stdout, "压缩失败：%v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "✓ 压缩完成：%d → %d 条\n", before, st.Stats().DealsSeen)
+	return 0
+}
+
+func printRun(w io.Writer, run *pipeline.Run) {
+	if run == nil {
+		fmt.Fprintln(w, "本轮未执行")
+		return
+	}
+	fmt.Fprintf(w, "\n本轮 %s：新增 %d · 入库 %d · 推送 %d · 静默保留 %d · 用时 %s\n",
+		run.Trigger, run.NewDeals, run.Stored, run.Pushed, run.HeldQuiet,
+		run.FinishedAt.Sub(run.StartedAt).Round(time.Millisecond))
+	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "  信息源\t命中\t入库\t耗时\t状态")
+	for _, s := range run.Sources {
+		status := "ok"
+		if s.Err != "" {
+			status = truncate(s.Err, 60)
+		}
+		fmt.Fprintf(tw, "  %s\t%d\t%d\t%dms\t%s\n", s.Name, s.Found, s.Stored, s.Ms, status)
+	}
+	_ = tw.Flush()
+	for _, e := range run.Errors {
+		fmt.Fprintf(w, "  错误：%s\n", truncate(e, 140))
+	}
+}
+
+func exitFromError(err error) int {
+	if err != nil && !strings.Contains(err.Error(), "context canceled") {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func truncate(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	if n <= 1 {
+		return ""
+	}
+	return string(r[:n-1]) + "…"
+}

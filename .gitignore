@@ -1,0 +1,36 @@
+# Build output
+/dist/
+/bin/
+/dealhunter
+/deal-hunter
+*.exe
+
+# Runtime state: findings history, cursors, delivered payloads
+/data/
+/outreach/
+*.jsonl
+
+# Local, per-machine, and secret configuration — never committed
+*.env
+!*.env.example
+/deploy/*.local.env
+/deploy/*-local.json
+/config/local.json
+/config/*.local.json
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+
+# CI scratch
+/.ci/
+/tmp/
+*.test
+
+# Editors / OS
+/.idea/
+/.vscode/
+.DS_Store
+Thumbs.db

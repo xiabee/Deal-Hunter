@@ -1,0 +1,343 @@
+package notify
+
+import (
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/xiabee/deal-hunter/internal/config"
+	"github.com/xiabee/deal-hunter/internal/model"
+)
+
+func sampleDeal() model.Deal {
+	return model.Deal{
+		Title: "智谱 GLM-5.3-flash 限时免费开放", Summary: "官方公告：API 调用 0 元。",
+		URL: "https://example.com/glm-free", Source: "openrouter-free-models",
+		Category: model.CatAIFree, IsFree: true, Score: 92, DiscountPct: 0,
+		ScoreWhy: []string{"+45 免费类 offer", "+10 已知厂商 智谱AI"},
+		Vendors:  []string{"智谱AI"}, Tags: []string{"ai_free"},
+		PublishedAt: time.Now().Add(-time.Hour), DiscoveredAt: time.Now(),
+	}
+}
+
+func TestFeishuDeliversSignedCard(t *testing.T) {
+	var received map[string]any
+	var contentType string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		contentType = r.Header.Get("Content-Type")
+		body, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(body, &received); err != nil {
+			t.Errorf("payload is not valid json: %v (%s)", err, body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"code":0,"msg":"success"}`)
+	}))
+	defer srv.Close()
+
+	f, err := NewFeishu(config.Feishu{Enabled: true, WebhookURL: srv.URL, Secret: "unit-test-secret", Timezone: "UTC"})
+	if err != nil {
+		t.Fatalf("NewFeishu: %v", err)
+	}
+	if !f.Ready() {
+		t.Fatal("a loopback webhook must be accepted for local relays")
+	}
+	msg := NewMessage(KindAlert, Headline(&[]model.Deal{sampleDeal()}[0]), sampleDeal())
+	if err := f.Send(context.Background(), msg); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if !strings.Contains(contentType, "application/json") {
+		t.Errorf("content type = %q", contentType)
+	}
+	if received["msg_type"] != "interactive" {
+		t.Fatalf("msg_type = %v", received["msg_type"])
+	}
+	ts, _ := received["timestamp"].(string)
+	sign, _ := received["sign"].(string)
+	if ts == "" || sign == "" {
+		t.Fatal("a signing secret must always produce timestamp+sign")
+	}
+	// Verify the signature the way Feishu does, independently of Sign().
+	mac := hmac.New(sha256.New, []byte(ts+"\n"+"unit-test-secret"))
+	mac.Write([]byte{})
+	if want := base64.StdEncoding.EncodeToString(mac.Sum(nil)); sign != want {
+		t.Errorf("signature mismatch: got %s want %s", sign, want)
+	}
+	card, ok := received["card"].(map[string]any)
+	if !ok {
+		t.Fatal("card missing")
+	}
+	header := card["header"].(map[string]any)
+	if header["template"] == "" || header["template"] == "grey" {
+		t.Errorf("a high value alert should not use the grey template: %v", header["template"])
+	}
+	title := header["title"].(map[string]any)["content"].(string)
+	if !strings.Contains(title, "免费") {
+		t.Errorf("card title = %q", title)
+	}
+	if got := len(cardElements(card)); got < 3 {
+		t.Fatalf("expected body/action/note elements, got %d", got)
+	}
+	joined, _ := json.Marshal(card)
+	for _, want := range []string{"GLM-5.3-flash", "https://example.com/glm-free", "92", "查看原文"} {
+		if !strings.Contains(string(joined), want) {
+			t.Errorf("card missing %q: %s", want, joined)
+		}
+	}
+	if strings.Contains(string(joined), "unit-test-secret") {
+		t.Error("the signing secret must never appear in the payload")
+	}
+}
+
+// cardElements reads the element list from a freshly built card. Before JSON
+// encoding the slice keeps its concrete type, so both shapes must be accepted.
+func cardElements(card map[string]any) []map[string]any {
+	switch v := card["elements"].(type) {
+	case []map[string]any:
+		return v
+	case []any:
+		out := make([]map[string]any, 0, len(v))
+		for _, e := range v {
+			if m, ok := e.(map[string]any); ok {
+				out = append(out, m)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func TestFeishuSurfacesUpstreamErrorCode(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"code":19021,"msg":"sign match fail"}`)
+	}))
+	defer srv.Close()
+	f, _ := NewFeishu(config.Feishu{WebhookURL: srv.URL, Timezone: "UTC"})
+	err := f.Send(context.Background(), NewMessage(KindAlert, "x", sampleDeal()))
+	if err == nil || !strings.Contains(err.Error(), "19021") {
+		t.Fatalf("expected the upstream code to be reported, got %v", err)
+	}
+}
+
+func TestFeishuReportsHTTPFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("boom"))
+	}))
+	defer srv.Close()
+	f, _ := NewFeishu(config.Feishu{WebhookURL: srv.URL, Timezone: "UTC"})
+	if err := f.Send(context.Background(), NewMessage(KindAlert, "x", sampleDeal())); err == nil {
+		t.Fatal("expected an error on HTTP 500")
+	}
+}
+
+func TestFeishuWithoutWebhookNamesTheEnvVar(t *testing.T) {
+	f, _ := NewFeishu(config.Feishu{Enabled: true, Timezone: "UTC"})
+	err := f.Send(context.Background(), NewMessage(KindAlert, "x", sampleDeal()))
+	if err == nil || !strings.Contains(err.Error(), config.EnvFeishuWebhook) {
+		t.Fatalf("error should tell the operator which env var to set, got %v", err)
+	}
+}
+
+func TestWebhookURLRules(t *testing.T) {
+	cases := map[string]bool{
+		"https://open.feishu.cn/open-apis/bot/v2/hook/abc": true,
+		"http://127.0.0.1:8080/hook":                       true,
+		"http://localhost:8080/hook":                       true,
+		"http://attacker.example.com/hook":                 false,
+		"ftp://example.com/hook":                           false,
+		"":                                                 false,
+	}
+	for raw, want := range cases {
+		if got := URLLooksUsable(raw); got != want {
+			t.Errorf("URLLooksUsable(%q) = %v, want %v", raw, got, want)
+		}
+	}
+}
+
+func TestQuietHoursUseConfiguredTimezone(t *testing.T) {
+	f, err := NewFeishu(config.Feishu{SilentHours: []int{3}, Timezone: "Asia/Shanghai"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	shanghai3 := time.Date(2026, 9, 18, 3, 30, 0, 0, time.FixedZone("CST", 8*3600))
+	if !f.QuietNow(shanghai3) {
+		t.Error("03:30 +0800 is inside the silent window")
+	}
+	if f.QuietNow(time.Date(2026, 9, 18, 9, 0, 0, 0, shanghai3.Location())) {
+		t.Error("09:00 must not be quiet")
+	}
+	open, _ := NewFeishu(config.Feishu{Timezone: "UTC"})
+	if open.QuietNow(time.Now()) {
+		t.Error("no silent hours means never quiet")
+	}
+	if _, err := NewFeishu(config.Feishu{Timezone: "Mars/Valles"}); err == nil {
+		t.Error("an invalid timezone must be rejected")
+	}
+}
+
+func TestDigestCardListsEveryDeal(t *testing.T) {
+	f, _ := NewFeishu(config.Feishu{Timezone: "UTC"})
+	msg := NewMessage(KindDigest, "🧺 羊毛盘点", sampleDeal(), sampleDeal(), sampleDeal())
+	card := f.card(msg)
+	divs := 0
+	for _, e := range cardElements(card) {
+		if e["tag"] == "div" {
+			divs++
+		}
+	}
+	if divs < 3 {
+		t.Errorf("digest should render one row per deal, got %d divs", divs)
+	}
+	if card["header"].(map[string]any)["template"] != "blue" {
+		t.Error("digest cards use the blue template")
+	}
+}
+
+func TestTemplateChoiceReflectsValue(t *testing.T) {
+	cases := []struct {
+		msg  Message
+		want string
+	}{
+		{NewMessage(KindTest, "t", sampleDeal()), "grey"},
+		{NewMessage(KindDigest, "d", sampleDeal()), "blue"},
+		{NewMessage(KindAlert, "a", sampleDeal()), "red"},
+	}
+	for _, c := range cases {
+		if got := CardTemplate(c.msg); got != c.want {
+			t.Errorf("template for %s = %s, want %s", c.msg.Kind, got, c.want)
+		}
+	}
+}
+
+func TestFileDropWritesArtifacts(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "drop")
+	fd, err := NewFileDrop(dir, "deal-hunter")
+	if err != nil {
+		t.Fatalf("NewFileDrop: %v", err)
+	}
+	if err := fd.Send(context.Background(), NewMessage(KindAlert, "测试标题", sampleDeal())); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	md, err := os.ReadFile(filepath.Join(dir, "deal-hunter-latest.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"测试标题", "GLM-5.3-flash", "https://example.com/glm-free", "置信分"} {
+		if !strings.Contains(string(md), want) {
+			t.Errorf("markdown missing %q:\n%s", want, md)
+		}
+	}
+	var payload map[string]any
+	js, err := os.ReadFile(filepath.Join(dir, "deal-hunter-latest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(js, &payload); err != nil {
+		t.Fatalf("json artifact invalid: %v", err)
+	}
+	if payload["Kind"] != string(KindAlert) {
+		t.Errorf("json payload = %v", payload)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 3 {
+		t.Errorf("expected md + json + daily jsonl, got %d files", len(entries))
+	}
+	if _, err := NewFileDrop("", "x"); err == nil {
+		t.Error("an empty dir must be rejected")
+	}
+}
+
+func TestFanOutToleratesOneFailingBackend(t *testing.T) {
+	ok := &recordingNotifier{}
+	bad := &failingNotifier{err: errors.New("webhook down")}
+	f := NewFanOut(nil, bad, ok)
+	if f.Len() != 2 {
+		t.Fatalf("Len = %d", f.Len())
+	}
+	err := f.Send(context.Background(), NewMessage(KindAlert, "t", sampleDeal()))
+	if err == nil || !strings.Contains(err.Error(), "webhook down") {
+		t.Fatalf("expected the failure to be reported, got %v", err)
+	}
+	if ok.calls != 1 {
+		t.Errorf("healthy backends must still receive the message, calls=%d", ok.calls)
+	}
+	if got := f.Names(); len(got) != 2 || got[0] != "failing" {
+		t.Errorf("Names = %v", got)
+	}
+}
+
+func TestFanOutWithoutBackendsErrors(t *testing.T) {
+	if err := NewFanOut(nil).Send(context.Background(), NewMessage(KindAlert, "t")); err == nil {
+		t.Error("expected an error when nothing is configured")
+	}
+}
+
+func TestConsoleRendersPlainText(t *testing.T) {
+	var buf strings.Builder
+	c := NewConsoleWriter(&buf)
+	if err := c.Send(context.Background(), NewMessage(KindAlert, "告警标题", sampleDeal())); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	for _, want := range []string{"[ALERT]", "告警标题", "92", "🆓", "https://example.com/glm-free"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("console output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestHeadlineAndIconChoices(t *testing.T) {
+	d := sampleDeal()
+	if got := Headline(&d); !strings.Contains(got, "免费羊毛") {
+		t.Errorf("Headline = %q", got)
+	}
+	paid := sampleDeal()
+	paid.IsFree = false
+	paid.DiscountPct = 70
+	paid.Category = model.CatDiscount
+	if got := Headline(&paid); !strings.Contains(got, "70% 折扣") {
+		t.Errorf("discount headline = %q", got)
+	}
+	if Icon(&paid) != "🏷️" {
+		t.Errorf("icon for discount = %s", Icon(&paid))
+	}
+	res := sampleDeal()
+	res.IsFree = false
+	res.Category = model.CatResource
+	if Icon(&res) != "📦" {
+		t.Error("resource icon")
+	}
+}
+
+type recordingNotifier struct {
+	calls int
+	last  Message
+}
+
+func (r *recordingNotifier) Name() string { return "recorder" }
+func (r *recordingNotifier) Send(_ context.Context, m Message) error {
+	r.calls++
+	r.last = m
+	return nil
+}
+
+type failingNotifier struct{ err error }
+
+func (f *failingNotifier) Name() string                        { return "failing" }
+func (f *failingNotifier) Send(context.Context, Message) error { return f.err }

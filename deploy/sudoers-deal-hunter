@@ -1,0 +1,19 @@
+# Deal-Hunter → OpenClaw message relay
+#
+# Install (visudo-safe syntax check first):
+#   sudo install -m 0440 deploy/sudoers-deal-hunter /etc/sudoers.d/deal-hunter
+#   sudo visudo -cf /etc/sudoers.d/deal-hunter
+#
+# Then point Deal-Hunter at sudo in the JSON config:
+#   "notify": { "openclaw": {
+#       "enabled": true, "relay": true,
+#       "command": "/usr/bin/sudo",
+#       "args": ["-n", "-u", "openclaw", "openclaw"],
+#       "channel": "feishu"
+#   } }
+# and set DH_OPENCLAW_TARGET in the env file.
+#
+# This grants the service user exactly one capability: ask the OpenClaw account
+# to send a message. It does NOT expose OpenClaw's tokens, config or state to
+# Deal-Hunter, and the relay never runs a shell.
+dealhunter ALL=(openclaw) NOPASSWD: /usr/local/bin/openclaw message send *

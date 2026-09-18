@@ -1,0 +1,46 @@
+[Unit]
+Description=Deal-Hunter 全网羊毛雷达 (discount & free-tier radar)
+Documentation=https://github.com/xiabee/Deal-Hunter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dealhunter
+Group=dealhunter
+WorkingDirectory=/var/lib/deal-hunter
+ExecStart=/opt/deal-hunter/deal-hunter run -config /etc/deal-hunter/config.json
+Environment=DH_DATA_DIR=/var/lib/deal-hunter
+# Secrets live only in this 0600 file; the leading '-' means "optional" so the
+# unit still starts (console + file delivery) before the webhook is configured.
+EnvironmentFile=-/etc/deal-hunter/deal-hunter.env
+
+Restart=always
+RestartSec=15
+TimeoutStopSec=20
+Nice=10
+
+StateDirectory=deal-hunter
+StateDirectoryMode=0750
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=deal-hunter
+
+[Install]
+WantedBy=multi-user.target

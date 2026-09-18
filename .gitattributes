@@ -1,0 +1,25 @@
+# Normalise line endings so a Windows checkout can never ship CRLF shell
+# scripts or systemd units to a Linux host.
+* text=auto
+
+*.sh        text eol=lf
+*.bash      text eol=lf
+*.service   text eol=lf
+*.timer     text eol=lf
+Makefile    text eol=lf
+*.go        text eol=lf
+*.json      text eol=lf
+*.jsonc     text eol=lf
+*.md        text
+*.xml       text eol=lf
+*.html      text eol=lf
+*.css       text eol=lf
+*.env.example text eol=lf
+sudoers-deal-hunter text eol=lf
+
+# Binary-ish artifacts that must never be diffed or rewritten
+*.png binary
+*.jpg binary
+*.ico binary
+*.gz binary
+*.tar binary

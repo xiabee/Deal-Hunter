@@ -1,0 +1,21 @@
+{
+  "meta": {"total": 2},
+  "data": {
+    "items": [
+      {
+        "id": "db-1",
+        "name": "DevBox 学生授权：全员免费使用一年",
+        "homepage": "https://devbox.example.com/students",
+        "summary": "在校学生可申请免费 license，含全部插件。",
+        "released": "2026-09-10T00:00:00Z"
+      },
+      {
+        "id": "db-2",
+        "name": "DevBox 团队版涨价公告",
+        "homepage": "/blog/team-pricing",
+        "summary": "团队版价格上调，无优惠。",
+        "released": "2026-09-11"
+      }
+    ]
+  }
+}

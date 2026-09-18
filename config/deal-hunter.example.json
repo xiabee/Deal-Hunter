@@ -1,0 +1,121 @@
+{
+  "_comment": "Copy to config/deal-hunter.json and edit. Secrets never belong here: supply them through DH_* environment variables.",
+  "data_dir": "./data",
+  "log_level": "info",
+  "interval": "30m",
+  "jitter": "3m",
+  "timezone": "Asia/Shanghai",
+  "http": {
+    "timeout": "20s",
+    "max_body_kb": 3072,
+    "per_host_min_interval_ms": 800,
+    "retries": 2,
+    "allow_private_hosts": false
+  },
+  "server": {
+    "enabled": true,
+    "bind": "127.0.0.1:8765"
+  },
+  "filter": {
+    "min_score": 55,
+    "max_age_hours": 336,
+    "require_offer": true,
+    "deny_keywords": ["招聘", "博彩"],
+    "require_keywords": []
+  },
+  "notify": {
+    "feishu": {
+      "enabled": true,
+      "min_score": 62,
+      "max_per_run": 6,
+      "dedupe_minutes": 90,
+      "timezone": "Asia/Shanghai",
+      "silent_hours": [0, 1, 2, 3, 4, 5, 6]
+    },
+    "openclaw": {
+      "enabled": true,
+      "skill_dir": "",
+      "relay": false,
+      "command": "openclaw",
+      "args": [],
+      "channel": "feishu",
+      "timeout": "30s"
+    },
+    "digest": {
+      "enabled": true,
+      "every": "6h",
+      "min_score": 45,
+      "max_items": 12
+    },
+    "console": false
+  },
+  "sources": [
+    {
+      "name": "openrouter-free-models",
+      "kind": "openrouter",
+      "url": "https://openrouter.ai/api/v1/models",
+      "trust": 10,
+      "category": "ai_free",
+      "sites": ["openrouter.ai"],
+      "params": { "max_new": "8", "first_run_grace_days": "14" }
+    },
+    {
+      "name": "search-ai-free-cn",
+      "kind": "search",
+      "url": "https://lite.duckduckgo.com/lite/",
+      "trust": 9,
+      "limit": 12,
+      "params": {
+        "queries": "大模型 API 免费额度 领取;限时免费 大模型 官方公告;国产大模型 永久免费 token",
+        "kl": "cn-zh"
+      }
+    },
+    {
+      "name": "vendor-benefit-page",
+      "kind": "html",
+      "url": "https://www.example.com/benefit",
+      "trust": 8,
+      "limit": 40,
+      "sites": ["example.com"],
+      "keywords": ["免费", "试用", "折", "特惠"],
+      "params": { "class_contains": "", "min_text_len": "12" }
+    },
+    {
+      "name": "vendor-price-snapshot",
+      "kind": "snapshot",
+      "url": "https://www.example.com/pricing",
+      "trust": 8,
+      "limit": 8,
+      "params": { "mode": "auto", "focus": "free" }
+    },
+    {
+      "name": "community-deals-api",
+      "kind": "json",
+      "url": "https://api.example.com/v1/deals",
+      "trust": 6,
+      "params": {
+        "items_path": "data.items",
+        "title_path": "name",
+        "url_path": "permalink",
+        "summary_path": "excerpt",
+        "time_path": "published_at",
+        "id_path": "id"
+      }
+    },
+    {
+      "name": "forum-rss",
+      "kind": "rss",
+      "url": "https://www.example.com/latest.rss",
+      "trust": 6,
+      "limit": 60,
+      "deny": ["招聘", "相亲"]
+    },
+    {
+      "name": "hn-news",
+      "kind": "hn",
+      "url": "https://hn.algolia.com/api/v1/search",
+      "trust": 5,
+      "params": { "query": "free API credits", "tags": "story", "numericFilters": "points>10" }
+    }
+  ]
+}

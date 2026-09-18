@@ -1,0 +1,58 @@
+{
+  "data": [
+    {
+      "id": "zhipu/glm-5.3-flash:free",
+      "name": "Zhipu GLM-5.3 Flash (free)",
+      "created": 1799900000,
+      "context_length": 131072,
+      "description": "Flagship flash model, temporarily free on OpenRouter.",
+      "architecture": {"modality": "text+image->text"},
+      "pricing": {"prompt": "0", "completion": "0", "request": "0", "image": "0"}
+    },
+    {
+      "id": "qwen/qwen-3.8-flash",
+      "name": "Qwen3.8 Flash",
+      "created": 1799850000,
+      "context_length": 262144,
+      "description": "Zero priced inference window.",
+      "architecture": {"modality": "text->text"},
+      "pricing": {"prompt": "0E-10", "completion": "0.0000000000", "request": "0"}
+    },
+    {
+      "id": "vendor/paid-model",
+      "name": "Paid Model",
+      "created": 1600000000,
+      "context_length": 8192,
+      "description": "Price flipped to zero since the previous snapshot.",
+      "architecture": {"modality": "text->text"},
+      "pricing": {"prompt": "0", "completion": "0", "request": "0"}
+    },
+    {
+      "id": "vendor/broken-pricing",
+      "name": "Broken Pricing",
+      "created": 1799900001,
+      "context_length": 4096,
+      "description": "Missing price fields must not be treated as free.",
+      "architecture": {"modality": "text->text"},
+      "pricing": {"prompt": "", "completion": ""}
+    },
+    {
+      "id": "vendor/ancient-free",
+      "name": "Ancient Free Model",
+      "created": 1600000001,
+      "context_length": 4096,
+      "description": "Already known from the baseline cursor.",
+      "architecture": {"modality": "text->text"},
+      "pricing": {"prompt": "0", "completion": "0"}
+    },
+    {
+      "id": "newcomer/nova-lite:free",
+      "name": "Nova Lite (free)",
+      "created": 1799950000,
+      "context_length": 32768,
+      "description": "Brand new free launch.",
+      "architecture": {"modality": "text->text"},
+      "pricing": {"prompt": "0", "completion": "0"}
+    }
+  ]
+}
