@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -118,25 +119,19 @@ func (m Message) Plain() string {
 	return b.String()
 }
 
-// Line renders one deal as a single compact line.
+// Line renders one deal as a single compact line: what it is, how sure we are,
+// and where to go.
 func Line(d *model.Deal) string {
-	parts := []string{fmt.Sprintf("%s%d", Icon(d), d.Score)}
-	if len(d.Vendors) > 0 {
-		parts = append(parts, d.Vendors[0])
+	parts := []string{Icon(d), strconv.Itoa(d.Score)}
+	if mark := LinkMark(d.Meta[official.MetaLinkKind]); mark != "" {
+		parts = append(parts, mark)
 	}
-	parts = append(parts, d.Title)
+	parts = append(parts, truncateRunes(strings.ReplaceAll(d.Title, "\n", " "), 60))
 	if best, _, _ := LinkFor(d); best != "" {
 		parts = append(parts, best)
 	}
-	if badge := LinkBadge(d.Meta[official.MetaLinkKind]); badge != "" {
-		parts = append(parts, badge)
-	}
-	return strings.Join(parts, " | ")
+	return strings.Join(parts, " ")
 }
-
-// VendorSite is the vendor's own entry page, when we found and verified one. It
-// is offered as a place to check, never as the link that carries the claim.
-func VendorSite(d *model.Deal) string { return d.Meta[official.MetaVendorURL] }
 
 // LinkFor returns the URL worth clicking, the post it came from, and how the
 // link was classified. Deals collected before resolution simply point at
@@ -153,30 +148,34 @@ func LinkFor(d *model.Deal) (best, original, kind string) {
 	return best, original, kind
 }
 
-// LinkBadge tells the user how much to trust the link, so a third-party retelling
-// never looks like a confirmed vendor announcement.
+// VendorSite is the vendor's own entry page, when we found and verified one. It
+// is offered as a place to check, never as the link that carries the claim.
+func VendorSite(d *model.Deal) string { return d.Meta[official.MetaVendorURL] }
+
+// LinkBadge states in a few characters how far the link can be trusted, so a
+// third-party retelling never looks like a confirmed vendor announcement.
 func LinkBadge(kind string) string {
 	switch kind {
 	case official.KindAlreadyOfficial:
 		return "✅ 厂商官方域名"
 	case official.KindSearchVerified:
-		return "✅ 已在厂商站内定位该 offer 并校验"
+		return "✅ 官方页已校验"
 	case official.KindThirdParty:
-		return "⚠️ 第三方转述，未找到官方页"
+		return "⚠️ 第三方转述"
 	}
 	return ""
 }
 
-// LinkMark is the compact form of LinkBadge for table output.
+// LinkMark is the badge without the words, for lines that have no room for them.
 func LinkMark(kind string) string {
 	switch kind {
 	case official.KindThirdParty:
-		return "⚠️ "
+		return "⚠️"
 	case "":
 		return ""
 	}
 	if official.IsOfficialKind(kind) {
-		return "✅ "
+		return "✅"
 	}
 	return ""
 }
@@ -200,12 +199,12 @@ func Icon(d *model.Deal) string {
 // Headline builds the card/digest title for a single-deal alert.
 func Headline(d *model.Deal) string {
 	if d.IsFree {
-		return "免费羊毛 · " + truncateRunes(d.Title, 60)
+		return "🆓 免费 · " + truncateRunes(d.Title, 48)
 	}
 	if d.DiscountPct > 0 {
-		return fmt.Sprintf("%d%% 折扣 · %s", d.DiscountPct, truncateRunes(d.Title, 56))
+		return fmt.Sprintf("🏷️ %d%% off · %s", d.DiscountPct, truncateRunes(d.Title, 46))
 	}
-	return truncateRunes(d.Title, 64)
+	return truncateRunes(d.Title, 52)
 }
 
 func truncateRunes(s string, n int) string {

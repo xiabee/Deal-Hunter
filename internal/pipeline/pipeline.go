@@ -319,7 +319,6 @@ func (a *App) RunOnce(ctx context.Context, trigger string) (*Run, error) {
 				vals = append(vals, *d)
 			}
 			msg := notify.NewMessage(notify.KindAlert, alertTitle(vals), vals...)
-			msg.Intro = fmt.Sprintf("本轮新增 %d 条高价值羊毛（%d 条已定位到官方页并校验）", len(candidates), run.Verified)
 			if err := a.nf.Send(ctx, msg); err != nil {
 				deliverErr = err
 				run.Errors = append(run.Errors, err.Error())
@@ -584,7 +583,6 @@ func (a *App) SendDigest(ctx context.Context) error {
 	}
 	msg := notify.NewMessage(notify.KindDigest,
 		fmt.Sprintf("🧺 羊毛盘点 · %d 条", len(pending)), pending...)
-	msg.Intro = "过去一段时间未单独播报的中小羊毛"
 	if err := a.nf.Send(ctx, msg); err != nil {
 		return err
 	}

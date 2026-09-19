@@ -316,9 +316,12 @@ func cmdProbe(ctx context.Context, cfg *config.Config, log *slog.Logger, stdout 
 
 // presentedLink mirrors what the card and the panel point at: the verified
 // vendor page when we found one, otherwise the post the deal came from.
-func presentedLink(d model.Deal) (url, mark string) {
+func presentedLink(d model.Deal) string {
 	best, _, kind := notify.LinkFor(&d)
-	return best, notify.LinkMark(kind)
+	if mark := notify.LinkMark(kind); mark != "" {
+		return mark + " " + truncate(best, 46)
+	}
+	return truncate(best, 46)
 }
 
 func newFetcher(cfg *config.Config) *httpx.Client {
@@ -410,9 +413,8 @@ func cmdDeals(cfg *config.Config, stdout io.Writer, args []string) int {
 		if d.Meta["pushed"] == "true" {
 			pushed = "📣"
 		}
-		link, mark := presentedLink(d)
-		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s%s\t%s\n", d.Score, pushed, truncate(d.Source, 18),
-			truncate(d.Title, 52), mark, truncate(link, 46),
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\n", d.Score, pushed, truncate(d.Source, 18),
+			truncate(d.Title, 52), presentedLink(d),
 			d.DiscoveredAt.Local().Format("01-02 15:04"))
 		if shown++; shown >= *n {
 			break

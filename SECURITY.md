@@ -30,7 +30,7 @@ Deal-Hunter 是一个会**主动访问外部站点**并把结果**推送到你�
 | systemd 权限过大 | `NoNewPrivileges`、`ProtectSystem=strict`、`PrivateTmp`、`RestrictAddressFamilies`、空 `CapabilityBoundingSet` | 部署时 `systemd-analyze security deal-hunter` |
 | 误推无关/已过期内容 | 噪音词与过期截止时间直接丢弃 | `TestNoiseAndExpiryAreNeverStored` |
 | 把仿冒/钓鱼域名当成官方链接 | `internal/official` 只认人工精选的厂商域名表，子域必须落在白名单域内；`moonshot.cn.evil.test`、`evil-bigmodel.cn` 一律拒绝；改写前必须实测 2xx/3xx，**且跳转后的域名仍属该厂商** | `TestVendorForDomainPrefersLongestMatch`, `TestSearchOnlyAcceptsVendorOwnedHosts`, `TestRedirectOffAllowlistIsRejected`, `TestCanonicalForFollowsOfferKind`（校验每个精选页确属该厂商） |
-| 把厂商入口页冒充成活动证据 | 精选入口页只作为 `meta.vendor_url` 侧链（「去厂商官网核实」），既不替换主链接也不加分；只有用这条羊毛自己的关键词在厂商站内搜到并校验的页面才算定位到活动 | `TestEntryPageIsASideDoorNotAClaim`, `TestCardOffersVendorSiteWithoutClaimingIt`, `TestDeadEntryPageIsNotOffered` |
+| 把厂商入口页冒充成活动证据 | 精选入口页只作为 `meta.vendor_url` 侧链（「去官网核实」），既不替换主链接也不加分；只有用这条羊毛自己的关键词在厂商站内搜到并校验的页面才算定位到活动 | `TestEntryPageIsASideDoorNotAClaim`, `TestCardOffersVendorSiteWithoutClaimingIt`, `TestDeadEntryPageIsNotOffered` |
 | 把第三方转述伪装成官方公告 | 找不到厂商自有域名上的页面时保留原链接并标注 `third_party`，卡片与面板如实说明成色 | `TestCardKeepsUnverifiedLinkHonest`, `TestMissingDepsDegradeWithoutRewriting`, `TestUnknownVendorIsLeftAlone` |
 | 链接改写环节被用来打内网 | 只探测白名单厂商域名，出站仍走 `httpx` 的 SSRF 闸门；每轮探测次数受 `max_official_lookups` 限制 | `TestBlockedTargets`, `TestBudgetCapsLookups`, `TestVerdictIsReusedNextRound` |
 

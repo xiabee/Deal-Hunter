@@ -322,14 +322,14 @@ func TestConsoleRendersPlainText(t *testing.T) {
 
 func TestHeadlineAndIconChoices(t *testing.T) {
 	d := sampleDeal()
-	if got := Headline(&d); !strings.Contains(got, "免费羊毛") {
+	if got := Headline(&d); !strings.Contains(got, "🆓 免费") {
 		t.Errorf("Headline = %q", got)
 	}
 	paid := sampleDeal()
 	paid.IsFree = false
 	paid.DiscountPct = 70
 	paid.Category = model.CatDiscount
-	if got := Headline(&paid); !strings.Contains(got, "70% 折扣") {
+	if got := Headline(&paid); !strings.Contains(got, "70% off") {
 		t.Errorf("discount headline = %q", got)
 	}
 	if Icon(&paid) != "🏷️" {
@@ -383,7 +383,7 @@ func TestCardPresentsVerifiedOfficialPageFirst(t *testing.T) {
 		joined.Write(b)
 	}
 	body := joined.String()
-	if !strings.Contains(body, "已在厂商站内定位") {
+	if !strings.Contains(body, "官方页已校验") {
 		t.Errorf("the card must say the link was verified: %s", body)
 	}
 
@@ -459,9 +459,42 @@ func TestCardOffersVendorSiteWithoutClaimingIt(t *testing.T) {
 	if actions[1]["url"] != "https://open.bigmodel.cn/pricing" || !strings.Contains(site, "官网") {
 		t.Errorf("the entry page should be offered as a place to check: %v", actions[1])
 	}
-	b, _ := json.Marshal(f.card(NewMessage(KindAlert, "t", d)))
-	if strings.Contains(string(b), "官方入口（已校验）") {
-		t.Error("a side door must never be labelled a verified offer")
+	primary, _ := actions[0]["text"].(map[string]any)["content"].(string)
+	if primary != "查看原文" {
+		t.Errorf("an unconfirmed find must be labelled by what it is, got %q", primary)
+	}
+}
+
+// A batch alert must stay scannable on a lock screen: one line per deal, no
+// per-deal buttons, and no runaway text.
+func TestMultiDealAlertIsOneLinePerDeal(t *testing.T) {
+	f, _ := NewFeishu(config.Feishu{Timezone: "UTC"})
+	long := sampleDeal()
+	long.Title = strings.Repeat("限", 90) + " 免费额度"
+	long.Summary = strings.Repeat("很长的一段说明，", 30)
+	msg := NewMessage(KindAlert, "🧾 新羊毛 3 条", resolvedDeal(official.KindAlreadyOfficial, "https://openrouter.ai/x:free"), long, sampleDeal())
+	divs, actions, total := 0, 0, 0
+	for _, e := range cardElements(f.card(msg)) {
+		switch e["tag"] {
+		case "action":
+			actions++
+		case "div":
+			divs++
+			content := e["text"].(map[string]any)["content"].(string)
+			if strings.Contains(content, "\n") {
+				t.Errorf("a batch row must stay on one line: %q", content)
+			}
+			total += len([]rune(content))
+		}
+	}
+	if divs != 3 {
+		t.Errorf("expected exactly one row per deal, got %d", divs)
+	}
+	if actions != 0 {
+		t.Errorf("buttons belong to the one-deal layout, got %d", actions)
+	}
+	if total > 300 {
+		t.Errorf("the whole batch should stay brief, got %d characters", total)
 	}
 }
 

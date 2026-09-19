@@ -234,27 +234,26 @@ func (f *Feishu) card(m Message) map[string]any {
 	switch m.Kind {
 	case KindDigest:
 		for i := range m.Deals {
-			elements = append(elements, md(digestLine(&m.Deals[i])))
+			elements = append(elements, md(alertLine(&m.Deals[i])))
 		}
 	case KindTest:
 		elements = append(elements, md("链路自检成功：Deal-Hunter 已能写入该群。"))
 	default:
+		// One deal gets a short body plus buttons; several get one line each,
+		// because the only question at 3am is "do I tap this".
+		if len(m.Deals) == 1 {
+			elements = append(elements, singleDealBody(&m.Deals[0])...)
+			break
+		}
 		for i := range m.Deals {
-			elements = append(elements, md(dealBlock(&m.Deals[i])))
-			if actions := buttons(&m.Deals[i]); len(actions) > 0 {
-				elements = append(elements, map[string]any{
-					"tag":     "action",
-					"actions": actions,
-				})
-			}
+			elements = append(elements, md(alertLine(&m.Deals[i])))
 		}
 	}
 	elements = append(elements, map[string]any{
 		"tag": "note",
 		"elements": []map[string]any{{
-			"tag": "lark_md",
-			"content": fmt.Sprintf("Deal-Hunter · %s · 置信分 %s",
-				m.CreatedAt.In(f.tz).Format("01-02 15:04"), topScore(m)),
+			"tag":     "lark_md",
+			"content": "Deal-Hunter · " + m.CreatedAt.In(f.tz).Format("01-02 15:04"),
 		}},
 	})
 	return map[string]any{
@@ -265,6 +264,42 @@ func (f *Feishu) card(m Message) map[string]any {
 		},
 		"elements": elements,
 	}
+}
+
+// alertLine renders one deal as a single tappable line. The verdict is a mark,
+// not a sentence: the full reasoning lives in the panel and the API.
+func alertLine(d *model.Deal) string {
+	link, _, kind := LinkFor(d)
+	title := truncateRunes(strings.ReplaceAll(d.Title, "\n", " "), 42)
+	score := strconv.Itoa(d.Score)
+	if !strings.HasPrefix(link, "https://") {
+		return fmt.Sprintf("%s %s · **%s**", Icon(d), title, score)
+	}
+	return fmt.Sprintf("%s [%s](%s) · **%s**%s",
+		Icon(d), title, link, score, LinkMark(kind))
+}
+
+// singleDealBody is the one-deal layout: score, where the offer came from, and
+// at most one short quote.
+func singleDealBody(d *model.Deal) []map[string]any {
+	meta := []string{"置信分 **" + strconv.Itoa(d.Score) + "**"}
+	if len(d.Vendors) > 0 && !strings.Contains(d.Title, d.Vendors[0]) {
+		meta = append(meta, d.Vendors[0])
+	}
+	if d.DiscountPct > 0 {
+		meta = append(meta, fmt.Sprintf("%d%% off", d.DiscountPct))
+	}
+	if badge := LinkBadge(d.Meta[official.MetaLinkKind]); badge != "" {
+		meta = append(meta, badge)
+	}
+	out := []map[string]any{md(strings.Join(meta, " · "))}
+	if s := strings.TrimSpace(d.Summary); s != "" {
+		out = append(out, md("> "+truncateRunes(strings.ReplaceAll(s, "\n", " "), 90)))
+	}
+	if actions := buttons(d); len(actions) > 0 {
+		out = append(out, map[string]any{"tag": "action", "actions": actions})
+	}
+	return out
 }
 
 func (f *Feishu) title(m Message) string {
@@ -287,32 +322,6 @@ func md(content string) map[string]any {
 	}
 }
 
-func dealBlock(d *model.Deal) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "%s **%s**\n", Icon(d), truncateRunes(d.Title, 100))
-	meta := []string{fmt.Sprintf("置信分 **%d**", d.Score)}
-	if len(d.Vendors) > 0 {
-		meta = append(meta, "厂商 "+strings.Join(d.Vendors[:min(2, len(d.Vendors))], "/"))
-	}
-	if d.DiscountPct > 0 {
-		meta = append(meta, fmt.Sprintf("降幅 %d%%", d.DiscountPct))
-	}
-	if len(d.Tags) > 0 {
-		meta = append(meta, "#"+strings.Join(d.Tags[:min(3, len(d.Tags))], " #"))
-	}
-	b.WriteString(strings.Join(meta, " · ") + "\n")
-	if badge := LinkBadge(d.Meta[official.MetaLinkKind]); badge != "" {
-		b.WriteString(badge + "\n")
-	}
-	if s := strings.TrimSpace(d.Summary); s != "" {
-		b.WriteString("> " + truncateRunes(strings.ReplaceAll(s, "\n", " "), 260) + "\n")
-	}
-	if len(d.ScoreWhy) > 0 {
-		b.WriteString("📈 " + strings.Join(d.ScoreWhy[:min(3, len(d.ScoreWhy))], "，"))
-	}
-	return b.String()
-}
-
 // buttons renders the link ladder: the verified official page leads, the post we
 // found it in stays one tap away, and the vendor's own front door is offered
 // wherever the offer itself could not be confirmed.
@@ -320,9 +329,9 @@ func buttons(d *model.Deal) []map[string]any {
 	best, original, kind := LinkFor(d)
 	var out []map[string]any
 	if strings.HasPrefix(best, "https://") {
-		label := "查看原文 / 领取入口"
+		label := "查看原文"
 		if official.IsOfficialKind(kind) {
-			label = "官方入口（已校验）"
+			label = "官方入口"
 		}
 		out = append(out, button(label, best, "primary"))
 	}
@@ -330,7 +339,7 @@ func buttons(d *model.Deal) []map[string]any {
 		out = append(out, button("原始出处", original, "default"))
 	}
 	if site := VendorSite(d); site != "" && site != best && site != original && strings.HasPrefix(site, "https://") {
-		out = append(out, button("去厂商官网核实", site, "default"))
+		out = append(out, button("去官网核实", site, "default"))
 	}
 	return out
 }
@@ -342,31 +351,6 @@ func button(label, url, btnType string) map[string]any {
 		"url":  url,
 		"type": btnType,
 	}
-}
-
-func digestLine(d *model.Deal) string {
-	link, _, kind := LinkFor(d)
-	if link == "" {
-		link = "#"
-	}
-	suffix := ""
-	if kind == official.KindThirdParty {
-		suffix = " ⚠️"
-	}
-	return fmt.Sprintf("%s [%s](%s) — **%d**%s", Icon(d), truncateRunes(d.Title, 64), link, d.Score, suffix)
-}
-
-func topScore(m Message) string {
-	if len(m.Deals) == 0 {
-		return "-"
-	}
-	best := m.Deals[0].Score
-	for _, d := range m.Deals {
-		if d.Score > best {
-			best = d.Score
-		}
-	}
-	return strconv.Itoa(best)
 }
 
 // apiResponse is the shared envelope of Feishu Open API replies.
