@@ -611,7 +611,11 @@ func (a *App) SendDaily(ctx context.Context, now time.Time) error {
 	}
 	msg := notify.NewMessage(notify.KindDaily,
 		fmt.Sprintf("🌅 羊毛日报 · %d 条仍在效", len(live)), live...)
-	msg.Intro = now.In(a.loc()).Format("01月02日") + " · 未过期会再次出现"
+	// The intro answers the question the reader actually has at 09:00: is there
+	// anything new, or is yesterday still on the table?
+	daily := notify.SplitByAge(live, now)
+	msg.Intro = fmt.Sprintf("%s · 新增 %d · 持续 %d",
+		now.In(a.loc()).Format("01月02日"), len(daily.Fresh), len(daily.Ongoing))
 	if err := a.nf.Send(ctx, msg); err != nil {
 		return err
 	}

@@ -547,6 +547,47 @@ func TestDailyBriefingCardShowsLifespan(t *testing.T) {
 	}
 }
 
+// New since yesterday and merely still-open are different questions; the card
+// and the text fallback must both say which is which.
+func TestDailySplitsFreshFromOngoing(t *testing.T) {
+	now := time.Now().UTC()
+	fresh := sampleDeal()
+	fresh.Title = "今天刚发现的免费额度"
+	fresh.DiscoveredAt = now.Add(-2 * time.Hour)
+	stale := sampleDeal()
+	stale.Title = "上周开始的活动"
+	stale.DiscoveredAt = now.Add(-72 * time.Hour)
+
+	d := SplitByAge([]model.Deal{fresh, stale}, now)
+	if len(d.Fresh) != 1 || len(d.Ongoing) != 1 {
+		t.Fatalf("split = %d fresh / %d ongoing", len(d.Fresh), len(d.Ongoing))
+	}
+	secs := d.Sections()
+	if len(secs) != 2 || secs[0].Title != "🆕 今日新收录" || secs[1].Title != "⏳ 持续在效" {
+		t.Fatalf("sections = %+v", secs)
+	}
+
+	f, _ := NewFeishu(config.Feishu{Timezone: "UTC"})
+	mixed := NewMessage(KindDaily, "t", fresh, stale)
+	mixed.CreatedAt = now
+	b, _ := json.Marshal(f.card(mixed))
+	for _, want := range []string{"今日新收录", "持续在效", "今天刚发现的免费额度", "上周开始的活动"} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("card missing %q:\n%s", want, b)
+		}
+	}
+	// A briefing with nothing new must not advertise an empty section.
+	onlyNew := NewMessage(KindDaily, "t", fresh)
+	onlyNew.CreatedAt = now
+	b2, _ := json.Marshal(f.card(onlyNew))
+	if strings.Contains(string(b2), "持续在效") {
+		t.Errorf("empty section rendered:\n%s", b2)
+	}
+	if !strings.Contains(onlyNew.Plain(), "🆕 今日新收录") {
+		t.Errorf("text fallback lost its heading:\n%s", onlyNew.Plain())
+	}
+}
+
 func TestDigestAndPlainUseTheResolvedLink(t *testing.T) {
 	const officialURL = "https://open.bigmodel.cn/pricing"
 	d := resolvedDeal(official.KindSearchVerified, officialURL)

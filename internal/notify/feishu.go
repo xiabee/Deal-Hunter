@@ -233,8 +233,11 @@ func (f *Feishu) card(m Message) map[string]any {
 	}
 	switch m.Kind {
 	case KindDaily:
-		for i := range m.Deals {
-			elements = append(elements, md(dailyCardLine(&m.Deals[i], m.CreatedAt)))
+		for _, sec := range SplitByAge(m.Deals, m.CreatedAt).Sections() {
+			elements = append(elements, md("**"+sec.Title+"**"))
+			for i := range sec.Deals {
+				elements = append(elements, md(dailyCardLine(&sec.Deals[i], m.CreatedAt)))
+			}
 		}
 	case KindDigest:
 		for i := range m.Deals {

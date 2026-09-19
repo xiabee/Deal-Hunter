@@ -422,6 +422,9 @@ func TestDailyBriefingFollowsTheConfiguredZoneAndSendsOnce(t *testing.T) {
 	if len(m.Deals) != 1 || !strings.Contains(m.Deals[0].Title, "GLM") {
 		t.Fatalf("only the live offer belongs in the briefing: %+v", m.Deals)
 	}
+	if !strings.Contains(m.Intro, "新增 0 · 持续 1") {
+		t.Errorf("the intro should separate new from still-open: %q", m.Intro)
+	}
 	if !strings.Contains(notify.DailyLine(&m.Deals[0], at), "已收录 3 天") {
 		t.Error("the briefing must say how long the offer has been known")
 	}

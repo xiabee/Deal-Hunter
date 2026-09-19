@@ -66,7 +66,7 @@ scripts/               ci-local.{sh,ps1} 与 ci-office.sh
   `100.96.24.7` 这类假地址、`__PASTE_HERE__` 占位符），确需保留示例值时用 <!-- secretlint:ignore synthetic documentation example, not a real host -->
   `secretlint:ignore` + 理由，写在同一行
 - ❌ 用 `"abc" + "def"` 之类的拼接绕过扫描器：门禁会先把字面量拼回去再匹配，
-  而且真实值拆开也还是真实值——曾经就是这样把运维者的 Tailscale 地址留在了公开仓库里
+  而且真实值拆开也还是真实值——曾经就是这样把一个真实内网地址留在了源码里
 - ❌ 为了「测试通过」而放宽 `secretlint` 规则或跳过 `-race`
 - ❌ 引入第三方模块（确有必要时，请在 issue 里先讨论理由）
 - ❌ 无节流地抓取：请保持每 host 串行限频与合理轮询间隔

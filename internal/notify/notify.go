@@ -114,11 +114,16 @@ func (m Message) Plain() string {
 		b.WriteString(" — " + m.Intro)
 	}
 	b.WriteString("\n")
-	for i := range m.Deals {
-		if m.Kind == KindDaily {
-			b.WriteString("  " + DailyLine(&m.Deals[i], m.CreatedAt) + "\n")
-			continue
+	if m.Kind == KindDaily {
+		for _, sec := range SplitByAge(m.Deals, m.CreatedAt).Sections() {
+			b.WriteString("  " + sec.Title + "\n")
+			for i := range sec.Deals {
+				b.WriteString("    " + DailyLine(&sec.Deals[i], m.CreatedAt) + "\n")
+			}
 		}
+		return b.String()
+	}
+	for i := range m.Deals {
 		b.WriteString("  " + Line(&m.Deals[i]) + "\n")
 	}
 	return b.String()
@@ -142,6 +147,42 @@ func Line(d *model.Deal) string {
 // and when it ends, which is what a morning briefing is actually for.
 func DailyLine(d *model.Deal, now time.Time) string {
 	return strings.Join([]string{Line(d), Lifespan(d, now)}, " · ")
+}
+
+// Daily sections of a briefing, split by whether the reader has already seen it.
+// "Did I miss something" and "what is still open" are different questions, and a
+// flat list answers neither.
+type Daily struct{ Fresh, Ongoing []model.Deal }
+
+// SplitByAge buckets deals into arrived-since-yesterday and already-known.
+func SplitByAge(deals []model.Deal, now time.Time) Daily {
+	var out Daily
+	for i := range deals {
+		if !deals[i].DiscoveredAt.IsZero() && now.Sub(deals[i].DiscoveredAt) < 24*time.Hour {
+			out.Fresh = append(out.Fresh, deals[i])
+			continue
+		}
+		out.Ongoing = append(out.Ongoing, deals[i])
+	}
+	return out
+}
+
+// DailySection is one labelled block of the morning briefing.
+type DailySection struct {
+	Title string
+	Deals []model.Deal
+}
+
+// Sections names each bucket the way the card and the text fallback show them.
+func (d Daily) Sections() []DailySection {
+	var out []DailySection
+	if len(d.Fresh) > 0 {
+		out = append(out, DailySection{"🆕 今日新收录", d.Fresh})
+	}
+	if len(d.Ongoing) > 0 {
+		out = append(out, DailySection{"⏳ 持续在效", d.Ongoing})
+	}
+	return out
 }
 
 // Lifespan states how long the offer has been on record and when it ends, which

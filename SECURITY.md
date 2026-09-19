@@ -43,7 +43,7 @@ Telegram、Server酱、钉钉、JWT、DSN、URL 内嵌账号密码、`key: value
 
 扫描时会把**拼接的字面量先拼回去**再匹配：`"100.96.24." + "7"`、`"AKIA" + "<16位>"` <!-- secretlint:ignore synthetic documentation example, not a real host -->
 这类写法过去能躲过逐行匹配，现在不能。这条规则是被真实事故逼出来的——一个测试夹具
-用拼接藏起了运维者自己的 Tailscale 地址，源码里看不见，仓库里却已经是明文。
+用拼接藏起了一个真实内网地址，源码里看不见，检出后却是明文。
 
 ```bash
 go run ./cmd/dealhunter secretscan -C .     # 手工扫描
