@@ -36,16 +36,17 @@ if [[ "$PENDING" == "1" ]]; then
 	desc="the identity this commit would record"
 else
 	# Recent commits only, unless the caller names a range (e.g. `origin/main..HEAD`):
-	# a contributor's own branch history is theirs to keep.
+	# a contributor's own branch history is theirs to keep. The CI tarball has no
+	# `.git` at all, so a missing history is a pass, not a build failure.
+	git rev-parse --verify HEAD >/dev/null 2>&1 || {
+		echo "✓ commit identity scan: no git history here, nothing to check"
+		exit 0
+	}
 	if [[ -z "$RANGE" ]]; then
 		set -- x -3 HEAD
 		shift
 		desc="the last 3 commits"
 	else
-		git rev-parse --verify "${RANGE%%..*}" >/dev/null 2>&1 || {
-			echo "✓ commit identity scan: no history to compare"
-			exit 0
-		}
 		set -- x "$RANGE"
 		shift
 		desc="history under $RANGE"
