@@ -213,7 +213,7 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-let cat = '', shown = 24, all = [];
+let cat = '', shown = 24, all = [], seen = 0;
 const opened = new Set();
 
 const KIND_LABEL = {official:'厂商官方域名', search_verified:'官方页已校验', third_party:'第三方转述'};
@@ -307,7 +307,8 @@ async function loadDeals(){
   if (cat === 'official') deals = deals.filter(d => OFFICIAL_KINDS.has((d.meta||{}).link_kind));
   else if (cat === 'pushed') deals = deals.filter(d => (d.meta||{}).pushed === 'true');
   all = deals;
-  $('count').textContent = deals.length + ' 条';
+  // The API pages at 100; say so instead of implying that is the whole store.
+  $('count').textContent = deals.length + ' 条' + (seen > deals.length ? ' · 累计 ' + seen : '');
   paintDeals();
 }
 
@@ -371,7 +372,8 @@ async function loadStatus(){
   $('feishu').textContent = ok ? (s.feishu_mode || '就绪') : '未配置';
   $('dot-feishu').className = 'dot ' + (ok ? 'ok' : 'warn');
   const st = s.store || {};
-  $('k-seen').textContent = st.deals_seen ?? 0;
+  seen = st.deals_seen ?? 0;
+  $('k-seen').textContent = seen;
   $('k-seen-h').textContent = '最近 ' + (st.newest ? new Date(st.newest).toLocaleString('zh-CN') : '—');
   $('k-pushed').textContent = st.pushed ?? 0;
   $('k-pending').textContent = st.pending_alerts ?? 0;
