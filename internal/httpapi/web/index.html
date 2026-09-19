@@ -78,6 +78,9 @@
   .badge{padding:2px 8px;border-radius:7px;background:rgba(139,124,255,.14);color:#cfc9ff;font-size:11.5px}
   .badge.free{background:rgba(55,224,192,.14);color:#9ff0e0}
   .badge.off{background:rgba(255,190,85,.14);color:#ffd79a}
+  .badge.official{background:rgba(55,224,192,.18);color:#9ff0e0;border:1px solid rgba(55,224,192,.32)}
+  .badge.warn{background:rgba(255,255,255,.06);color:var(--dim2);border:1px dashed rgba(255,255,255,.18)}
+  .origin{font-size:11.5px;color:var(--dim2);margin-left:8px}
   .src{display:grid;grid-template-columns:1fr auto auto;gap:12px;align-items:center;padding:11px 16px;font-size:13.5px}
   .src + .src{border-top:1px solid var(--line)}
   .src .n{color:var(--txt)}
@@ -119,6 +122,7 @@
       <span class="chip" data-cat="ai_free" aria-pressed="false">🤖 AI 免费</span>
       <span class="chip" data-cat="discount" aria-pressed="false">🏷️ 折扣</span>
       <span class="chip" data-cat="resource" aria-pressed="false">📦 资源</span>
+      <span class="chip" data-cat="official" aria-pressed="false">✅ 已定位官方页</span>
       <span class="chip" data-cat="pushed" aria-pressed="false">📣 已推送</span>
       <div class="spacer"></div>
       <span class="num" id="count"></span>
@@ -157,20 +161,33 @@ async function j(path){
 
 function scoreClass(n){ return n >= 78 ? 'hi' : n >= 58 ? 'mid' : 'low'; }
 
+const KIND_LABEL = {official:'官方域名', vendor_entry:'官方入口页', search_verified:'官方页已校验', third_party:'第三方转述'};
+const OFFICIAL_KINDS = new Set(['official', 'vendor_entry', 'search_verified']);
+
 function dealRow(d){
+  const m = d.meta || {};
   const badges = [];
   if (d.is_free) badges.push('<span class="badge free">免费</span>');
   if (d.discount_pct) badges.push('<span class="badge off">' + d.discount_pct + '% off</span>');
+  if (m.link_kind && KIND_LABEL[m.link_kind]) {
+    const cls = m.link_kind === 'third_party' ? 'warn' : 'official';
+    badges.push('<span class="badge ' + cls + '">' + KIND_LABEL[m.link_kind] + '</span>');
+  }
   if (d.category) badges.push('<span class="badge">' + esc(d.category) + '</span>');
   (d.vendors || []).slice(0,2).forEach(v => badges.push('<span class="badge">' + esc(v) + '</span>'));
-  const link = d.url && /^https:\/\//.test(d.url)
-    ? '<a href="' + esc(d.url) + '" target="_blank" rel="noopener noreferrer nofollow">' + esc(d.title) + '</a>'
+  // The verified vendor page leads; the post it came from stays one click away.
+  const best = m.official_url || d.url || '';
+  const link = /^https:\/\//.test(best)
+    ? '<a href="' + esc(best) + '" target="_blank" rel="noopener noreferrer nofollow">' + esc(d.title) + '</a>'
     : esc(d.title);
+  const origin = (m.original_url && m.original_url !== best && /^https:\/\//.test(m.original_url))
+    ? '<a class="origin" href="' + esc(m.original_url) + '" target="_blank" rel="noopener noreferrer nofollow">原始出处</a>'
+    : '';
   const when = d.published_at ? new Date(d.published_at).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) : '';
-  const pushed = d.meta && d.meta.pushed === 'true' ? ' · 📣 已推送' : '';
+  const pushed = m.pushed === 'true' ? ' · 📣 已推送' : '';
   return '<div class="deal">' +
     '<div class="score ' + scoreClass(d.score) + '">' + d.score + '</div>' +
-    '<div><div class="t">' + link + '</div>' +
+    '<div><div class="t">' + link + origin + '</div>' +
     '<div class="meta">' + badges.join('') + '<span>' + esc(d.source) + '</span>' +
     (when ? '<span>' + when + '</span>' : '') + '<span>' + esc((d.tags||[]).slice(0,3).map(t=>'#'+t).join(' ')) + pushed + '</span></div>' +
     (d.summary ? '<div class="sum">' + esc(d.summary.slice(0,240)) + '</div>' : '') +
@@ -180,13 +197,15 @@ function dealRow(d){
 
 async function loadDeals(){
   const q = $('q').value.trim();
+  // 'official' and 'pushed' are meta-tags, not categories: filter client-side.
   let path;
-  if (cat === 'pushed') path = '/api/v1/deals?limit=100&min=0';
+  if (cat === 'pushed' || cat === 'official') path = '/api/v1/deals?limit=100&min=0';
   else path = '/api/v1/deals?limit=100&min=0' + (cat ? '&category=' + encodeURIComponent(cat) : '');
   if (q) path += '&q=' + encodeURIComponent(q);
   const data = await j(path);
   let deals = data.deals || [];
-  if (cat === 'pushed') deals = deals.filter(d => d.meta && d.meta.pushed === 'true');
+  if (cat === 'official') deals = deals.filter(d => OFFICIAL_KINDS.has((d.meta || {}).link_kind));
+  else if (cat === 'pushed') deals = deals.filter(d => d.meta && d.meta.pushed === 'true');
   $('count').textContent = deals.length + ' 条';
   $('deals').innerHTML = deals.length
     ? deals.map(dealRow).join('')
@@ -211,7 +230,10 @@ async function loadStatus(){
   if (lr){
     const dur = (new Date(lr.finished_at) - new Date(lr.started_at)) / 1000;
     $('k-dur').innerHTML = fmtDur(dur) + '<small> 用时</small>';
-    $('k-dur-h').textContent = '新增 ' + (lr.new_deals ?? 0) + ' · 推送 ' + (lr.pushed ?? 0) + ' · 错误 ' + ((lr.errors||[]).length);
+    const off = (lr.verified_official ?? 0), third = (lr.third_party_links ?? 0);
+    $('k-dur-h').textContent = '新增 ' + (lr.new_deals ?? 0) + ' · 推送 ' + (lr.pushed ?? 0) +
+      (off + third > 0 ? ' · 官方 ' + off + '/' + (off + third) : '') +
+      ' · 错误 ' + ((lr.errors||[]).length);
     const wait = (new Date(s.next_round_at) - Date.now()) / 1000;
     $('next').textContent = wait > 0 ? fmtDur(wait) : '即将';
     $('dot-run').className = 'dot ' + (wait > 0 ? 'ok' : 'warn');

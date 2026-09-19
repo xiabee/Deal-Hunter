@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/xiabee/deal-hunter/internal/model"
+	"github.com/xiabee/deal-hunter/internal/official"
 )
 
 // Kind selects the message template.
@@ -124,10 +125,44 @@ func Line(d *model.Deal) string {
 		parts = append(parts, d.Vendors[0])
 	}
 	parts = append(parts, d.Title)
-	if d.URL != "" {
-		parts = append(parts, d.URL)
+	if best, _, _ := linkInfo(d); best != "" {
+		parts = append(parts, best)
+	}
+	if badge := linkBadge(d.Meta[official.MetaLinkKind]); badge != "" {
+		parts = append(parts, badge)
 	}
 	return strings.Join(parts, " | ")
+}
+
+// linkInfo returns the URL worth clicking, the post it came from, and how the
+// link was classified. Deals collected before resolution simply point at
+// themselves.
+func linkInfo(d *model.Deal) (best, original, kind string) {
+	kind = d.Meta[official.MetaLinkKind]
+	best, original = d.URL, d.URL
+	if u := d.Meta[official.MetaOfficialURL]; u != "" {
+		best = u
+	}
+	if u := d.Meta[official.MetaOriginalURL]; u != "" {
+		original = u
+	}
+	return best, original, kind
+}
+
+// linkBadge tells the user how much to trust the link, so a third-party retelling
+// never looks like a confirmed vendor announcement.
+func linkBadge(kind string) string {
+	switch kind {
+	case official.KindAlreadyOfficial:
+		return "✅ 厂商官方域名"
+	case official.KindVendorEntry:
+		return "✅ 已定位并校验厂商入口页"
+	case official.KindSearchVerified:
+		return "✅ 已定位并校验厂商官方页"
+	case official.KindThirdParty:
+		return "⚠️ 第三方转述，未找到官方页"
+	}
+	return ""
 }
 
 // Icon maps a category to an emoji used in cards and digests.

@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/xiabee/deal-hunter/internal/model"
 )
@@ -95,19 +96,25 @@ func (sr *Search) Fetch(ctx context.Context) ([]*model.Deal, error) {
 	return limit(out, sr.Cfg.Limit), nil
 }
 
-type searchHit struct {
+type SearchHit struct {
 	Title   string
 	URL     string
 	Snippet string
 }
 
 // parseSearchResults tolerates both attribute orders DuckDuckGo has shipped.
-func parseSearchResults(body string) []searchHit {
+// ParseSearchResults exposes the tolerant result parser used by the search kind,
+// so the official-link resolver can reuse it.
+func ParseSearchResults(body string) []SearchHit {
+	return parseSearchResults(body)
+}
+
+func parseSearchResults(body string) []SearchHit {
 	blocks := ddgHrefFirst.FindAllStringSubmatch(body, -1)
 	if len(blocks) == 0 {
 		blocks = ddgClassFirst.FindAllStringSubmatch(body, -1)
 	}
-	var hits []searchHit
+	var hits []SearchHit
 	for _, b := range blocks {
 		href := unwrapProxyHref(b[1])
 		title := cleanText(b[2])
@@ -118,7 +125,7 @@ func parseSearchResults(body string) []searchHit {
 		if m := ddgSnippet.FindStringSubmatch(after(body, b[0])); m != nil {
 			snippet = cleanText(m[1])
 		}
-		hits = append(hits, searchHit{Title: title, URL: href, Snippet: snippet})
+		hits = append(hits, SearchHit{Title: title, URL: href, Snippet: snippet})
 	}
 	return hits
 }
@@ -176,4 +183,47 @@ func atoiDefault(s string, def int) int {
 		return n
 	}
 	return def
+}
+
+// HTTPSearcher runs one ad-hoc query against the HTML search endpoint. It is
+// used by the official-link resolver, not by a configured source.
+type HTTPSearcher struct {
+	HTTP     Fetcher
+	Endpoint string
+	Headers  map[string]string
+	Timeout  time.Duration
+}
+
+// Search returns result URLs in rank order.
+func (h HTTPSearcher) Search(ctx context.Context, query string) ([]string, error) {
+	endpoint := h.Endpoint
+	if endpoint == "" {
+		endpoint = "https://lite.duckduckgo.com/lite/"
+	}
+	sep := "?"
+	if strings.Contains(endpoint, "?") {
+		sep = "&"
+	}
+	full := endpoint + sep + "q=" + url.QueryEscape(query)
+	to := h.Timeout
+	if to <= 0 {
+		to = 25 * time.Second
+	}
+	c, cancel := context.WithTimeout(ctx, to)
+	defer cancel()
+	resp, err := h.HTTP.Get(c, full, h.Headers)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Status < 200 || resp.Status > 299 {
+		return nil, fmt.Errorf("search endpoint returned HTTP %d", resp.Status)
+	}
+	hits := ParseSearchResults(string(resp.Body))
+	out := make([]string, 0, len(hits))
+	for _, hit := range hits {
+		if hit.URL != "" {
+			out = append(out, hit.URL)
+		}
+	}
+	return out, nil
 }

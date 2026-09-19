@@ -19,6 +19,7 @@ import (
 	"github.com/xiabee/deal-hunter/internal/keywords"
 	"github.com/xiabee/deal-hunter/internal/model"
 	"github.com/xiabee/deal-hunter/internal/notify"
+	"github.com/xiabee/deal-hunter/internal/official"
 	"github.com/xiabee/deal-hunter/internal/redact"
 	"github.com/xiabee/deal-hunter/internal/scoring"
 	"github.com/xiabee/deal-hunter/internal/sources"
@@ -45,8 +46,24 @@ type Run struct {
 	Stored     int            `json:"stored"`
 	Pushed     int            `json:"pushed"`
 	HeldQuiet  int            `json:"held_quiet"`
+	Verified   int            `json:"verified_official"`
+	ThirdParty int            `json:"third_party_links"`
 	Sources    []SourceReport `json:"sources"`
 	Errors     []string       `json:"errors,omitempty"`
+}
+
+// prober confirms a candidate official page really answers, so we never rewrite
+// a link to a URL that 404s.
+type prober struct{ cli sources.Fetcher }
+
+func (p prober) OK(ctx context.Context, rawURL string) (string, bool) {
+	c, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	resp, err := p.cli.Get(c, rawURL, nil)
+	if err != nil || resp == nil {
+		return "", false
+	}
+	return resp.FinalURL, resp.Status >= 200 && resp.Status < 400
 }
 
 func (r *Run) duration() time.Duration {
@@ -67,6 +84,7 @@ type App struct {
 	relay *notify.OpenClawRelay
 	log   *slog.Logger
 	drop  string
+	off   *official.Resolver
 
 	mu      sync.Mutex
 	runs    []*Run
@@ -117,6 +135,14 @@ func New(cfg *config.Config, log *slog.Logger, opts ...Option) (*App, error) {
 	for _, opt := range opts {
 		opt(a)
 	}
+	a.off = official.NewResolver(prober{cli: a.cli}, sources.HTTPSearcher{
+		HTTP:     a.cli,
+		Endpoint: "https://lite.duckduckgo.com/lite/",
+		Headers:  map[string]string{"User-Agent": cfg.HTTP.UserAgent},
+		Timeout:  25 * time.Second,
+	}, st, log)
+	a.off.SetBudget(cfg.Filter.MaxOfficialLookups)
+
 	var backends []notify.Notifier
 	if cfg.Notify.Feishu.Enabled {
 		fs, err := notify.NewFeishu(cfg.Notify.Feishu)
@@ -227,7 +253,7 @@ func (a *App) RunOnce(ctx context.Context, trigger string) (*Run, error) {
 		byName[s.Name] = s
 	}
 
-	var candidates []model.Deal
+	var candidates []*model.Deal
 	for _, oc := range outcomes {
 		rep := SourceReport{Name: oc.cfg.Name, Kind: oc.cfg.Kind, Found: len(oc.deals), Ms: oc.ms}
 		if oc.err != nil {
@@ -250,12 +276,27 @@ func (a *App) RunOnce(ctx context.Context, trigger string) (*Run, error) {
 			}
 			run.Stored++
 			if push {
-				candidates = append(candidates, *d)
+				candidates = append(candidates, d)
 			}
 		}
 		run.Sources = append(run.Sources, rep)
 	}
 
+	// Resolve links to official, verified vendor pages first, then rank: a
+	// community post that we could not tie back to the vendor is worth less than
+	// a confirmed official page, and that must affect which few alerts fire.
+	run.Verified = a.off.Apply(ctx, candidates)
+	for _, d := range candidates {
+		// Persist the resolved link, else the dashboard, the digest and the
+		// OpenClaw pull would keep showing the community post the alert replaced.
+		if err := a.st.Save(d); err != nil {
+			a.log.Warn("persist resolved link", "err", err)
+		}
+		if official.IsOfficialKind(d.Meta[official.MetaLinkKind]) {
+			continue
+		}
+		run.ThirdParty++
+	}
 	sort.SliceStable(candidates, func(i, j int) bool {
 		if candidates[i].Score != candidates[j].Score {
 			return candidates[i].Score > candidates[j].Score
@@ -273,8 +314,12 @@ func (a *App) RunOnce(ctx context.Context, trigger string) (*Run, error) {
 			run.HeldQuiet = len(candidates)
 			a.log.Info("quiet hours: holding alerts for the digest", "count", len(candidates))
 		} else {
-			msg := notify.NewMessage(notify.KindAlert, alertTitle(candidates), candidates...)
-			msg.Intro = fmt.Sprintf("本轮新增 %d 条高价值羊毛", len(candidates))
+			vals := make([]model.Deal, 0, len(candidates))
+			for _, d := range candidates {
+				vals = append(vals, *d)
+			}
+			msg := notify.NewMessage(notify.KindAlert, alertTitle(vals), vals...)
+			msg.Intro = fmt.Sprintf("本轮新增 %d 条高价值羊毛（%d 条已定位到官方页并校验）", len(candidates), run.Verified)
 			if err := a.nf.Send(ctx, msg); err != nil {
 				deliverErr = err
 				run.Errors = append(run.Errors, err.Error())
@@ -298,7 +343,8 @@ func (a *App) RunOnce(ctx context.Context, trigger string) (*Run, error) {
 	}
 	a.log.Info("round complete", "trigger", trigger, "sources", len(run.Sources),
 		"new", run.NewDeals, "stored", run.Stored, "pushed", run.Pushed,
-		"held_quiet", run.HeldQuiet, "errors", len(run.Errors), "took", run.duration().Round(time.Millisecond))
+		"held_quiet", run.HeldQuiet, "verified_official", run.Verified,
+		"third_party", run.ThirdParty, "errors", len(run.Errors), "took", run.duration().Round(time.Millisecond))
 	return run, errors.Join(append(a.collectSourceErrors(outcomes), deliverErr)...)
 }
 

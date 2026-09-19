@@ -155,6 +155,8 @@ type Filter struct {
 	DenyKeywords    []string `json:"deny_keywords,omitempty"`
 	AllowKeywords   []string `json:"allow_keywords,omitempty"`
 	RequireKeywords []string `json:"require_keywords,omitempty"`
+	// MaxOfficialLookups bounds the per-round work spent verifying official links.
+	MaxOfficialLookups int `json:"max_official_lookups,omitempty"`
 }
 
 // Config is the whole application configuration.
@@ -217,9 +219,10 @@ func Default() *Config {
 		},
 		Server: Server{Enabled: true, Bind: "127.0.0.1:8765"},
 		Filter: Filter{
-			MinScore:     55,
-			MaxAgeHours:  24 * 14,
-			RequireOffer: true,
+			MinScore:           55,
+			MaxAgeHours:        24 * 14,
+			RequireOffer:       true,
+			MaxOfficialLookups: 10,
 		},
 		Notify: Notify{
 			Feishu:   Feishu{Enabled: true, MinScore: 62, MaxPerRun: 6, DeduplicateMinutes: 90, Timezone: "Asia/Shanghai"},

@@ -19,6 +19,7 @@ import (
 
 	"github.com/xiabee/deal-hunter/internal/config"
 	"github.com/xiabee/deal-hunter/internal/model"
+	"github.com/xiabee/deal-hunter/internal/official"
 )
 
 func sampleDeal() model.Deal {
@@ -358,3 +359,93 @@ type failingNotifier struct{ err error }
 
 func (f *failingNotifier) Name() string                        { return "failing" }
 func (f *failingNotifier) Send(context.Context, Message) error { return f.err }
+
+// resolvedDeal is what a deal looks like after the link ladder found its vendor.
+func resolvedDeal(kind, officialURL string) model.Deal {
+	d := sampleDeal()
+	d.Meta = map[string]string{
+		official.MetaLinkKind:    kind,
+		official.MetaOfficialURL: officialURL,
+		official.MetaOriginalURL: d.URL,
+	}
+	return d
+}
+
+func TestCardPresentsVerifiedOfficialPageFirst(t *testing.T) {
+	f, _ := NewFeishu(config.Feishu{Timezone: "UTC"})
+	const officialURL = "https://open.bigmodel.cn/pricing"
+	m := NewMessage(KindAlert, "t", resolvedDeal(official.KindVendorEntry, officialURL))
+	elements := cardElements(f.card(m))
+
+	var joined strings.Builder
+	for _, e := range elements {
+		b, _ := json.Marshal(e)
+		joined.Write(b)
+	}
+	body := joined.String()
+	if !strings.Contains(body, "已定位并校验厂商入口页") {
+		t.Errorf("the card must say the link was verified: %s", body)
+	}
+
+	var actions []map[string]any
+	for _, e := range elements {
+		if e["tag"] == "action" {
+			raw, _ := json.Marshal(e["actions"])
+			_ = json.Unmarshal(raw, &actions)
+		}
+	}
+	if len(actions) != 2 {
+		t.Fatalf("expected an official button plus the original post, got %d: %v", len(actions), actions)
+	}
+	if actions[0]["url"] != officialURL || actions[0]["type"] != "primary" {
+		t.Errorf("the verified vendor page must be the primary action: %v", actions[0])
+	}
+	label, _ := actions[0]["text"].(map[string]any)["content"].(string)
+	if !strings.Contains(label, "官方入口") {
+		t.Errorf("primary button label = %q", label)
+	}
+	if actions[1]["url"] != "https://example.com/glm-free" {
+		t.Errorf("the community post must stay reachable: %v", actions[1])
+	}
+}
+
+func TestCardKeepsUnverifiedLinkHonest(t *testing.T) {
+	f, _ := NewFeishu(config.Feishu{Timezone: "UTC"})
+	d := sampleDeal() // no resolution metadata at all
+	b, _ := json.Marshal(f.card(NewMessage(KindAlert, "t", d)))
+	body := string(b)
+	if strings.Contains(body, "官方入口") {
+		t.Error("an unresolved link must not be dressed up as official")
+	}
+	if !strings.Contains(body, "查看原文") {
+		t.Error("the original post should still be offered")
+	}
+	third := resolvedDeal(official.KindThirdParty, d.URL)
+	elements := cardElements(f.card(NewMessage(KindAlert, "t", third)))
+	var joined strings.Builder
+	for _, e := range elements {
+		b, _ := json.Marshal(e)
+		joined.Write(b)
+	}
+	if !strings.Contains(joined.String(), "第三方转述") {
+		t.Errorf("a third-party retelling must be labelled: %s", joined.String())
+	}
+}
+
+func TestDigestAndPlainUseTheResolvedLink(t *testing.T) {
+	const officialURL = "https://open.bigmodel.cn/pricing"
+	d := resolvedDeal(official.KindSearchVerified, officialURL)
+	line := Line(&d)
+	if !strings.Contains(line, officialURL) {
+		t.Errorf("plain line should carry the vendor link: %q", line)
+	}
+	if !strings.Contains(line, "官方页") {
+		t.Errorf("plain line should state the verdict: %q", line)
+	}
+	digest := NewMessage(KindDigest, "d", d)
+	f, _ := NewFeishu(config.Feishu{Timezone: "UTC"})
+	b, _ := json.Marshal(f.card(digest))
+	if !strings.Contains(string(b), officialURL) {
+		t.Errorf("digest rows should link the vendor page: %s", b)
+	}
+}

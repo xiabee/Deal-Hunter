@@ -18,6 +18,7 @@ import (
 
 	"github.com/xiabee/deal-hunter/internal/config"
 	"github.com/xiabee/deal-hunter/internal/model"
+	"github.com/xiabee/deal-hunter/internal/official"
 )
 
 // Feishu pushes to a chat either through a group custom-bot webhook or through
@@ -240,15 +241,10 @@ func (f *Feishu) card(m Message) map[string]any {
 	default:
 		for i := range m.Deals {
 			elements = append(elements, md(dealBlock(&m.Deals[i])))
-			if url := m.Deals[i].URL; strings.HasPrefix(url, "https://") {
+			if actions := buttons(&m.Deals[i]); len(actions) > 0 {
 				elements = append(elements, map[string]any{
-					"tag": "action",
-					"actions": []map[string]any{{
-						"tag":  "button",
-						"text": map[string]any{"tag": "plain_text", "content": "查看原文 / 领取入口"},
-						"url":  url,
-						"type": "primary",
-					}},
+					"tag":     "action",
+					"actions": actions,
 				})
 			}
 		}
@@ -305,6 +301,9 @@ func dealBlock(d *model.Deal) string {
 		meta = append(meta, "#"+strings.Join(d.Tags[:min(3, len(d.Tags))], " #"))
 	}
 	b.WriteString(strings.Join(meta, " · ") + "\n")
+	if badge := linkBadge(d.Meta[official.MetaLinkKind]); badge != "" {
+		b.WriteString(badge + "\n")
+	}
 	if s := strings.TrimSpace(d.Summary); s != "" {
 		b.WriteString("> " + truncateRunes(strings.ReplaceAll(s, "\n", " "), 260) + "\n")
 	}
@@ -314,12 +313,44 @@ func dealBlock(d *model.Deal) string {
 	return b.String()
 }
 
+// buttons renders the link ladder: the verified official page leads, and the
+// post we found it in stays one tap away so nothing is hidden.
+func buttons(d *model.Deal) []map[string]any {
+	best, original, kind := linkInfo(d)
+	var out []map[string]any
+	if strings.HasPrefix(best, "https://") {
+		label, btnType := "查看原文 / 领取入口", "primary"
+		if official.IsOfficialKind(kind) {
+			label = "官方入口（已校验）"
+		}
+		out = append(out, map[string]any{
+			"tag":  "button",
+			"text": map[string]any{"tag": "plain_text", "content": label},
+			"url":  best,
+			"type": btnType,
+		})
+	}
+	if original != best && strings.HasPrefix(original, "https://") {
+		out = append(out, map[string]any{
+			"tag":  "button",
+			"text": map[string]any{"tag": "plain_text", "content": "原始出处"},
+			"url":  original,
+			"type": "default",
+		})
+	}
+	return out
+}
+
 func digestLine(d *model.Deal) string {
-	link := d.URL
+	link, _, kind := linkInfo(d)
 	if link == "" {
 		link = "#"
 	}
-	return fmt.Sprintf("%s [%s](%s) — **%d**", Icon(d), truncateRunes(d.Title, 64), link, d.Score)
+	suffix := ""
+	if kind == official.KindThirdParty {
+		suffix = " ⚠️"
+	}
+	return fmt.Sprintf("%s [%s](%s) — **%d**%s", Icon(d), truncateRunes(d.Title, 64), link, d.Score, suffix)
 }
 
 func topScore(m Message) string {
