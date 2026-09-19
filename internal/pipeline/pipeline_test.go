@@ -196,8 +196,9 @@ func TestRunOnceStoresScoresAndAlertsOnce(t *testing.T) {
 // card.
 func TestRunOnceRewritesLinksToOfficialPages(t *testing.T) {
 	const (
-		entry = "https://open.bigmodel.cn/pricing"
-		found = "https://open.bigmodel.cn/pricing/glm-free"
+		entry       = "https://open.bigmodel.cn/pricing"
+		found       = "https://open.bigmodel.cn/pricing/glm-free"
+		aliyunEntry = "https://www.aliyun.com/price/detail"
 	)
 	searchBody := []byte("<html><body>" +
 		"<a href=\"https://linux.do/t/9\" class='result-link'>别人也在说</a>" +
@@ -205,9 +206,10 @@ func TestRunOnceRewritesLinksToOfficialPages(t *testing.T) {
 		"</body></html>")
 	f := &cannedFetcher{
 		byURL: map[string][]byte{
-			feedURL: feedBody(t),
-			entry:   []byte("<html>智谱价格</html>"),
-			found:   []byte("<html>GLM 免费额度</html>"),
+			feedURL:     feedBody(t),
+			entry:       []byte("<html>智谱价格</html>"),
+			found:       []byte("<html>GLM 免费额度</html>"),
+			aliyunEntry: []byte("<html>阿里云价格</html>"),
 		},
 		byPrefix: map[string][]byte{"https://lite.duckduckgo.com/lite/": searchBody},
 	}
@@ -220,8 +222,8 @@ func TestRunOnceRewritesLinksToOfficialPages(t *testing.T) {
 	if run.Verified == 0 {
 		t.Fatalf("a vendor page answered, so something must be verified: %+v", run)
 	}
-	if f.count(entry) == 0 {
-		t.Error("the entry page should be probed as a side door")
+	if f.count(entry) != 0 {
+		t.Error("a deal already pointing at a verified vendor page needs no side door")
 	}
 
 	var alerted *model.Deal
@@ -244,8 +246,28 @@ func TestRunOnceRewritesLinksToOfficialPages(t *testing.T) {
 	if got := alerted.Meta[official.MetaLinkKind]; got != official.KindSearchVerified {
 		t.Errorf("link_kind = %q, want %q", got, official.KindSearchVerified)
 	}
-	if got := alerted.Meta[official.MetaVendorURL]; got != entry {
-		t.Errorf("vendor_url = %q, want the entry page", got)
+	if got := alerted.Meta[official.MetaVendorURL]; got != "" {
+		t.Errorf("no side door is needed once a vendor page is presented, got %q", got)
+	}
+	// A deal we could not confirm keeps its own link and merely gains the
+	// vendor's front door as a place to check.
+	var second *model.Deal
+	for i := range msgs[0].Deals {
+		if strings.Contains(msgs[0].Deals[i].Title, "Qwen") {
+			second = &msgs[0].Deals[i]
+		}
+	}
+	if second == nil {
+		t.Fatal("the Qwen deal was not alerted")
+	}
+	if got := second.Meta[official.MetaLinkKind]; got != official.KindThirdParty {
+		t.Errorf("link_kind = %q, want third_party", got)
+	}
+	if got := second.Meta[official.MetaOfficialURL]; got != second.URL {
+		t.Errorf("the post itself must remain the presented link, got %q", got)
+	}
+	if got := second.Meta[official.MetaVendorURL]; got != aliyunEntry {
+		t.Errorf("vendor_url = %q, want the entry page %q", got, aliyunEntry)
 	}
 	if got := alerted.Meta[official.MetaOriginalURL]; got != "https://www.example.com/news/glm-free" {
 		t.Errorf("the original post must be recorded, got %q", got)

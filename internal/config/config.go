@@ -156,6 +156,8 @@ type Filter struct {
 	AllowKeywords   []string `json:"allow_keywords,omitempty"`
 	RequireKeywords []string `json:"require_keywords,omitempty"`
 	// MaxOfficialLookups bounds the per-round work spent verifying official links.
+	// A deal costs at most three lookups (vendor search, page probe, entry page),
+	// and verdicts are cached for a week, so this only bites on a cold start.
 	MaxOfficialLookups int `json:"max_official_lookups,omitempty"`
 }
 
@@ -222,7 +224,7 @@ func Default() *Config {
 			MinScore:           55,
 			MaxAgeHours:        24 * 14,
 			RequireOffer:       true,
-			MaxOfficialLookups: 10,
+			MaxOfficialLookups: 16,
 		},
 		Notify: Notify{
 			Feishu:   Feishu{Enabled: true, MinScore: 62, MaxPerRun: 6, DeduplicateMinutes: 90, Timezone: "Asia/Shanghai"},

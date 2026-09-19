@@ -250,7 +250,7 @@ flowchart TD
 | **不被跳转带偏** | 跳转后的域名必须**仍然属于该厂商**；`anthropic.com/pricing → claude.com` 之外的促销页一律拒绝 |
 | 入口页不冒充证据 | 精选入口页只作为「去官网核实」的侧链，永远不会成为主链接，也不加分 |
 | 检索用这条羊毛的词 | 只有拿模型名/offer 说法在厂商站内搜到的页面，才算「定位到了这个活动」 |
-| 不无限外连 | 每轮预算 `filter.max_official_lookups`（默认 10 次），用完如实标注且不扣分 |
+| 不无限外连 | 每轮预算 `filter.max_official_lookups`（默认 16 次），用完如实标注且不扣分 |
 | 不反复打扰上游 | 判定与探测结果各缓存 7 天；厂商自有域名的记录一条都不查 |
 | 不掩盖出处 | `d.URL` 永不被覆盖，官方链接写在 `meta.official_url`，原始帖在 `meta.original_url`，入口页在 `meta.vendor_url` |
 

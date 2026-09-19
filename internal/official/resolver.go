@@ -74,7 +74,7 @@ func NewResolver(probe Prober, s Searcher, c Cache, log *slog.Logger) *Resolver 
 		log = slog.Default()
 	}
 	return &Resolver{probe: probe, search: s, cache: c, log: log,
-		ttl: 7 * 24 * time.Hour, maxLookups: 10}
+		ttl: 7 * 24 * time.Hour, maxLookups: 16}
 }
 
 // SetBudget caps how much verification work one round may do.
@@ -126,9 +126,6 @@ func (r *Resolver) applyOne(ctx context.Context, d *model.Deal, lookups *int) bo
 		setLabel(d, d.URL, KindThirdParty, "no-vendor")
 		return false
 	}
-	// The vendor's front door is attached to every verdict below: it is a place
-	// to check, not evidence, so it never replaces the presented link.
-	r.attachVendorSite(ctx, d, vendor, lookups)
 
 	// Cached verdict from an earlier round.
 	if v, ok := r.cached(d.Fingerprint); ok && time.Since(v.At) < r.ttl && v.URL != "" {
@@ -137,6 +134,7 @@ func (r *Resolver) applyOne(ctx context.Context, d *model.Deal, lookups *int) bo
 			r.bump(d, bonusVerified, "已校验的官方链接（缓存）")
 			return true
 		}
+		r.attachVendorSite(ctx, d, vendor, lookups)
 		r.bump(d, -penaltyThirdParty, "仅第三方来源，未定位到官方页")
 		return false
 	}
@@ -147,14 +145,15 @@ func (r *Resolver) applyOne(ctx context.Context, d *model.Deal, lookups *int) bo
 
 	// Rung 2: search the vendor's own domain with *this deal's words* — the model
 	// name, the offer wording — and verify the page answers. This is the only
-	// rewrite that claims to have found the offer itself.
+	// rewrite that claims to have found the offer itself, so it goes first: the
+	// side door below is a nicety and must not starve it of budget.
 	if r.search == nil {
-		r.unresolved(d, "no-search", 0)
+		r.unresolved(ctx, d, vendor, lookups, "no-search", 0)
 		return false
 	}
 	q, ok := searchQueryFor(vendor, d)
 	if !ok {
-		r.unresolved(d, "no-query", penaltyThirdParty)
+		r.unresolved(ctx, d, vendor, lookups, "no-query", penaltyThirdParty)
 		return false
 	}
 	*lookups++
@@ -165,7 +164,7 @@ func (r *Resolver) applyOne(ctx context.Context, d *model.Deal, lookups *int) bo
 		if !errors.Is(err, context.Canceled) {
 			r.log.Debug("official: search failed", "vendor", vendor, "err", err)
 		}
-		r.unresolved(d, "search-unavailable", 0)
+		r.unresolved(ctx, d, vendor, lookups, "search-unavailable", 0)
 		return false
 	}
 	for _, h := range hits {
@@ -188,7 +187,7 @@ func (r *Resolver) applyOne(ctx context.Context, d *model.Deal, lookups *int) bo
 		return true
 	}
 
-	r.unresolved(d, "unresolved", penaltyThirdParty)
+	r.unresolved(ctx, d, vendor, lookups, "unresolved", penaltyThirdParty)
 	return false
 }
 
@@ -229,7 +228,10 @@ func searchQueryFor(vendor string, d *model.Deal) (string, bool) {
 	return kw + " site:" + strings.Join(domains, " site:"), true
 }
 
-func (r *Resolver) unresolved(d *model.Deal, by string, penalty int) {
+func (r *Resolver) unresolved(ctx context.Context, d *model.Deal, vendor string, lookups *int, by string, penalty int) {
+	// Nothing confirmed the offer, but the vendor's front door is still worth
+	// offering as the place to check.
+	r.attachVendorSite(ctx, d, vendor, lookups)
 	r.store(d.Fingerprint, d.URL, KindThirdParty, by)
 	setLabel(d, d.URL, KindThirdParty, by)
 	if penalty > 0 {
