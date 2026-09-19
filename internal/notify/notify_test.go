@@ -236,9 +236,18 @@ func TestFileDropWritesArtifacts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"测试标题", "GLM-5.3-flash", "https://example.com/glm-free", "置信分"} {
+	for _, want := range []string{"测试标题", "GLM-5.3-flash", "https://example.com/glm-free", "**92**"} {
 		if !strings.Contains(string(md), want) {
 			t.Errorf("markdown missing %q:\n%s", want, md)
+		}
+	}
+	// The markdown is a digest of the alert, not a duplicate of the record.
+	if lines := strings.Count(strings.TrimSpace(string(md)), "\n"); lines > 5 {
+		t.Errorf("markdown should stay a few lines, got %d:\n%s", lines+1, md)
+	}
+	for _, omit := range []string{"置信分：", "厂商：", "发布：", "评分理由"} {
+		if strings.Contains(string(md), omit) {
+			t.Errorf("markdown should not spell out %q", omit)
 		}
 	}
 	var payload map[string]any

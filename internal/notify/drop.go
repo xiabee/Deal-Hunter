@@ -88,24 +88,17 @@ func renderMarkdown(m Message) string {
 	if m.Intro != "" {
 		fmt.Fprintf(&b, "%s\n\n", m.Intro)
 	}
-	fmt.Fprintf(&b, "_生成时间 %s · 共 %d 条_\n\n", m.CreatedAt.Format(time.RFC3339), len(m.Deals))
+	fmt.Fprintf(&b, "_%s · %d 条_\n\n", m.CreatedAt.Format("2006-01-02 15:04 UTC"), len(m.Deals))
+	// Same one-line shape as the card: everything else is in latest.json.
 	for i := range m.Deals {
 		d := &m.Deals[i]
-		fmt.Fprintf(&b, "## %s %s\n\n", Icon(d), d.Title)
-		fmt.Fprintf(&b, "- 置信分：**%d** · 来源：`%s`\n", d.Score, d.Source)
-		if len(d.Vendors) > 0 {
-			fmt.Fprintf(&b, "- 厂商：%s\n", strings.Join(d.Vendors, "、"))
-		}
-		if d.URL != "" {
-			fmt.Fprintf(&b, "- 链接：%s\n", d.URL)
-		}
-		if !d.PublishedAt.IsZero() {
-			fmt.Fprintf(&b, "- 发布：%s\n", d.PublishedAt.Format("2006-01-02 15:04 MST"))
+		fmt.Fprintf(&b, "- %s · `%s`\n", alertLine(d), d.Source)
+		if site := VendorSite(d); site != "" {
+			fmt.Fprintf(&b, "  官网：%s\n", site)
 		}
 		if s := strings.TrimSpace(d.Summary); s != "" {
-			fmt.Fprintf(&b, "\n> %s\n", strings.ReplaceAll(s, "\n", " "))
+			fmt.Fprintf(&b, "  > %s\n", truncateRunes(strings.ReplaceAll(s, "\n", " "), 140))
 		}
-		b.WriteString("\n")
 	}
 	return b.String()
 }

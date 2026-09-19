@@ -38,9 +38,13 @@ curl -s http://127.0.0.1:8765/api/v1/status | head -40
 
 ## 回答建议话术
 
-> 「刚看到 {count} 条新羊毛，最值得领的是：{title}（置信分 {score}），入口 {url}，{summary}」
+一句话一条，别复述整段摘要：
+
+> 「{title}｜置信 {score}｜{meta.official_url 优先，否则 url}｜{meta.link_kind 为
+> official/search_verified 时说「官方页已校验」，third_party 说「第三方转述」}」
 
 - 只报**有链接、有分数**的条目；分数低于 60 的默认不提。
+- `meta.vendor_url` 只是厂商官网入口，**不代表**该活动被官方证实，别说成官方公告。
 - 若接口不可达，直接说「羊毛雷达暂时没连上」，不要编造优惠信息。
 - 折扣有实时性：提醒用户以厂商页面为准。
 
