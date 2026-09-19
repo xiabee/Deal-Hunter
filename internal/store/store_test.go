@@ -3,6 +3,7 @@ package store
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -50,6 +51,97 @@ func TestOpenRoundTripAndDedup(t *testing.T) {
 	}
 	if got := reopened.Recent(10); len(got) != 1 {
 		t.Fatalf("expected 1 collapsed deal, got %d", len(got))
+	}
+}
+
+func TestTitleIndexFoldsRepostsAndKeepsThemOutOfTheDigest(t *testing.T) {
+	st, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	first := &model.Deal{URL: "https://linux.do/t/1", Title: "[分享创造] 做了一个家用 WMS", Score: 71, DiscoveredAt: time.Now().UTC()}
+	repost := &model.Deal{URL: "https://www.v2ex.com/t/2", Title: "做了一个家用 WMS", Score: 68, DiscoveredAt: time.Now().UTC()}
+	if err := st.Save(first); err != nil {
+		t.Fatal(err)
+	}
+	if fp, ok := st.TitleClash(first.Title, first.Fingerprint); ok {
+		t.Fatalf("the first finding must not clash with itself: %s", fp)
+	}
+	fp, ok := st.TitleClash(repost.Title, repost.Fingerprint)
+	if !ok || fp != first.Fingerprint {
+		t.Fatalf("repost should clash with the first finding, got %q,%v", fp, ok)
+	}
+
+	// A repeat is still recorded, but tagged, and never resurfaces in a digest.
+	repost.Meta = map[string]string{"dup_of": first.Fingerprint}
+	if err := st.Save(repost); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range st.Pending(50, time.Time{}) {
+		if d.Fingerprint == repost.Fingerprint {
+			t.Error("a repost must not be queued for the digest")
+		}
+	}
+	if got := st.Stats().Duplicates; got != 1 {
+		t.Errorf("Duplicates = %d, want 1", got)
+	}
+
+	// The index is rebuilt from disk, so a restart keeps the fold.
+	dir := st.Dir()
+	st.Close()
+	again, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer again.Close()
+	if got, ok := again.TitleClash(repost.Title, "other"); !ok || got != first.Fingerprint {
+		t.Errorf("title index lost after reopen: %q,%v", got, ok)
+	}
+	if got := again.Stats().Duplicates; got != 1 {
+		t.Errorf("Duplicates after reopen = %d, want 1", got)
+	}
+}
+
+// Records written before the fold existed carry no dup_of tag; they must still
+// be folded when read, or the list keeps showing the same announcement twice
+// until those rows age out on their own.
+func TestRepostsWithoutTagsAreFoldedWhenLoaded(t *testing.T) {
+	dir := t.TempDir()
+	rows := []string{
+		`{"fingerprint":"a1","url":"https://linux.do/t/1","title":"智谱 GLM-5.3-flash 限时免费开放","source":"a","score":80,"discovered_at":"2026-09-19T01:00:00Z"}`,
+		`{"fingerprint":"b2","url":"https://www.v2ex.com/t/2","title":"【公告】智谱 GLM-5.3-flash 限时免费开放！","source":"b","score":74,"discovered_at":"2026-09-19T02:00:00Z"}`,
+	}
+	if err := os.WriteFile(filepath.Join(dir, "deals.jsonl"), []byte(strings.Join(rows, "\n")+"\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	got := map[string]model.Deal{}
+	for _, d := range s.Recent(10) {
+		got[d.Fingerprint] = d
+	}
+	if len(got) != 2 {
+		t.Fatalf("both rows should load, got %d", len(got))
+	}
+	if got["b2"].Meta["dup_of"] != "a1" {
+		t.Errorf("the later repost should be folded to a1, got %q", got["b2"].Meta["dup_of"])
+	}
+	if got["a1"].Meta["dup_of"] != "" {
+		t.Error("the first finding must stay visible")
+	}
+	if st := s.Stats(); st.Duplicates != 1 {
+		t.Errorf("Duplicates = %d, want 1", st.Duplicates)
+	}
+	for _, d := range s.Pending(50, time.Time{}) {
+		if d.Fingerprint == "b2" {
+			t.Error("a folded legacy repost must not reach the digest")
+		}
 	}
 }
 

@@ -321,6 +321,55 @@ func TestCheapLabelsApplyBelowThreshold(t *testing.T) {
 	}
 }
 
+// Two feeds carrying the same announcement must produce one alert, not two.
+func TestRepostOfTheSameAnnouncementIsFolded(t *testing.T) {
+	rss := func(link, title string) []byte {
+		return []byte(`<?xml version="1.0"?><rss version="2.0"><channel><title>t</title>` +
+			`<item><title>` + title + `</title><link>` + link +
+			`</link><description>官方公告：GLM-5.3-flash 面向所有用户免费开放，API 调用 0 元。</description>` +
+			`<pubDate>Mon, 14 Sep 2026 08:00:00 GMT</pubDate></item></channel></rss>`)
+	}
+	const aURL = "https://feed-a.test/latest.rss"
+	const bURL = "https://feed-b.test/latest.rss"
+	f := &cannedFetcher{byURL: map[string][]byte{
+		aURL: rss(aURL, "智谱 GLM-5.3-flash 限时免费开放"),
+		bURL: rss(bURL, "【公告】智谱 GLM-5.3-flash 限时免费开放！"),
+	}}
+	spy := &spyNotifier{}
+	app := testApp(t, f, spy, func(c *config.Config) {
+		c.Sources = []config.Source{
+			{Name: "a", Kind: config.KindRSS, URL: aURL, Trust: 8},
+			{Name: "b", Kind: config.KindRSS, URL: bURL, Trust: 5},
+		}
+	})
+	run, err := app.RunOnce(context.Background(), "unit")
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if run.Stored != 2 || run.Dupes != 1 {
+		t.Fatalf("both reposts should be recorded, one folded: %+v", run)
+	}
+	msgs := spy.all()
+	if len(msgs) != 1 || len(msgs[0].Deals) != 1 {
+		t.Fatalf("exactly one alert with one deal, got %d messages: %+v", len(msgs), msgs)
+	}
+	if got := msgs[0].Deals[0].URL; !strings.Contains(got, "feed-a.test") {
+		t.Errorf("the first finding seen should be the one pushed, got %s", got)
+	}
+	var folded bool
+	for _, d := range app.RecentDeals(20) {
+		if strings.Contains(d.URL, "feed-b.test") && d.Meta["dup_of"] == "" {
+			t.Error("the repost should record which finding it repeats")
+		}
+		if d.Meta["dup_of"] != "" {
+			folded = true
+		}
+	}
+	if !folded {
+		t.Error("no deal was tagged as a repeat")
+	}
+}
+
 func TestAlertThresholdIsHonoured(t *testing.T) {
 	f := &cannedFetcher{byURL: map[string][]byte{feedURL: feedBody(t)}}
 	spy := &spyNotifier{}

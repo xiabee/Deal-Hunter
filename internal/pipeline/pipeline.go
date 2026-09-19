@@ -46,6 +46,7 @@ type Run struct {
 	Stored     int            `json:"stored"`
 	Pushed     int            `json:"pushed"`
 	HeldQuiet  int            `json:"held_quiet"`
+	Dupes      int            `json:"dupes_folded"`
 	Verified   int            `json:"verified_official"`
 	ThirdParty int            `json:"third_party_links"`
 	Sources    []SourceReport `json:"sources"`
@@ -270,6 +271,9 @@ func (a *App) RunOnce(ctx context.Context, trigger string) (*Run, error) {
 			}
 			rep.Stored++
 			run.NewDeals++
+			if d.Meta["dup_of"] != "" {
+				run.Dupes++
+			}
 			if err := a.st.Save(d); err != nil {
 				run.Errors = append(run.Errors, err.Error())
 				continue
@@ -342,7 +346,7 @@ func (a *App) RunOnce(ctx context.Context, trigger string) (*Run, error) {
 	}
 	a.log.Info("round complete", "trigger", trigger, "sources", len(run.Sources),
 		"new", run.NewDeals, "stored", run.Stored, "pushed", run.Pushed,
-		"held_quiet", run.HeldQuiet, "verified_official", run.Verified,
+		"held_quiet", run.HeldQuiet, "dupes", run.Dupes, "verified_official", run.Verified,
 		"third_party", run.ThirdParty, "errors", len(run.Errors), "took", run.duration().Round(time.Millisecond))
 	return run, errors.Join(append(a.collectSourceErrors(outcomes), deliverErr)...)
 }
@@ -476,6 +480,12 @@ func (a *App) judge(d *model.Deal, sc config.Source) (kept, push bool) {
 	// unlabelled row later reads as "not checked", which is only true for deals
 	// whose vendor we know but could not verify.
 	official.LabelCheap(d)
+	// The same announcement reposted by a second feed is recorded but never
+	// pushed twice: the first finding seen owns the title.
+	if fp, clash := a.st.TitleClash(d.Title, d.Fingerprint); clash {
+		d.Meta["dup_of"] = fp
+		return true, false
+	}
 	if len(f.AllowKeywords) > 0 && !anyContains(lower, f.AllowKeywords) {
 		return false, false
 	}

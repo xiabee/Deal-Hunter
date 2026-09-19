@@ -413,6 +413,9 @@ func cmdDeals(cfg *config.Config, stdout io.Writer, args []string) int {
 		if d.Meta["pushed"] == "true" {
 			pushed = "📣"
 		}
+		if d.Meta["dup_of"] != "" {
+			pushed += "↻" // a repost of something already reported
+		}
 		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\n", d.Score, pushed, truncate(d.Source, 18),
 			truncate(d.Title, 52), presentedLink(d),
 			d.DiscoveredAt.Local().Format("01-02 15:04"))

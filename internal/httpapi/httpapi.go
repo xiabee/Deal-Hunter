@@ -181,6 +181,7 @@ func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 		},
 		"store": map[string]any{
 			"deals_seen":     st.DealsSeen,
+			"duplicates":     st.Duplicates,
 			"pushed":         st.PushedSeen,
 			"cursors":        st.StateKeys,
 			"size_kb":        st.DirSizeKB,
@@ -206,10 +207,20 @@ func (s *Server) deals(w http.ResponseWriter, r *http.Request) {
 	category := strings.TrimSpace(q.Get("category"))
 	source := strings.TrimSpace(q.Get("source"))
 	needle := strings.ToLower(strings.TrimSpace(q.Get("q")))
+	// Reposts of something already reported are hidden unless asked for, so the
+	// list and the alert never show the same announcement twice.
+	wantDupes := q.Get("dupes") == "1"
 
 	all := s.app.RecentDeals(2000)
 	out := make([]model.Deal, 0, limit)
+	folded := 0
 	for _, d := range all {
+		if d.Meta["dup_of"] != "" {
+			folded++
+			if !wantDupes {
+				continue
+			}
+		}
 		if d.Score < minScore {
 			continue
 		}
@@ -222,12 +233,16 @@ func (s *Server) deals(w http.ResponseWriter, r *http.Request) {
 		if needle != "" && !strings.Contains(strings.ToLower(d.Title+" "+d.Summary), needle) {
 			continue
 		}
-		out = append(out, d)
-		if len(out) >= limit {
-			break
+		if len(out) < limit {
+			out = append(out, d)
 		}
+		// Keep scanning after the page is full: the folded count below has to
+		// describe the whole store, not just what fit on this page.
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"count": len(out), "deals": out})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count": len(out), "deals": out,
+		"folded_duplicates": folded,
+	})
 }
 
 func (s *Server) sources(w http.ResponseWriter, _ *http.Request) {

@@ -188,6 +188,7 @@
       <button type="button" class="chip" data-cat="resource" aria-pressed="false">📦 资源</button>
       <button type="button" class="chip" data-cat="official" aria-pressed="false">✅ 官方页已校验</button>
       <button type="button" class="chip" data-cat="pushed" aria-pressed="false">📣 已推送</button>
+      <button type="button" class="chip" data-cat="dupes" aria-pressed="false">↻ 含重复</button>
       <div class="spacer"></div>
       <span class="num" id="count"></span>
     </div>
@@ -213,7 +214,7 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-let cat = '', shown = 24, all = [], seen = 0;
+let cat = '', shown = 24, all = [], seen = 0, folded = 0;
 const opened = new Set();
 
 const KIND_LABEL = {official:'厂商官方域名', search_verified:'官方页已校验', third_party:'第三方转述'};
@@ -267,9 +268,13 @@ function dealRow(d, i){
   if (d.is_free) badges.push('<span class="badge free">免费</span>');
   if (d.discount_pct) badges.push('<span class="badge off">' + d.discount_pct + '% off</span>');
   if (KIND_LABEL[kind]) badges.push('<span class="badge ' + (kind === 'third_party' ? 'warn' : 'official') + '">' + KIND_LABEL[kind] + '</span>');
-  if (d.category) badges.push('<span class="badge">' + esc(d.category) + '</span>');
-  (d.vendors || []).slice(0,3).forEach(v => badges.push('<span class="badge">' + esc(v) + '</span>'));
-  (d.tags || []).slice(0,4).forEach(t => badges.push('<span class="badge">#' + esc(t) + '</span>'));
+  if (m.dup_of) badges.push('<span class="badge warn">↻ 重复于 ' + esc(String(m.dup_of).slice(0, 8)) + '</span>');
+  // No category badge: the leading icon already says 免费 / 折扣 / 资源.
+  const inTitle = (d.title || '').toLowerCase();
+  (d.vendors || []).filter(v => !inTitle.includes(String(v).toLowerCase())).slice(0, 2)
+    .forEach(v => badges.push('<span class="badge">' + esc(v) + '</span>'));
+  (d.tags || []).filter(t => t !== d.category && !/^(q:|search$|offer:)/.test(t)).slice(0, 3)
+    .forEach(t => badges.push('<span class="badge">#' + esc(t) + '</span>'));
 
   // The entry page is a place to check, never proof that the offer is official.
   const links = [];
@@ -299,20 +304,32 @@ function dealRow(d, i){
 
 async function loadDeals(){
   const q = $('q').value.trim();
-  // 'official' and 'pushed' are meta tags, not categories: filter client-side.
+  // 'official', 'pushed' and 'dupes' are meta tags, not categories.
   let path = '/api/v1/deals?limit=100&min=0';
-  if (cat && cat !== 'pushed' && cat !== 'official') path += '&category=' + encodeURIComponent(cat);
+  if (cat && cat !== 'pushed' && cat !== 'official' && cat !== 'dupes') path += '&category=' + encodeURIComponent(cat);
+  if (cat === 'dupes') path += '&dupes=1';
   if (q) path += '&q=' + encodeURIComponent(q);
-  let deals = (await j(path)).deals || [];
+  const data = await j(path);
+  folded = data.folded_duplicates || 0;
+  let deals = data.deals || [];
   if (cat === 'official') deals = deals.filter(d => OFFICIAL_KINDS.has((d.meta||{}).link_kind));
   else if (cat === 'pushed') deals = deals.filter(d => (d.meta||{}).pushed === 'true');
   all = deals;
-  // The API pages at 100; say so instead of implying that is the whole store.
-  $('count').textContent = deals.length + ' 条' + (seen > deals.length ? ' · 累计 ' + seen : '');
+  paintCount();
   paintDeals();
 }
 
 // A 60-item list is a wall; render a screenful and let the operator ask for more.
+// The count line needs numbers from two requests, so whichever finishes last
+// repaints it.
+function paintCount(){
+  const parts = [all.length + ' 条'];
+  if (seen > all.length) parts.push('累计 ' + seen);
+  if (folded && cat !== 'dupes') parts.push('已折叠 ' + folded + ' 条重复');
+  if (cat === 'dupes' && folded) parts.push('含 ' + folded + ' 条重复');
+  $('count').textContent = parts.join(' · ');
+}
+
 function paintDeals(){
   if (!all.length){
     $('deals').innerHTML = '<div class="empty">暂无符合条件的记录</div>';

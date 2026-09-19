@@ -27,6 +27,8 @@ type Store struct {
 	mu      sync.Mutex
 	seen    map[string]time.Time
 	high    map[string]time.Time // pushed, or held for digest
+	titles  map[string]string    // near-duplicate key -> first finding seen
+	dup     map[string]bool      // fingerprints tagged as repeats of another
 	state   map[string]json.RawMessage
 	log     *os.File
 	scanned int
@@ -35,6 +37,7 @@ type Store struct {
 // Stats summarizes what the store holds.
 type Stats struct {
 	DealsSeen   int
+	Duplicates  int
 	PushedSeen  int
 	StateKeys   int
 	OldestEntry time.Time
@@ -51,10 +54,12 @@ func Open(dir string) (*Store, error) {
 		return nil, fmt.Errorf("store: mkdir %s: %w", dir, err)
 	}
 	s := &Store{
-		dir:   dir,
-		seen:  map[string]time.Time{},
-		high:  map[string]time.Time{},
-		state: map[string]json.RawMessage{},
+		dir:    dir,
+		seen:   map[string]time.Time{},
+		high:   map[string]time.Time{},
+		titles: map[string]string{},
+		dup:    map[string]bool{},
+		state:  map[string]json.RawMessage{},
 	}
 	if err := s.loadState(); err != nil {
 		return nil, err
@@ -115,10 +120,7 @@ func (s *Store) loadLog() error {
 		if d.Fingerprint == "" {
 			continue
 		}
-		s.seen[d.Fingerprint] = d.DiscoveredAt
-		if v, ok := d.Meta["pushed"]; ok && v == "true" {
-			s.high[d.Fingerprint] = d.DiscoveredAt
-		}
+		s.rememberLocked(&d)
 		s.scanned++
 	}
 	if err := sc.Err(); err != nil {
@@ -155,11 +157,49 @@ func (s *Store) Save(d *model.Deal) error {
 	if _, err := s.log.Write(append(b, '\n')); err != nil {
 		return fmt.Errorf("store: append: %w", err)
 	}
+	s.rememberLocked(d)
+	return nil
+}
+
+// rememberLocked indexes one record: its fingerprint, whether it was pushed, and
+// its near-duplicate key. The first finding seen owns the key, so a repost from
+// another feed is recognised as a repeat instead of a second alert.
+func (s *Store) rememberLocked(d *model.Deal) {
 	s.seen[d.Fingerprint] = d.DiscoveredAt
 	if v, ok := d.Meta["pushed"]; ok && v == "true" {
 		s.high[d.Fingerprint] = d.DiscoveredAt
 	}
-	return nil
+	if k := model.DedupKey(d.Title); k != "" {
+		if owner, taken := s.titles[k]; !taken {
+			s.titles[k] = d.Fingerprint
+		} else if owner != d.Fingerprint {
+			// A second record for the same announcement. The first one seen owns
+			// the title; recentLocked tags the later one on the way out.
+			s.dup[d.Fingerprint] = true
+			return
+		}
+	}
+	if d.Meta["dup_of"] != "" {
+		s.dup[d.Fingerprint] = true
+		return
+	}
+	delete(s.dup, d.Fingerprint)
+}
+
+// TitleClash reports the fingerprint of the first finding seen with this
+// near-duplicate key. The caller's own fingerprint is never its own clash.
+func (s *Store) TitleClash(title, own string) (string, bool) {
+	k := model.DedupKey(title)
+	if k == "" {
+		return "", false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fp, ok := s.titles[k]
+	if !ok || fp == own {
+		return "", false
+	}
+	return fp, true
 }
 
 // MarkPushed records that a deal was delivered, rewriting its trailing log row
@@ -231,6 +271,30 @@ func (s *Store) recentLocked(n int) []model.Deal {
 		}
 		latest[d.Fingerprint] = d
 	}
+	// Fold near-duplicate announcements as records are read, so data written
+	// before the fold existed stops showing up twice: the first record seen owns
+	// the title and later ones carry dup_of pointing back at it.
+	owner := make(map[string]string, len(order))
+	for _, fp := range order {
+		d := latest[fp]
+		if d.Meta["dup_of"] != "" {
+			continue
+		}
+		k := model.DedupKey(d.Title)
+		if k == "" {
+			continue
+		}
+		first, taken := owner[k]
+		if !taken {
+			owner[k] = fp
+			continue
+		}
+		if d.Meta == nil {
+			d.Meta = map[string]string{}
+		}
+		d.Meta["dup_of"] = first
+		latest[fp] = d
+	}
 	out := make([]model.Deal, 0, len(order))
 	for _, fp := range order {
 		out = append(out, latest[fp])
@@ -248,6 +312,9 @@ func (s *Store) recentLocked(n int) []model.Deal {
 func (s *Store) Pending(min int, since time.Time) []model.Deal {
 	var out []model.Deal
 	for _, d := range s.Recent(20000) {
+		if d.Meta["dup_of"] != "" {
+			continue // a repost of something already reported
+		}
 		if d.Score < min {
 			continue
 		}
@@ -377,7 +444,7 @@ func (s *Store) Compact(keepDays int) error {
 // Stats reports store contents for the health endpoint.
 func (s *Store) Stats() Stats {
 	s.mu.Lock()
-	st := Stats{DealsSeen: len(s.seen), PushedSeen: len(s.high), StateKeys: len(s.state)}
+	st := Stats{DealsSeen: len(s.seen), PushedSeen: len(s.high), StateKeys: len(s.state), Duplicates: len(s.dup)}
 	for _, t := range s.seen {
 		if st.OldestEntry.IsZero() || t.Before(st.OldestEntry) {
 			st.OldestEntry = t

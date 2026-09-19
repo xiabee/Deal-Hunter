@@ -11,9 +11,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/xiabee/deal-hunter/internal/config"
 	"github.com/xiabee/deal-hunter/internal/httpx"
+	"github.com/xiabee/deal-hunter/internal/model"
 	"github.com/xiabee/deal-hunter/internal/notify"
 	"github.com/xiabee/deal-hunter/internal/pipeline"
 )
@@ -336,6 +338,53 @@ func TestDashboardLayersDetailAndHistory(t *testing.T) {
 	// click, which is why the disclosure is a button over a hidden block.
 	if strings.Contains(html, "<summary>") {
 		t.Error("dashboard must not nest interactive content inside a <summary>")
+	}
+}
+
+// A repost of an already reported announcement must not appear twice in the
+// list, but it must stay reachable and counted.
+func TestDealsHideFoldedRepostsUnlessAsked(t *testing.T) {
+	ts, app, _ := newTestServer(t)
+	dup := &model.Deal{
+		URL: "https://other.test/glm-free", Title: "【公告】智谱 GLM-5.3-flash 限时免费开放",
+		Source: "rss-clone", Category: model.CatAIFree, IsFree: true, Score: 70,
+		DiscoveredAt: time.Now().UTC(), Meta: map[string]string{"dup_of": "original"},
+	}
+	if err := app.Store().Save(dup); err != nil {
+		t.Fatal(err)
+	}
+	_, body := get(t, ts, "/api/v1/deals?limit=100&min=0")
+	if strings.Contains(string(body), "other.test/glm-free") {
+		t.Error("a folded repost leaked into the default list")
+	}
+	_, body2 := get(t, ts, "/api/v1/deals?limit=100&min=0&dupes=1")
+	if !strings.Contains(string(body2), "other.test/glm-free") {
+		t.Error("dupes=1 should surface the repost")
+	}
+	if !strings.Contains(string(body2), `"folded_duplicates": 1`) {
+		t.Errorf("the response should say how many were folded: %s", body2)
+	}
+
+	// A small page must not shrink the reported count of what was folded away.
+	for i := 0; i < 3; i++ {
+		extra := *dup
+		extra.Fingerprint = ""
+		extra.URL = "https://other.test/glm-free-" + string(rune('1'+i))
+		extra.Meta = map[string]string{"dup_of": "original"}
+		if err := app.Store().Save(&extra); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, body3 := get(t, ts, "/api/v1/deals?limit=2&min=0")
+	if !strings.Contains(string(body3), `"folded_duplicates": 4`) {
+		t.Errorf("folded count should cover the whole store: %s", body3)
+	}
+	if n := strings.Count(string(body3), `"fingerprint"`); n != 2 {
+		t.Errorf("limit should still cap the page, got %d deals", n)
+	}
+	_, status := get(t, ts, "/api/v1/status")
+	if !strings.Contains(string(status), `"duplicates": 4`) {
+		t.Errorf("status should report the duplicate count: %s", status)
 	}
 }
 

@@ -5,6 +5,7 @@ package model
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -116,6 +117,59 @@ func isTrackingParam(k string) bool {
 		}
 	}
 	return false
+}
+
+// dedupNoise drops the punctuation and board prefixes that make two copies of
+// the same announcement look like different titles.
+var dedupNoise = regexp.MustCompile(`[^\p{Han}\p{L}\p{N}]+`)
+
+// dedupPrefix matches a short leading label terminated by a colon.
+var dedupPrefix = regexp.MustCompile(`^[^：:]{1,6}[：:]`)
+
+// DedupKey is the near-duplicate signature of a finding: the same announcement
+// reposted across feeds differs only in punctuation, board tag and whitespace.
+// An empty key means the title carries too little to judge by, so it never
+// deduplicates.
+func DedupKey(title string) string {
+	s := strings.TrimSpace(title)
+	if s == "" {
+		return ""
+	}
+	// Leading "[板块] 标题" / "【公告】标题" / "(推广) 标题" wrappers.
+	for {
+		t := strings.TrimLeft(s, " \t")
+		var cut bool
+		for _, pair := range [][2]string{{"[", "]"}, {"【", "】"}, {"(", ")"}, {"（", "）"}} {
+			if strings.HasPrefix(t, pair[0]) {
+				if i := strings.Index(t, pair[1]); i > 0 && i < 24 {
+					t, cut = strings.TrimSpace(t[i+len(pair[1]):]), true
+				}
+			}
+		}
+		if !cut {
+			s = t
+			break
+		}
+		s = t
+	}
+	// "推广：xxx" / "公告: xxx" carry the same board tag without brackets.
+	for i := 0; i < 2; i++ {
+		m := dedupPrefix.FindStringIndex(s)
+		if m == nil || m[0] != 0 {
+			break
+		}
+		s = strings.TrimSpace(s[m[1]:])
+	}
+	key := strings.ToLower(dedupNoise.ReplaceAllString(s, " "))
+	key = strings.Join(strings.Fields(key), " ")
+	if len([]rune(key)) < 8 {
+		return ""
+	}
+	r := []rune(key)
+	if len(r) > 80 {
+		r = r[:80]
+	}
+	return strings.TrimSpace(string(r))
 }
 
 // Kinds lists the distinct offer kinds in the deal.
