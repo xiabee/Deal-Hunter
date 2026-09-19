@@ -53,6 +53,24 @@ type Rule struct {
 // same line.
 const IgnoreMarker = "secretlint:ignore"
 
+// literalSeam matches the join between two adjacent string literals.
+var literalSeam = regexp.MustCompile(`["']\s*\+\s*["']`)
+
+// rejoinedLiterals glues split literals back together, so a key written as
+// "AKIA" + "<16 chars>" is still seen as one token.
+func rejoinedLiterals(line string) string {
+	out := line
+	// More than two pieces leave new seams after each pass.
+	for i := 0; i < 4; i++ {
+		next := literalSeam.ReplaceAllString(out, "")
+		if next == out {
+			break
+		}
+		out = next
+	}
+	return out
+}
+
 // binaryExt is a denylist: unknown extensions are scanned, because a new file
 // type holding a credential must not be skipped by omission.
 var binaryExt = map[string]bool{
@@ -148,17 +166,35 @@ func Scan(opts Options) ([]Finding, error) {
 			if strings.Contains(line, IgnoreMarker) {
 				continue
 			}
-			for _, r := range rules {
-				if loc := r.RE.FindString(line); loc != "" {
+			// A line-based scanner is defeated by one trick: splitting a value across
+			// concatenated literals. Match the rejoined line too, or the gate only
+			// stops honest mistakes.
+			seen := map[string]bool{}
+			for _, text := range []string{line, rejoinedLiterals(line)} {
+				if text == "" || seen[text] {
+					continue
+				}
+				seen[text] = true
+				for _, r := range rules {
+					if seen["rule:"+r.Name] {
+						continue
+					}
+					if loc := r.RE.FindString(text); loc != "" {
+						seen["rule:"+r.Name] = true
+						findings = append(findings, Finding{
+							Rule: r.Name, Path: rel(root, path), Line: i + 1, Snippet: clip(loc),
+						})
+					}
+				}
+				for _, tok := range highEntropyTokens(text) {
+					if seen["ent:"+tok] {
+						continue
+					}
+					seen["ent:"+tok] = true
 					findings = append(findings, Finding{
-						Rule: r.Name, Path: rel(root, path), Line: i + 1, Snippet: clip(loc),
+						Rule: "high_entropy_token", Path: rel(root, path), Line: i + 1, Snippet: clip(tok),
 					})
 				}
-			}
-			for _, tok := range highEntropyTokens(line) {
-				findings = append(findings, Finding{
-					Rule: "high_entropy_token", Path: rel(root, path), Line: i + 1, Snippet: clip(tok),
-				})
 			}
 		}
 		return nil

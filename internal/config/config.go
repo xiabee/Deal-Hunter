@@ -218,7 +218,7 @@ const (
 )
 
 // Default returns a ready-to-run configuration using sources verified to be
-// reachable from the 部署主机 network.
+// reachable from the deployment host.
 func Default() *Config {
 	return &Config{
 		DataDir:  "./data",

@@ -284,7 +284,7 @@ function dealRow(d, i){
   if (m.vendor_url && m.vendor_url !== best && m.vendor_url !== m.original_url && isHTTPS(m.vendor_url))
     links.push('<a href="' + esc(m.vendor_url) + '" target="_blank" rel="noopener noreferrer nofollow">厂商官网入口</a>');
 
-  const bodyId = 'body-' + (d.fingerprint || i);
+  const bodyId = 'body-' + esc(String(d.fingerprint || i));
   return '<div class="deal">' +
     '<span class="score ' + scoreClass(d.score) + '">' + d.score + '</span>' +
     '<span class="t">' + head + (mark ? '<span class="mark">' + mark + '</span>' : '') + '</span>' +
