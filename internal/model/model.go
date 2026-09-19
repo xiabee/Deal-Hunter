@@ -101,7 +101,11 @@ func NormalizeURL(u string) string {
 		}
 	}
 	trimmedParams = strings.TrimSuffix(trimmedParams, "/")
-	trimmedParams = strings.TrimSuffix(trimmedParams, "#")
+	// A fragment is an anchor inside the same page: v2ex.com/t/1#reply4 and
+	// v2ex.com/t/1 are one offer, and listing both reads as a broken panel.
+	if i := strings.Index(trimmedParams, "#"); i >= 0 {
+		trimmedParams = trimmedParams[:i]
+	}
 	return strings.ToLower(trimmedParams)
 }
 
