@@ -298,9 +298,59 @@ func TestDashboardIsServedInline(t *testing.T) {
 	}
 	// No external asset requests: the page must work on an isolated network.
 	for _, forbidden := range []string{"http://", "https://cdn", "fonts.googleapis", "//unpkg"} {
-		if strings.Contains(html, forbidden) && forbidden == "https://cdn" {
+		if strings.Contains(html, forbidden) {
 			t.Errorf("dashboard references an external asset: %s", forbidden)
 		}
+	}
+}
+
+// The panel shows conclusions first: a deal is one line, and the reasoning waits
+// behind an explicit disclosure. Run history and link quality come from endpoints
+// that already exist, and the page stays keyboard- and motion-safe.
+func TestDashboardLayersDetailAndHistory(t *testing.T) {
+	ts, _, _ := newTestServer(t)
+	resp, body := get(t, ts, "/")
+	defer resp.Body.Close()
+	html := string(body)
+	for _, want := range []string{
+		"aria-expanded", // per-deal detail is folded, not dumped on screen
+		"aria-controls", // ... and the toggle names the block it owns
+		"body.hidden",   // collapsed until asked
+		"/api/v1/runs",  // the run history the backend already serves
+		"采集记录",          // ... labelled in the user's language
+		"链接成色",          // how many finds reached a verified vendor page
+		`<button`,       // filters must be focusable, not clickable spans
+		":focus-visible",
+		"prefers-reduced-motion",
+		"max-width:640px",
+		"最后同步",
+		"显示更多",                      // a long list is paged, not dumped
+		"opened.has(d.fingerprint)", // ... and paging keeps rows the reader opened
+		`href="/favicon.ico"`,       // same-origin icon, so nothing 404s on load
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("dashboard missing %q", want)
+		}
+	}
+	// A link nested in a <summary> is invalid HTML and swallows the toggle's
+	// click, which is why the disclosure is a button over a hidden block.
+	if strings.Contains(html, "<summary>") {
+		t.Error("dashboard must not nest interactive content inside a <summary>")
+	}
+}
+
+func TestFaviconIsServedFromTheEmbed(t *testing.T) {
+	ts, _, _ := newTestServer(t)
+	resp, body := get(t, ts, "/favicon.ico")
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("favicon status = %d", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "image/svg") {
+		t.Errorf("content type = %q", ct)
+	}
+	if !strings.Contains(string(body), "<svg") {
+		t.Errorf("favicon body = %s", body)
 	}
 }
 

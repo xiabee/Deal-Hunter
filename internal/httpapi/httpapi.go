@@ -26,7 +26,7 @@ import (
 	"github.com/xiabee/deal-hunter/internal/version"
 )
 
-//go:embed web/index.html
+//go:embed web
 var webFS embed.FS
 
 // Server exposes the read-only API and dashboard.
@@ -51,6 +51,7 @@ func New(cfg *config.Config, app *pipeline.App, log *slog.Logger) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.dashboard)
+	mux.HandleFunc("GET /favicon.ico", s.icon)
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /api/v1/status", s.status)
 	mux.HandleFunc("GET /api/v1/deals", s.deals)
@@ -286,6 +287,19 @@ func (s *Server) digest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+	_, _ = w.Write(b)
+}
+
+// icon serves the tab icon from the same embedded FS, so the page never makes a
+// request that a public CDN would have to answer.
+func (s *Server) icon(w http.ResponseWriter, _ *http.Request) {
+	b, err := fs.ReadFile(webFS, "web/icon.svg")
+	if err != nil {
+		http.NotFound(w, nil)
+		return
+	}
+	w.Header().Set("Content-Type", "image/svg+xml")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
 	_, _ = w.Write(b)
 }
 
