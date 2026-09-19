@@ -314,7 +314,7 @@ func (s *Store) recentLocked(n int) []model.Deal {
 func (s *Store) Live(min int, now time.Time, limit int) []model.Deal {
 	var out []model.Deal
 	for _, d := range s.Recent(20000) {
-		if d.Meta["dup_of"] != "" || d.Score < min || !liveOffer(d) {
+		if d.Meta["dup_of"] != "" || d.Score < min || !d.Claimable() {
 			continue
 		}
 		if exp, ok := deadline(d); ok && exp.Before(now) {
@@ -332,21 +332,6 @@ func (s *Store) Live(min int, now time.Time, limit int) []model.Deal {
 		out = out[:limit]
 	}
 	return out
-}
-
-// liveOffer reports whether the finding describes an offer that can still be
-// taken, rather than a news item about pricing.
-func liveOffer(d model.Deal) bool {
-	if d.IsFree || d.DiscountPct > 0 {
-		return true
-	}
-	for _, o := range d.Offers {
-		switch o.Kind {
-		case model.KindFree, model.KindDiscount, model.KindTrial, model.KindCredit, model.KindCoupon:
-			return true
-		}
-	}
-	return false
 }
 
 // deadline reads the expiry recorded at scoring time.

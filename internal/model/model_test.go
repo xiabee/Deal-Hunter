@@ -63,6 +63,40 @@ func TestDedupKeyCollapsesRepostedTitles(t *testing.T) {
 	}
 }
 
+// The morning briefing is for things you can still claim, so a question or a
+// complaint about pricing must not crowd it out.
+func TestClaimableSeparatesOffersFromOpinions(t *testing.T) {
+	offers := []string{
+		"智谱 GLM-5.3-flash 限时免费开放",
+		"阿里云 Qwen3.8-Max 新品发布 限时 5 折",
+		"OpenAI 开放 ChatGPT for Microsoft Word，免费用户可用",
+		"新用户赠送 100 万 tokens 额度",
+	}
+	for _, title := range offers {
+		d := &Deal{Title: title, IsFree: true}
+		if !d.Claimable() {
+			t.Errorf("Claimable(%q) = false, want true", title)
+		}
+	}
+	notOffers := []string{
+		"Qwen3.8-Flash 限时免费？",
+		"qwen3.8 flash 限时免费是不是也有额度限制啊佬",
+		"用着无力 也要吐槽一下glm5.3",
+		"某家的 glm 5.3 flash 也是符合夜间免费的吧",
+		"这个免费额度值不值",
+	}
+	for _, title := range notOffers {
+		d := &Deal{Title: title, IsFree: true}
+		if d.Claimable() {
+			t.Errorf("Claimable(%q) = true, want false", title)
+		}
+	}
+	// A price article with no offer signal is not claimable either.
+	if (&Deal{Title: "大模型定价趋势分析", Offers: []Offer{{Kind: KindUnknown}}}).Claimable() {
+		t.Error("an article about pricing is not an offer")
+	}
+}
+
 func TestEnsureFingerprintIsStableAndSourced(t *testing.T) {
 	x := &Deal{URL: "https://Site.test/promo#top", Source: "rss", Title: "同一件事"}
 	y := &Deal{URL: "http://www.site.test/promo/", Source: "rss", Title: "同一件事"}

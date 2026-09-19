@@ -172,6 +172,40 @@ func DedupKey(title string) string {
 	return strings.TrimSpace(string(r))
 }
 
+// doubtAboutOffer names a question or a gripe about somebody else's pricing,
+// which is nothing the reader can claim this morning.
+var doubtAboutOffer = regexp.MustCompile(`吐槽|求助|是不是|有没有|该选|如何评价|值不值|翻车|失望`)
+
+// endsInQuestion reports whether the title is phrased as a question or a guess.
+func endsInQuestion(title string) bool {
+	t := strings.TrimRight(strings.TrimSpace(title), " ！!")
+	for _, suffix := range []string{"?", "？", "吗", "呢", "吧", "么"} {
+		if strings.HasSuffix(t, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+// Claimable reports whether the finding describes an offer that can still be
+// taken: it carries a free/discount/trial/credit/coupon signal and is not a
+// question or a gripe about somebody else's pricing.
+func (d *Deal) Claimable() bool {
+	if endsInQuestion(d.Title) || doubtAboutOffer.MatchString(d.Title) {
+		return false
+	}
+	if d.IsFree || d.DiscountPct > 0 {
+		return true
+	}
+	for _, o := range d.Offers {
+		switch o.Kind {
+		case KindFree, KindDiscount, KindTrial, KindCredit, KindCoupon:
+			return true
+		}
+	}
+	return false
+}
+
 // Kinds lists the distinct offer kinds in the deal.
 func (d *Deal) Kinds() []Kind {
 	seen := map[Kind]bool{}
