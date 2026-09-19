@@ -393,6 +393,14 @@ func TestDailyBriefingFollowsTheConfiguredZoneAndSendsOnce(t *testing.T) {
 	}
 
 	before := at.Add(-time.Minute) // 08:59 Beijing
+	if app.DailyDue(before) || app.DailyDue(at) {
+		t.Error("a briefing that was never sent must wait for its slot, not fire on first start")
+	}
+	// Pretend yesterday's briefing happened, so today's slot is genuinely due.
+	if err := app.SendDaily(context.Background(), at.AddDate(0, 0, -1)); err != nil {
+		t.Fatalf("seed SendDaily: %v", err)
+	}
+	spy.reset(nil)
 	if app.DailyDue(before) {
 		t.Error("08:59 Beijing is too early")
 	}

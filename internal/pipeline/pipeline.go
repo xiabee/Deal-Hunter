@@ -580,7 +580,9 @@ func (a *App) DailyDue(now time.Time) bool {
 	}
 	last, ok := a.stateTime(dailyCursor)
 	if !ok {
-		return !now.In(a.loc()).Before(sched)
+		// Never sent: wait for the next slot. Firing on first start would turn a
+		// "09:00 briefing" into a random message at deploy time.
+		return false
 	}
 	return !now.In(a.loc()).Before(sched) && last.Before(sched)
 }
