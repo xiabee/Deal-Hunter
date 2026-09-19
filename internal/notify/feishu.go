@@ -271,12 +271,11 @@ func (f *Feishu) card(m Message) map[string]any {
 func alertLine(d *model.Deal) string {
 	link, _, kind := LinkFor(d)
 	title := truncateRunes(strings.ReplaceAll(d.Title, "\n", " "), 42)
-	score := strconv.Itoa(d.Score)
 	if !strings.HasPrefix(link, "https://") {
-		return fmt.Sprintf("%s %s · **%s**", Icon(d), title, score)
+		return fmt.Sprintf("%s %s · **%d**", Icon(d), title, d.Score)
 	}
-	return fmt.Sprintf("%s [%s](%s) · **%s**%s",
-		Icon(d), title, link, score, LinkMark(kind))
+	return strings.TrimSpace(fmt.Sprintf("%s [%s](%s) · **%d** %s",
+		Icon(d), title, link, d.Score, LinkMark(kind)))
 }
 
 // singleDealBody is the one-deal layout: score, where the offer came from, and
