@@ -58,6 +58,21 @@ bash scripts/ci-local.sh                    # CI 会强制执行
 "100.100.100.100:8765", // secretlint:ignore CGNAT fixture for the /10 range check
 ```
 
+### 提交身份同样算敏感信息
+
+`scripts/check-identity.sh` 检查提交里的 author / committer 邮箱：消费者邮箱
+（`foxmail`、`qq`、`gmail`、`163` 等）或纯数字账号式本地名一律判失败，只放行
+`@users.noreply.github.com` 与 `example.*` / `.invalid` 这类合成域。它由 pre-commit 钩子
+（检查**这一次提交将要写入的身份**）和 `ci-local.sh`（检查最近三个提交）分别执行。
+
+之所以要在门禁里写死：多数开发机的 `user.email` 是全局配置的个人邮箱，一次改写历史之后，
+下一条提交就会把它重新发布出去。改历史很贵，改别人的全局配置不该由脚本代劳，所以这里
+只要求**逐次提交**显式带上项目身份：
+
+```bash
+git -c user.name=<handle> -c user.email=<handle>@users.noreply.github.com commit ...
+```
+
 ## 部署侧建议
 
 1. 面板保持 `127.0.0.1`；需要跨机器访问时改用 Tailscale 地址，**不要**开放公网端口。

@@ -46,6 +46,9 @@ fi
 step "secret scan (open-source release gate)"
 go run ./cmd/dealhunter secretscan -C . || fail "secrets or private topology in the tree"
 
+step "commit identity scan (no personal mailbox in recent history)"
+bash scripts/check-identity.sh || fail "a commit records a personal mailbox"
+
 step "offline smoke: no network required"
 # Bash pattern matching, not `cmd | grep -q`: grep exits on first match, which
 # SIGPIPEs the binary and makes a healthy run fail under `set -o pipefail`.

@@ -411,8 +411,10 @@ git config core.hooksPath .githooks      # 可选：提交前自动跑快门禁
 ## 🔐 安全与隐私
 
 - **密钥只来自环境**：`webhook_url`/`secret` 在结构体上是 `json:"-"`，写进配置文件也不会被读取，序列化也不会输出
-- **CI 敏感信息门禁**：`internal/secretlint` 扫描仓库中的 24 类凭证特征（飞书/Slack/GitHub/TailSCALE key/AWS/JWT/DSN/私钥块…）、
+- **CI 敏感信息门禁**：`internal/secretlint` 扫描仓库中的 24 类凭证特征（飞书/Slack/GitHub/Tailscale `tskey-`/AWS/JWT/DSN/私钥块…）、
   高熵字符串，以及 **Tailscale 内网地址与 `.ts.net` 主机名**；命中即 CI 失败（详见 [SECURITY.md](SECURITY.md)）
+- **提交身份也在门禁内**：`scripts/check-identity.sh` 拒绝把个人邮箱（消费者域名或纯数字账号）写进提交，
+  项目身份用 `@users.noreply.github.com`，pre-commit 与 CI 双重执行
 - **不外网暴露**：面板绑定校验只允许回环、`100.64/10`、`.ts.net`；`0.0.0.0`/公网地址直接拒绝启动
 - **SSRF 防护**：出站固定拒绝链路本地与云元数据地址（即使显式放开内网访问也不放行元数据）
 - **不越权使用助手凭据**：与 OpenClaw 的联动遵循「只读本地接口 + workspace 脚本 + 固定 argv 的 `message send`」，

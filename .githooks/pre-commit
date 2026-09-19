@@ -13,6 +13,10 @@ if [[ "${SKIP_CI:-0}" == "1" ]]; then
 fi
 
 echo "pre-commit: gofmt + vet + tests + secret scan"
+bash scripts/check-identity.sh --pending || {
+	echo "pre-commit: refusing to record a personal mailbox in this commit" >&2
+	exit 1
+}
 gofmt_out="$(gofmt -l cmd internal || true)"
 if [[ -n "$gofmt_out" ]]; then
 	echo "pre-commit: run 'make fmt' first; unformatted:" >&2
