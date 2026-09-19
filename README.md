@@ -225,16 +225,22 @@ open http://127.0.0.1:8765/          # 内置状态面板
 
 ```mermaid
 flowchart TD
-    Q{想要哪种触发?} -- "第一时间推送高价值情报" --> W1["🥇 路径一：飞书群机器人<br/>自定义机器人 webhook + 签名校验"]
-    Q -- "让助手统一发，且不想再建机器人" --> W2["🥈 路径二：OpenClaw 中转<br/>openclaw message send --channel feishu"]
-    Q -- "只在我问『有什么羊毛』时回答" --> W3["🥉 路径三：OpenClaw 只读拉取<br/>workspace 技能 + /api/v1"]
+    Q{想要哪种触发?} -- "第一时间推送高价值情报" --> W1["🥇 群机器人 webhook<br/>签名校验 · 只发到指定群"]
+    Q -- "不想再建机器人" --> W1b["🥇 飞书应用直投<br/>app_id + app_secret → im/v1/messages"]
+    Q -- "让助手统一发" --> W2["🥈 OpenClaw 中转<br/>message send --channel feishu"]
+    Q -- "只在我问时回答" --> W3["🥉 OpenClaw 只读拉取<br/>workspace 技能 + /api/v1"]
 
     W1 --> C1["✅ 主动 · 卡片丰富 · 需要一次 webhook"]
-    W2 --> C2["✅ 主动 · 复用既有凭据 · 需 sudoers 授权"]
+    W1b --> C1b["✅ 主动 · 复用已有应用 · 私聊/群聊皆可"]
+    W2 --> C2["✅ 主动 · 复用助手连接 · 需 sudoers 授权"]
     W3 --> C3["✅ 零新增密钥 · ❌ 被动应答"]
 ```
 
-三条路径可同时开启：`notify` 会向所有后端扇出，任一后端失败不影响其他后端，失败条目留在日报队列里补投。
+四条路径都走 `notify.FanOut`，可同时开启；**任一后端成功即视为已送达**，
+所以一个配坏的第二通道不会让告警每轮重发，只有全部失败才回落到日报补投。
+
+> 应用直投的收件人类型由 `DH_FEISHU_RECEIVE_ID_TYPE` 决定（默认 `open_id`）；
+> 卡片若被租户策略拒绝会自动降级为纯文本投递，宁可朴素也不丢消息。
 
 ---
 

@@ -88,6 +88,7 @@ func Rules() []Rule {
 		{"credentials_in_url", `(?i)\b[a-z][a-z0-9+.\-]*://[^/\s:@]{1,64}:[^/\s@]{4,}@[a-z0-9.\-]+`},
 		{"database_dsn", `(?i)\b(?:postgres|postgresql|mysql|mongodb(?:\+srv)?|redis)://[^\s:@/]{1,64}:[^\s@]{4,}@[^\s]+`},
 		{"secret_assignment", `(?i)\b(?:authorization|x-api-key|api[_-]?key|access[_-]?key|client[_-]?secret|app[_-]?secret|webhook[_-]?secret|feishu[_-]?secret|sendkey)\s*"?\s*[=:]\s*["'][^"'\s]{12,}["']`},
+		{"feishu_app_id", `cli_[a-z0-9]{10,}`},
 		{"tailscale_cgnat_address", `\b100\.(?:6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.\d{1,3}\.\d{1,3}\b`},
 		{"tailscale_magicdns", `\b[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?\.ts\.net\b`},
 		{"private_ipv4", `\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})\b`},

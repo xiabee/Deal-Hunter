@@ -75,17 +75,26 @@ type Source struct {
 	Sites    []string          `json:"sites,omitempty"` // official vendor domains for scoring
 }
 
-// Feishu configures the direct custom-bot push path.
+// Feishu configures direct delivery. Two credential sets work: a group
+// custom-bot webhook, or an application identity (app_id/app_secret) that posts
+// to a user or chat through the Open API. All four values come from the
+// environment only, never from the config file.
 type Feishu struct {
 	Enabled            bool   `json:"enabled"`
 	MinScore           int    `json:"min_score"`
 	SilentHours        []int  `json:"silent_hours,omitempty"`
 	Timezone           string `json:"timezone,omitempty"`
 	AtAll              bool   `json:"at_all,omitempty"`
-	WebhookURL         string `json:"-"`
-	Secret             string `json:"-"`
 	MaxPerRun          int    `json:"max_per_run,omitempty"`
 	DeduplicateMinutes int    `json:"dedupe_minutes,omitempty"`
+	APIBase            string `json:"api_base,omitempty"`
+	ReceiveIDType      string `json:"receive_id_type,omitempty"`
+
+	WebhookURL string `json:"-"`
+	Secret     string `json:"-"`
+	AppID      string `json:"-"`
+	AppSecret  string `json:"-"`
+	ReceiveID  string `json:"-"`
 }
 
 // OpenClaw configures the assistant-side integration. Deal-Hunter never reads
@@ -173,10 +182,16 @@ const (
 	EnvFeishuWebhook = "DH_FEISHU_WEBHOOK"
 	EnvFeishuSecret  = "DH_FEISHU_SECRET"
 	EnvFeishuEnabled = "DH_FEISHU_ENABLED"
-	EnvServerBind    = "DH_SERVER_BIND"
-	EnvServerEnabled = "DH_SERVER_ENABLED"
-	EnvAllowPublic   = "DH_ALLOW_PUBLIC_BIND"
-	EnvDigestEnabled = "DH_DIGEST_ENABLED"
+	// Application-identity delivery (no group bot required).
+	EnvFeishuAppID    = "DH_FEISHU_APP_ID"
+	EnvFeishuAppSect  = "DH_FEISHU_APP_SECRET"
+	EnvFeishuRecvID   = "DH_FEISHU_RECEIVE_ID"
+	EnvFeishuRecvType = "DH_FEISHU_RECEIVE_ID_TYPE"
+	EnvFeishuAPIBase  = "DH_FEISHU_API_BASE"
+	EnvServerBind     = "DH_SERVER_BIND"
+	EnvServerEnabled  = "DH_SERVER_ENABLED"
+	EnvAllowPublic    = "DH_ALLOW_PUBLIC_BIND"
+	EnvDigestEnabled  = "DH_DIGEST_ENABLED"
 	// OpenClaw relay: the destination chat id stays out of the config file.
 	EnvOpenClawTarget = "DH_OPENCLAW_TARGET"
 	EnvOpenClawCmd    = "DH_OPENCLAW_COMMAND"
@@ -367,6 +382,11 @@ func (c *Config) applyEnv() {
 	setStr(&c.Server.Bind, EnvServerBind)
 	setStr(&c.Notify.Feishu.WebhookURL, EnvFeishuWebhook)
 	setStr(&c.Notify.Feishu.Secret, EnvFeishuSecret)
+	setStr(&c.Notify.Feishu.AppID, EnvFeishuAppID)
+	setStr(&c.Notify.Feishu.AppSecret, EnvFeishuAppSect)
+	setStr(&c.Notify.Feishu.ReceiveID, EnvFeishuRecvID)
+	setStr(&c.Notify.Feishu.ReceiveIDType, EnvFeishuRecvType)
+	setStr(&c.Notify.Feishu.APIBase, EnvFeishuAPIBase)
 	setStr(&c.Notify.OpenClaw.Target, EnvOpenClawTarget)
 	setStr(&c.Notify.OpenClaw.Command, EnvOpenClawCmd)
 	setStr(&c.Notify.OpenClaw.Channel, EnvOpenClawChan)

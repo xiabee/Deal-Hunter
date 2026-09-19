@@ -8,26 +8,34 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/xiabee/deal-hunter/internal/config"
 	"github.com/xiabee/deal-hunter/internal/model"
 )
 
-// Feishu pushes interactive cards to a group custom-bot webhook. The webhook
-// URL and signing secret come only from the environment.
+// Feishu pushes to a chat either through a group custom-bot webhook or through
+// an application identity posting to im/v1/messages. Credentials come only from
+// the environment and are never logged or echoed into payloads.
 type Feishu struct {
-	cfg    config.Feishu
-	client *http.Client
-	tz     *time.Location
+	cfg     config.Feishu
+	client  *http.Client
+	tz      *time.Location
+	apiBase string
+
+	tokMu   sync.Mutex
+	token   string
+	tokenTo time.Time
 }
 
-// NewFeishu builds the backend; an empty webhook is allowed so the binary can
-// run and report what is missing.
+// NewFeishu builds the backend; missing credentials are allowed so the binary
+// can run and report exactly what is absent.
 func NewFeishu(cfg config.Feishu) (*Feishu, error) {
 	tz := time.Local
 	if cfg.Timezone != "" {
@@ -37,16 +45,49 @@ func NewFeishu(cfg config.Feishu) (*Feishu, error) {
 			return nil, fmt.Errorf("feishu: bad timezone %q: %w", cfg.Timezone, err)
 		}
 	}
-	return &Feishu{cfg: cfg, client: &http.Client{Timeout: 15 * time.Second}, tz: tz}, nil
+	base := strings.TrimRight(cfg.APIBase, "/")
+	if base == "" {
+		base = "https://open.feishu.cn"
+	}
+	return &Feishu{cfg: cfg, client: &http.Client{Timeout: 15 * time.Second}, tz: tz, apiBase: base}, nil
 }
 
 // Name implements Notifier.
 func (f *Feishu) Name() string { return "feishu" }
 
-// Ready reports whether a usable webhook is configured. Remote endpoints must
-// use HTTPS; plain HTTP is accepted only on loopback so a local relay (for
-// example an OpenClaw sidecar) and the test suite can be exercised.
-func (f *Feishu) Ready() bool { return URLLooksUsable(f.cfg.WebhookURL) }
+// Mode reports the active route: "webhook", "app" or "". The webhook wins when
+// both are configured, because it is scoped to a single group.
+func (f *Feishu) Mode() string {
+	switch {
+	case URLLooksUsable(f.cfg.WebhookURL):
+		return "webhook"
+	case f.appReady():
+		return "app"
+	default:
+		return ""
+	}
+}
+
+// Ready reports whether any delivery route is usable. Remote endpoints must
+// use HTTPS; plain HTTP is accepted only on loopback, so a local relay and the
+// test suite can be exercised.
+func (f *Feishu) Ready() bool { return f.Mode() != "" }
+
+func (f *Feishu) appReady() bool {
+	return strings.TrimSpace(f.cfg.AppID) != "" &&
+		strings.TrimSpace(f.cfg.AppSecret) != "" &&
+		strings.TrimSpace(f.cfg.ReceiveID) != ""
+}
+
+// ReceiveIDType reports the recipient kind, defaulting to open_id.
+func (f *Feishu) ReceiveIDType() string {
+	switch t := strings.TrimSpace(f.cfg.ReceiveIDType); t {
+	case "user_id", "union_id", "email", "chat_id":
+		return t
+	default:
+		return "open_id"
+	}
+}
 
 // URLLooksUsable applies the HTTPS-or-loopback rule to a webhook URL.
 func URLLooksUsable(raw string) bool {
@@ -120,9 +161,18 @@ func CardTemplate(m Message) string {
 
 // Send implements Notifier.
 func (f *Feishu) Send(ctx context.Context, m Message) error {
-	if !f.Ready() {
-		return fmt.Errorf("feishu: webhook not configured (set %s)", config.EnvFeishuWebhook)
+	switch f.Mode() {
+	case "webhook":
+		return f.sendWebhook(ctx, m)
+	case "app":
+		return f.sendApp(ctx, m)
+	default:
+		return fmt.Errorf("feishu: no credentials configured (set %s, or %s + %s + %s for app delivery)",
+			config.EnvFeishuWebhook, config.EnvFeishuAppID, config.EnvFeishuAppSect, config.EnvFeishuRecvID)
 	}
+}
+
+func (f *Feishu) sendWebhook(ctx context.Context, m Message) error {
 	payload := f.Render(m)
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -283,6 +333,131 @@ func topScore(m Message) string {
 		}
 	}
 	return strconv.Itoa(best)
+}
+
+// apiResponse is the shared envelope of Feishu Open API replies.
+type apiResponse struct {
+	Code        int    `json:"code"`
+	Msg         string `json:"msg"`
+	TenantToken string `json:"tenant_access_token"`
+	Expire      int64  `json:"expire"`
+	Data        struct {
+		MessageID string `json:"message_id"`
+	} `json:"data"`
+}
+
+// sendApp delivers as the application itself via im/v1/messages, so no group
+// bot has to be created. Cards fall back to plain text rather than dropping
+// the finding.
+func (f *Feishu) sendApp(ctx context.Context, m Message) error {
+	tok, err := f.tenantToken(ctx)
+	if err != nil {
+		return err
+	}
+	card, err := json.Marshal(f.card(m))
+	if err != nil {
+		return fmt.Errorf("feishu: encode card: %w", err)
+	}
+	endpoint := f.apiBase + "/open-apis/im/v1/messages?receive_id_type=" + f.ReceiveIDType()
+
+	content := string(card)
+	for attempt, msgType := range []string{"interactive", "text"} {
+		if attempt == 1 {
+			content, _ = marshalText(m)
+		}
+		body, err := json.Marshal(map[string]any{
+			"receive_id": f.cfg.ReceiveID,
+			"msg_type":   msgType,
+			"content":    content,
+		})
+		if err != nil {
+			return fmt.Errorf("feishu: encode payload: %w", err)
+		}
+		resp, err := f.post(ctx, endpoint, tok, body)
+		if err != nil {
+			return err
+		}
+		if resp.Code == 0 {
+			return nil
+		}
+		if msgType == "interactive" {
+			continue
+		}
+		return fmt.Errorf("feishu: im/v1/messages code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	return fmt.Errorf("feishu: im/v1/messages rejected")
+}
+
+func marshalText(m Message) (string, error) {
+	b, err := json.Marshal(map[string]string{"text": strings.TrimSpace(m.Plain())})
+	return string(b), err
+}
+
+// tenantToken mints (and caches) the tenant_access_token. The app secret is
+// only ever present in the request body, never in a returned error or log line.
+func (f *Feishu) tenantToken(ctx context.Context) (string, error) {
+	f.tokMu.Lock()
+	defer f.tokMu.Unlock()
+	if f.token != "" && time.Now().Before(f.tokenTo) {
+		return f.token, nil
+	}
+	body, err := json.Marshal(map[string]string{
+		"app_id":     f.cfg.AppID,
+		"app_secret": f.cfg.AppSecret,
+	})
+	if err != nil {
+		return "", fmt.Errorf("feishu: encode auth request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		f.apiBase+"/open-apis/auth/v3/tenant_access_token/internal", bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("feishu: auth request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	raw, err := f.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("feishu: token request failed: %w", err)
+	}
+	defer raw.Body.Close()
+	var resp apiResponse
+	if err := json.NewDecoder(io.LimitReader(raw.Body, 1<<20)).Decode(&resp); err != nil {
+		return "", fmt.Errorf("feishu: undecodable token reply (HTTP %d)", raw.StatusCode)
+	}
+	if resp.Code != 0 || resp.TenantToken == "" {
+		return "", fmt.Errorf("feishu: token code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	ttl := time.Duration(resp.Expire) * time.Second
+	if ttl <= 0 {
+		ttl = 2 * time.Hour
+	}
+	if ttl > 2*time.Minute {
+		ttl -= 2 * time.Minute
+	}
+	f.token = resp.TenantToken
+	f.tokenTo = time.Now().Add(ttl)
+	return f.token, nil
+}
+
+func (f *Feishu) post(ctx context.Context, endpoint, bearer string, body []byte) (*apiResponse, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("feishu: request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	req.Header.Set("Authorization", "Bearer "+bearer)
+	raw, err := f.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("feishu: post failed: %w", err)
+	}
+	defer raw.Body.Close()
+	var resp apiResponse
+	if err := json.NewDecoder(io.LimitReader(raw.Body, 1<<20)).Decode(&resp); err != nil {
+		return nil, fmt.Errorf("feishu: undecodable reply (HTTP %d)", raw.StatusCode)
+	}
+	if resp.Code == 0 && resp.Data.MessageID == "" {
+		return &resp, fmt.Errorf("feishu: code=0 but no message id (HTTP %d)", raw.StatusCode)
+	}
+	return &resp, nil
 }
 
 func min(a, b int) int {

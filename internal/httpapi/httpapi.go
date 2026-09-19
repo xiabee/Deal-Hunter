@@ -173,6 +173,7 @@ func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 		"notify": map[string]any{
 			"backends":     s.app.Backends(),
 			"feishu_ready": s.app.FeishuReady(),
+			"feishu_mode":  s.app.FeishuMode(),
 			"feishu_host":  s.feishuHost(),
 			"relay_ready":  s.app.RelayReady(),
 			"outreach_dir": s.app.OutreachDir(),

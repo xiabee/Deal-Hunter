@@ -189,6 +189,14 @@ func (a *App) FeishuReady() bool { return a.fs != nil && a.fs.Ready() }
 // OutreachDir is where the OpenClaw drop files land (empty when disabled).
 func (a *App) OutreachDir() string { return a.drop }
 
+// FeishuMode reports the active direct-delivery route: webhook, app or "".
+func (a *App) FeishuMode() string {
+	if a.fs == nil {
+		return ""
+	}
+	return a.fs.Mode()
+}
+
 // RelayReady reports whether the OpenClaw message relay can deliver.
 func (a *App) RelayReady() bool { return a.relay != nil && a.relay.Ready() }
 
