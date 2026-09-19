@@ -190,6 +190,7 @@ func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 			"pending_alerts": len(s.app.Store().Pending(s.cfg.Notify.Feishu.MinScore, time.Time{})),
 		},
 		"last_run": s.app.LastRun(),
+		"daily":    s.app.Daily(time.Now().UTC()),
 	})
 }
 

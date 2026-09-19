@@ -507,6 +507,46 @@ func TestMultiDealAlertIsOneLinePerDeal(t *testing.T) {
 	}
 }
 
+// The morning briefing is a snapshot of what is still claimable, so each line
+// carries its lifespan and the card stays as tight as the digest.
+func TestDailyBriefingCardShowsLifespan(t *testing.T) {
+	f, _ := NewFeishu(config.Feishu{Timezone: "UTC"})
+	now := time.Now().UTC()
+	live := sampleDeal()
+	live.DiscoveredAt = now.Add(-50 * time.Hour)
+	live.Meta = map[string]string{"expires_at": now.Add(72 * time.Hour).Format(time.RFC3339)}
+	gone := sampleDeal()
+	gone.Title = "已经结束的"
+	gone.Meta = map[string]string{"expires_at": now.Add(-time.Hour).Format(time.RFC3339)}
+
+	m := NewMessage(KindDaily, "🌅 羊毛日报 · 2 条仍在效", live, gone)
+	m.Intro = "09月19日 · 未过期会再次出现"
+	if got := CardTemplate(m); got != "blue" {
+		t.Errorf("template = %s", got)
+	}
+	lines := []string{}
+	for _, e := range cardElements(f.card(m)) {
+		if e["tag"] == "div" {
+			if txt, ok := e["text"].(map[string]any); ok {
+				lines = append(lines, txt["content"].(string))
+			}
+		}
+	}
+	body := strings.Join(lines, "\n")
+	if !strings.Contains(body, "已收录 2 天") {
+		t.Errorf("the briefing should say how long the offer has been known:\n%s", body)
+	}
+	if !strings.Contains(body, "截止 ") {
+		t.Errorf("a stated deadline belongs in the briefing:\n%s", body)
+	}
+	if n := strings.Count(body, "]("); n != 2 {
+		t.Errorf("one line per deal, no expanded blocks, got %d links:\n%s", n, body)
+	}
+	if !strings.Contains(m.Plain(), "已收录 2 天") {
+		t.Errorf("the text fallback must carry the same facts:\n%s", m.Plain())
+	}
+}
+
 func TestDigestAndPlainUseTheResolvedLink(t *testing.T) {
 	const officialURL = "https://open.bigmodel.cn/pricing"
 	d := resolvedDeal(official.KindSearchVerified, officialURL)

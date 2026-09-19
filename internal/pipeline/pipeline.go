@@ -539,6 +539,116 @@ func (a *App) RecentRuns(n int) []*Run {
 func (a *App) RecentDeals(n int) []model.Deal { return a.st.Recent(n) }
 
 const digestCursor = "digest:last_sent"
+const dailyCursor = "daily:last_sent"
+
+// loc resolves the configured timezone. The service often runs in UTC, so a
+// "09:00" briefing must be computed in the user's zone, not the host's.
+func (a *App) loc() *time.Location {
+	if a.cfg.Timezone != "" {
+		if l, err := time.LoadLocation(a.cfg.Timezone); err == nil {
+			return l
+		}
+	}
+	return time.Local
+}
+
+// slotAt returns today's occurrence of "HH:MM" in the configured zone.
+func (a *App) slotAt(now time.Time, at string) (time.Time, error) {
+	hh, mm, err := parseHHMM(at)
+	if err != nil {
+		return time.Time{}, err
+	}
+	l := a.loc()
+	n := now.In(l)
+	return time.Date(n.Year(), n.Month(), n.Day(), hh, mm, 0, 0, l), nil
+}
+
+// DailyDue reports whether the morning briefing is due.
+func (a *App) DailyDue(now time.Time) bool {
+	d := a.cfg.Notify.Daily
+	if !d.Enabled {
+		return false
+	}
+	at := d.At
+	if at == "" {
+		at = "09:00"
+	}
+	sched, err := a.slotAt(now, at)
+	if err != nil {
+		a.log.Warn("daily.at is not HH:MM; the briefing is skipped", "value", at, "err", err)
+		return false
+	}
+	last, ok := a.stateTime(dailyCursor)
+	if !ok {
+		return !now.In(a.loc()).Before(sched)
+	}
+	return !now.In(a.loc()).Before(sched) && last.Before(sched)
+}
+
+// DailyPreview applies the briefing's own limits and returns the live offers.
+func (a *App) DailyPreview(now time.Time) []model.Deal {
+	d := a.cfg.Notify.Daily
+	minScore, maxItems := d.MinScore, d.MaxItems
+	if minScore <= 0 {
+		minScore = 45
+	}
+	if maxItems <= 0 {
+		maxItems = 15
+	}
+	return a.st.Live(minScore, now.UTC(), maxItems)
+}
+
+// SendDaily reports every offer that is still live, each with how long we have
+// known it and when it ends. It never marks anything as pushed: this is a
+// snapshot, not a delivery queue.
+func (a *App) SendDaily(ctx context.Context, now time.Time) error {
+	live := a.DailyPreview(now)
+	if len(live) == 0 {
+		a.log.Info("daily: nothing live to report")
+		return nil
+	}
+	msg := notify.NewMessage(notify.KindDaily,
+		fmt.Sprintf("🌅 羊毛日报 · %d 条仍在效", len(live)), live...)
+	msg.Intro = now.In(a.loc()).Format("01月02日") + " · 未过期会再次出现"
+	if err := a.nf.Send(ctx, msg); err != nil {
+		return err
+	}
+	return a.setStateTime(dailyCursor, now.UTC())
+}
+
+// DailyInfo describes the morning briefing for the status endpoint.
+type DailyInfo struct {
+	Enabled bool      `json:"enabled"`
+	At      string    `json:"at"`
+	Last    time.Time `json:"last_sent,omitempty"`
+	Next    time.Time `json:"next_due,omitempty"`
+}
+
+// Daily reports the briefing schedule and where it stands.
+func (a *App) Daily(now time.Time) DailyInfo {
+	d := a.cfg.Notify.Daily
+	at := d.At
+	if at == "" {
+		at = "09:00"
+	}
+	info := DailyInfo{Enabled: d.Enabled, At: at}
+	if t, ok := a.stateTime(dailyCursor); ok {
+		info.Last = t
+	}
+	if sched, err := a.slotAt(now, at); err == nil {
+		next := sched
+		if !now.In(a.loc()).Before(sched) {
+			next = sched.AddDate(0, 0, 1)
+		}
+		info.Next = next
+	}
+	return info
+}
+
+// LiveDeals returns the offers still worth claiming, for the panel and CLI.
+func (a *App) LiveDeals(minScore int, now time.Time, limit int) []model.Deal {
+	return a.st.Live(minScore, now, limit)
+}
 
 // DigestDue reports whether a batched summary is due now.
 func (a *App) DigestDue(now time.Time) bool {
@@ -553,12 +663,11 @@ func (a *App) DigestDue(now time.Time) bool {
 	if at := d.At; at != "" {
 		// A fixed daily slot is due once "now" has passed it and the cursor is
 		// still pointing at an earlier time.
-		hh, mm, err := parseHHMM(at)
-		if err == nil {
-			sched := time.Date(now.Year(), now.Month(), now.Day(), hh, mm, 0, 0, now.Location())
-			return !now.Before(sched) && last.Before(sched)
+		if sched, err := a.slotAt(now, at); err == nil {
+			return !now.In(a.loc()).Before(sched) && last.Before(sched)
+		} else {
+			a.log.Warn("digest.at is not HH:MM, falling back to the interval", "value", at, "err", err)
 		}
-		a.log.Warn("digest.at is not HH:MM, falling back to the interval", "value", at, "err", err)
 	}
 	every := d.Every.D()
 	if every <= 0 {
@@ -602,6 +711,27 @@ func (a *App) SendDigest(ctx context.Context) error {
 		}
 	}
 	return a.setDigestCursor(time.Now().UTC())
+}
+
+// stateTime reads an RFC3339 timestamp stored under key.
+func (a *App) stateTime(key string) (time.Time, bool) {
+	b, ok := a.st.GetState(key)
+	if !ok {
+		return time.Time{}, false
+	}
+	var s string
+	if json.Unmarshal(b, &s) != nil {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
+func (a *App) setStateTime(key string, t time.Time) error {
+	return a.st.PutState(key, t.Format(time.RFC3339))
 }
 
 func (a *App) digestCursor() (time.Time, bool) {

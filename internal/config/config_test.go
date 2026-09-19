@@ -95,6 +95,48 @@ func TestEnvOverrides(t *testing.T) {
 	}
 }
 
+// The morning briefing ships on: a feature nobody is told about in the README
+// and nobody receives by default is the same as absent.
+func TestDailyBriefingDefaultsAndEnv(t *testing.T) {
+	d := Default().Notify.Daily
+	if !d.Enabled || d.At != "09:00" || d.MinScore <= 0 || d.MaxItems <= 0 {
+		t.Fatalf("unexpected defaults: %+v", d)
+	}
+	if Default().Timezone == "" {
+		t.Fatal("the briefing slot is meaningless without a timezone")
+	}
+
+	t.Setenv(EnvDailyAt, "07:30")
+	t.Setenv(EnvDailyEnabled, "false")
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Notify.Daily.At != "07:30" {
+		t.Errorf("at = %q", cfg.Notify.Daily.At)
+	}
+	if cfg.Notify.Daily.Enabled {
+		t.Error("DH_DAILY_ENABLED=false must disable the briefing")
+	}
+
+	// A file may re-enable it and set the shape of the report.
+	path := filepath.Join(t.TempDir(), "config.json")
+	body := `{"notify":{"daily":{"enabled":true,"at":"08:15","min_score":55,"max_items":8}}}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(EnvDailyEnabled, "")
+	t.Setenv(EnvDailyAt, "") // env wins over the file, so clear it to test the file
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got := loaded.Notify.Daily
+	if !got.Enabled || got.At != "08:15" || got.MinScore != 55 || got.MaxItems != 8 {
+		t.Errorf("file config not applied: %+v", got)
+	}
+}
+
 func TestSecretsCannotBeSmuggledThroughTheConfigFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")

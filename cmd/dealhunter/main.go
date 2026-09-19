@@ -43,7 +43,8 @@ const usage = `Deal-Hunter — 全网羊毛雷达（Go 单二进制）
   probe         采集单个信息源并打印结果（不写库、不推送）
   sources       列出全部信息源
   deals         打印最近入库的发现
-  digest        立刻发送/落盘一次盘点摘要
+  digest        立刻发送/落盘一次盘点摘要（待推送队列）
+  daily         立刻发送早报（当前仍在效的免费/优惠）；-dry 只列出不发送
   notify-test   向所有已配置通道发送自检消息
   doctor        配置、密钥、目录、外连可达性体检
   secretscan    扫描仓库中的凭证与内网拓扑信息（开源发布门禁）
@@ -97,6 +98,7 @@ func cli(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		"sources":     func(_ context.Context, _ []string) int { return cmdSources(cfg, stdout) },
 		"deals":       func(_ context.Context, a []string) int { return cmdDeals(cfg, stdout, a) },
 		"digest":      func(c context.Context, _ []string) int { return cmdDigest(c, cfg, log, stdout) },
+		"daily":       func(c context.Context, a []string) int { return cmdDaily(c, cfg, log, stdout, a) },
 		"notify-test": func(c context.Context, _ []string) int { return cmdNotifyTest(c, cfg, log, stdout) },
 		"doctor":      func(c context.Context, a []string) int { return cmdDoctor(c, cfg, log, stdout, a) },
 		"secretscan":  func(_ context.Context, a []string) int { return cmdSecretScan(stdout, stderr, a) },
@@ -427,6 +429,39 @@ func cmdDeals(cfg *config.Config, stdout io.Writer, args []string) int {
 	if shown == 0 {
 		fmt.Fprintln(stdout, "暂无记录：先跑 `dealhunter once`")
 	}
+	return 0
+}
+
+// cmdDaily sends the morning briefing, or lists it with -dry.
+func cmdDaily(ctx context.Context, cfg *config.Config, log *slog.Logger, stdout io.Writer, args []string) int {
+	fs := flag.NewFlagSet("daily", flag.ContinueOnError)
+	fs.SetOutput(stdout)
+	dry := fs.Bool("dry", false, "只列出当前在效的羊毛，不发送")
+	_ = fs.Parse(args)
+
+	app, err := pipeline.New(cfg, log)
+	if err != nil {
+		fmt.Fprintf(stdout, "启动失败：%v\n", err)
+		return 1
+	}
+	defer app.Close()
+
+	now := time.Now()
+	if *dry {
+		live := app.DailyPreview(now)
+		info := app.Daily(now)
+		fmt.Fprintf(stdout, "当前在效 %d 条 · 日报时间 %s（%s）\n", len(live), info.At, cfg.Timezone)
+		for _, d := range live {
+			dl := d
+			fmt.Fprintf(stdout, "  %s\n", notify.DailyLine(&dl, now))
+		}
+		return 0
+	}
+	if err := app.SendDaily(ctx, now); err != nil {
+		fmt.Fprintf(stdout, "日报发送失败：%v\n", err)
+		return 1
+	}
+	fmt.Fprintln(stdout, "✓ 日报已发送（或当前无在效内容）")
 	return 0
 }
 

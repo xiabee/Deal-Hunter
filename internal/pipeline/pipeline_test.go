@@ -370,6 +370,65 @@ func TestRepostOfTheSameAnnouncementIsFolded(t *testing.T) {
 	}
 }
 
+// The briefing is scheduled in the user's timezone, not the host's: the service
+// runs in UTC while the reader is on Asia/Shanghai.
+func TestDailyBriefingFollowsTheConfiguredZoneAndSendsOnce(t *testing.T) {
+	spy := &spyNotifier{}
+	app := testApp(t, &cannedFetcher{}, spy, nil)
+	// 09:00 Beijing on a day the host clock (UTC) is somewhere else entirely.
+	at := time.Date(2026, 9, 19, 1, 0, 0, 0, time.UTC)
+
+	seed := []*model.Deal{
+		{URL: "https://a.test/free", Title: "GLM 免费额度", Source: "rss", Score: 88, IsFree: true,
+			DiscoveredAt: at.Add(-72 * time.Hour)},
+		{URL: "https://b.test/act", Title: "上周截止的活动", Source: "rss", Score: 90, IsFree: true,
+			DiscoveredAt: at.Add(-10 * time.Hour),
+			Meta:         map[string]string{"expires_at": at.Add(-time.Hour).Format(time.RFC3339)}},
+	}
+	for _, d := range seed {
+		d.EnsureFingerprint()
+		if err := app.Store().Save(d); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	before := at.Add(-time.Minute) // 08:59 Beijing
+	if app.DailyDue(before) {
+		t.Error("08:59 Beijing is too early")
+	}
+	if !app.DailyDue(at) {
+		t.Error("09:00 Beijing should be due")
+	}
+
+	if err := app.SendDaily(context.Background(), at); err != nil {
+		t.Fatalf("SendDaily: %v", err)
+	}
+	msgs := spy.all()
+	if len(msgs) != 1 {
+		t.Fatalf("expected one briefing, got %d", len(msgs))
+	}
+	m := msgs[0]
+	if m.Kind != notify.KindDaily {
+		t.Errorf("kind = %s", m.Kind)
+	}
+	if len(m.Deals) != 1 || !strings.Contains(m.Deals[0].Title, "GLM") {
+		t.Fatalf("only the live offer belongs in the briefing: %+v", m.Deals)
+	}
+	if !strings.Contains(notify.DailyLine(&m.Deals[0], at), "已收录 3 天") {
+		t.Error("the briefing must say how long the offer has been known")
+	}
+	// A snapshot does not consume the alert queue.
+	if got := app.Store().Pending(45, time.Time{}); len(got) != 2 {
+		t.Errorf("daily must not mark deals pushed, pending = %d", len(got))
+	}
+	if app.DailyDue(at.Add(time.Hour)) {
+		t.Error("must not fire twice on the same day")
+	}
+	if !app.DailyDue(at.Add(24 * time.Hour)) {
+		t.Error("must be due again the next day")
+	}
+}
+
 func TestAlertThresholdIsHonoured(t *testing.T) {
 	f := &cannedFetcher{byURL: map[string][]byte{feedURL: feedBody(t)}}
 	spy := &spyNotifier{}

@@ -63,7 +63,13 @@ func (l *Loop) round(ctx context.Context, trigger string) {
 	if run == nil {
 		return
 	}
-	if l.App.DigestDue(time.Now()) {
+	now := time.Now()
+	if l.App.DailyDue(now) {
+		if err := l.App.SendDaily(ctx, now); err != nil && ctx.Err() == nil {
+			l.Log.Warn("daily briefing failed", "err", err)
+		}
+	}
+	if l.App.DigestDue(now) {
 		if err := l.App.SendDigest(ctx); err != nil && ctx.Err() == nil {
 			l.Log.Warn("digest delivery failed", "err", err)
 		}

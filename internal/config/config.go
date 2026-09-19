@@ -114,6 +114,17 @@ type OpenClaw struct {
 	Target      string   `json:"-"`
 }
 
+// Daily is the morning briefing: every offer still worth claiming right now,
+// with how long we have known about it and when it ends. Unlike the digest it
+// re-reads the whole store instead of what arrived since last time, because a
+// three-day-old free tier is still free today.
+type Daily struct {
+	Enabled  bool   `json:"enabled"`
+	At       string `json:"at,omitempty"` // "09:00" in the configured timezone
+	MinScore int    `json:"min_score,omitempty"`
+	MaxItems int    `json:"max_items,omitempty"`
+}
+
 // Digest batches sub-threshold findings into one periodic summary.
 type Digest struct {
 	Enabled  bool     `json:"enabled"`
@@ -128,6 +139,7 @@ type Notify struct {
 	Feishu   Feishu   `json:"feishu"`
 	OpenClaw OpenClaw `json:"openclaw"`
 	Digest   Digest   `json:"digest"`
+	Daily    Daily    `json:"daily"`
 	Console  bool     `json:"console"`
 }
 
@@ -196,6 +208,8 @@ const (
 	EnvServerEnabled  = "DH_SERVER_ENABLED"
 	EnvAllowPublic    = "DH_ALLOW_PUBLIC_BIND"
 	EnvDigestEnabled  = "DH_DIGEST_ENABLED"
+	EnvDailyEnabled   = "DH_DAILY_ENABLED"
+	EnvDailyAt        = "DH_DAILY_AT"
 	// OpenClaw relay: the destination chat id stays out of the config file.
 	EnvOpenClawTarget = "DH_OPENCLAW_TARGET"
 	EnvOpenClawCmd    = "DH_OPENCLAW_COMMAND"
@@ -230,6 +244,7 @@ func Default() *Config {
 			Feishu:   Feishu{Enabled: true, MinScore: 62, MaxPerRun: 6, DeduplicateMinutes: 90, Timezone: "Asia/Shanghai"},
 			OpenClaw: OpenClaw{Enabled: true, SkillDir: "", APIPath: "/api/v1/", Description: "Deal-Hunter 羊毛情报"},
 			Digest:   Digest{Enabled: true, Every: Duration(6 * time.Hour), MinScore: 45, MaxItems: 12},
+			Daily:    Daily{Enabled: true, At: "09:00", MinScore: 45, MaxItems: 15},
 			Console:  true,
 		},
 		Sources: DefaultSources(),
@@ -417,6 +432,12 @@ func (c *Config) applyEnv() {
 	}
 	if v := os.Getenv(EnvDigestEnabled); v != "" {
 		c.Notify.Digest.Enabled = isTruthy(v)
+	}
+	if v := os.Getenv(EnvDailyEnabled); v != "" {
+		c.Notify.Daily.Enabled = isTruthy(v)
+	}
+	if v := strings.TrimSpace(os.Getenv(EnvDailyAt)); v != "" {
+		c.Notify.Daily.At = v
 	}
 }
 

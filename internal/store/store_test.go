@@ -145,6 +145,54 @@ func TestRepostsWithoutTagsAreFoldedWhenLoaded(t *testing.T) {
 	}
 }
 
+// The morning report must show what can still be claimed today: no expired
+// offers, no repeats, best first.
+func TestLiveSkipsExpiredRepeatsAndRanksByScore(t *testing.T) {
+	st, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	now := time.Now().UTC()
+
+	mk := func(fp, url, title string, score int, meta map[string]string) *model.Deal {
+		return &model.Deal{Fingerprint: fp, URL: url, Title: title, Score: score,
+			IsFree: true, DiscoveredAt: now.Add(-48 * time.Hour), Meta: meta}
+	}
+	fresh := mk("f1", "https://a.test/free", "GLM 免费额度", 88, map[string]string{})
+	expired := mk("e1", "https://b.test/free", "上周的活动", 90,
+		map[string]string{"expires_at": now.Add(-24 * time.Hour).Format(time.RFC3339)})
+	untilTomorrow := mk("u1", "https://c.test/free", "明天截止", 60,
+		map[string]string{"expires_at": now.Add(24 * time.Hour).Format(time.RFC3339)})
+	repeat := mk("r1", "https://d.test/free", "GLM 免费额度", 80, map[string]string{"dup_of": "f1"})
+	low := mk("l1", "https://e.test/free", "不值一提", 20, map[string]string{})
+	noOffer := &model.Deal{Fingerprint: "n1", URL: "https://f.test/news", Title: "一篇讲价格的文章",
+		Score: 77, DiscoveredAt: now, Offers: []model.Offer{{Kind: model.KindUnknown}}}
+
+	for _, d := range []*model.Deal{fresh, expired, untilTomorrow, repeat, low, noOffer} {
+		if err := st.Save(d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var got []string
+	for _, d := range st.Live(45, now, 10) {
+		got = append(got, d.Fingerprint)
+	}
+	// e1 expired, r1 is a repeat, l1 scored too low, n1 is news rather than an offer.
+	want := []string{"f1", "u1"}
+	if len(got) != len(want) {
+		t.Fatalf("Live() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("Live()[%d] = %s, want %s", i, got[i], want[i])
+		}
+	}
+	if len(st.Live(45, now, 1)) != 1 {
+		t.Error("limit must truncate the ranking")
+	}
+}
+
 func TestTornLastLineIsIgnored(t *testing.T) {
 	dir := t.TempDir()
 	s, err := Open(dir)

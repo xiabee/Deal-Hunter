@@ -42,6 +42,12 @@
       "channel": "feishu",
       "timeout": "30s"
     },
+    "daily": {
+      "enabled": true,
+      "at": "09:00",
+      "min_score": 45,
+      "max_items": 15
+    },
     "digest": {
       "enabled": true,
       "every": "6h",

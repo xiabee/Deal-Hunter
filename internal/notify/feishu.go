@@ -139,7 +139,7 @@ func (f *Feishu) QuietNow(now time.Time) bool {
 // CardTemplate picks the header colour from the deal's shape.
 func CardTemplate(m Message) string {
 	switch m.Kind {
-	case KindDigest:
+	case KindDigest, KindDaily:
 		return "blue"
 	case KindTest, KindError:
 		return "grey"
@@ -232,6 +232,10 @@ func (f *Feishu) card(m Message) map[string]any {
 		elements = append(elements, md("**"+m.Intro+"**"))
 	}
 	switch m.Kind {
+	case KindDaily:
+		for i := range m.Deals {
+			elements = append(elements, md(dailyCardLine(&m.Deals[i], m.CreatedAt)))
+		}
 	case KindDigest:
 		for i := range m.Deals {
 			elements = append(elements, md(alertLine(&m.Deals[i])))
@@ -278,6 +282,16 @@ func alertLine(d *model.Deal) string {
 		Icon(d), title, link, d.Score, LinkMark(kind)))
 }
 
+// dailyCardLine is the briefing row: the same tappable line as an alert, plus
+// how long the offer has been known and when it ends.
+func dailyCardLine(d *model.Deal, now time.Time) string {
+	line := alertLine(d)
+	if life := Lifespan(d, now); life != "" {
+		line += " · " + life
+	}
+	return line
+}
+
 // singleDealBody is the one-deal layout: score, where the offer came from, and
 // at most one short quote.
 func singleDealBody(d *model.Deal) []map[string]any {
@@ -306,7 +320,10 @@ func (f *Feishu) title(m Message) string {
 		return m.Title
 	}
 	if m.Kind == KindDigest {
-		return fmt.Sprintf("🧺 羊毛日报 · %d 条", len(m.Deals))
+		return fmt.Sprintf("🧺 羊毛盘点 · %d 条", len(m.Deals))
+	}
+	if m.Kind == KindDaily {
+		return fmt.Sprintf("🌅 羊毛日报 · %d 条仍在效", len(m.Deals))
 	}
 	if len(m.Deals) > 0 {
 		return Headline(&m.Deals[0])

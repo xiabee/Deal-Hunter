@@ -14,6 +14,7 @@
 单二进制、零外部依赖、只读面板，默认全部信息源都无需 API Key。
 
 - 🛰 **自主探测优先**：不依赖别人整理好的清单——直接比对模型目录价格、自建关键词检索、对厂商页面做快照差分
+- 🌅 **每天 09:00 早报**：把当前仍在效的免费/优惠重列一遍，带收录时长与截止时间
 - 🧠 **可解释评分**：每条情报带 0–100 置信分与打分理由，低于阈值进日报，不骚扰
 - 📲 **两条投递路径**：飞书群机器人卡片（直接调用）**或** OpenClaw 中转（复用助手已有的飞书连接）
 - 🔒 **默认不外网暴露**：面板/接口只允许回环或 Tailscale 地址，公网绑定需显式 opt-in
@@ -47,9 +48,11 @@ flowchart LR
 
     F -- "是 · 非静默时段" --> N1["📲 飞书卡片<br/>webhook + 签名"]
     F -- "是 · 静默时段" --> HOLD["⏸ 暂存待播报"]
-    F -- "否" --> DIG["🧺 日报聚合"]
+    F -- "否" --> DIG["🧺 盘点聚合"]
     HOLD --> DIG
     DIG --> N1
+    D --> DAY["🌅 每天 09:00 早报<br/>重看全库、只留在效的"]
+    DAY --> N1
     N1 -.-> N2["🤖 OpenClaw 中转<br/>message send"]
     N1 -.-> N3["📁 文件投递<br/>workspace skill"]
 
@@ -198,8 +201,12 @@ open http://127.0.0.1:8765/          # 内置状态面板
 ```jsonc
 {
   "interval": "30m",
+  "timezone": "Asia/Shanghai",
   "filter":   { "min_score": 55, "require_offer": true },
-  "notify":   { "feishu": { "min_score": 62, "max_per_run": 6, "silent_hours": [0,1,2,3,4,5,6] } },
+  "notify": {
+    "feishu": { "min_score": 62, "max_per_run": 6, "silent_hours": [0,1,2,3,4,5,6] },
+    "daily":  { "enabled": true, "at": "09:00", "min_score": 45, "max_items": 15 }
+  },
   "server":   { "bind": "127.0.0.1:8765" }
 }
 ```
@@ -209,6 +216,7 @@ open http://127.0.0.1:8765/          # 内置状态面板
 | `DH_FEISHU_WEBHOOK` / `DH_FEISHU_SECRET` | 群机器人地址与签名密钥（**永不进配置文件**） |
 | `DH_OPENCLAW_RELAY` / `DH_OPENCLAW_TARGET` | 启用 OpenClaw 中转与目标会话 |
 | `DH_MIN_SCORE` / `DH_INTERVAL` / `DH_LOG_LEVEL` | 运行时调参 |
+| `DH_DAILY_ENABLED` / `DH_DAILY_AT` | 早报开关与时刻（按 `timezone` 解释） |
 | `DH_DATA_DIR` / `DH_CONFIG` / `DH_ENV_FILE` | 路径与 env 文件 |
 | `DH_SERVER_BIND` / `DH_ALLOW_PUBLIC_BIND` | 面板绑定；公网绑定需显式 opt-in |
 
@@ -293,6 +301,31 @@ Deal-Hunter · 09-19 15:41
 `✅` = 链接已在厂商自己的域名上核实过；`⚠️` = 只有第三方转述，点进去自己判断。
 评分理由、标签、命中词、原始出处都在面板与 `/api/v1/deals` 里，卡片不再重复。
 
+### 🌅 每天 09:00 的早报
+
+告警是"发现即推"，早报是"今天还有什么能领"。它不读待推送队列，而是重看**整个库**，
+只留下还没过期、且确实是免费/优惠的条目，所以一条三天前发布的免费额度今天仍然在列：
+
+```text
+🌅 羊毛日报 · 12 条仍在效                       ← 抬头：条数即结论
+09月19日 · 未过期会再次出现
+🆓 [OpenRouter 免费模型：Nex-N2.5-Mini](…) · 87 ✅ · 已收录 3 天
+🆓 [智谱 GLM-5.3-flash 限时免费](…) · 92 ✅ · 已收录 5 天 · 截止 10-01
+🏷️ [阿里云 Qwen3.8-Max 5 折](…) · 71 ⚠️ · 已收录 2 天
+Deal-Hunter · 09-19 09:00
+```
+
+| 字段 | 来源 |
+|---|---|
+| 是否仍在效 | 评分时解析到的截止日期（`meta.expires_at`）没过期，或压根没有期限 |
+| 已收录 N 天 | 首次发现时间 → 现在，回答"我睡过了多久" |
+| 截止 MM-DD | 活动自己声明的期限，没有就不显示 |
+| 重复的旧条目 | 早报是快照，**不会**把条目重新标成已推送，也不影响告警队列 |
+
+时刻按 `timezone`（默认 `Asia/Shanghai`）解释，服务跑在 UTC 也不受影响；
+`DH_DAILY_ENABLED=0` 或 `notify.daily.enabled=false` 可关闭，`dealhunter daily -dry`
+随时预览，`dealhunter daily` 立刻发一次。
+
 ---
 
 ## 📲 投递路径怎么选
@@ -329,7 +362,8 @@ dealhunter [全局参数] <命令>
   probe         单源探测（不写库、不推送，便于排障）
   sources       列出信息源
   deals         查看最近入库
-  digest        立刻生成并投递一次日报
+  digest        立刻生成并投递一次盘点摘要（待推送队列）
+  daily         立刻发送早报（当前仍在效的免费/优惠）；-dry 只列出
   notify-test   全通道链路自检
   doctor        配置/密钥/目录/外连 体检
   secretscan    敏感信息与内网拓扑扫描（发布门禁）
@@ -421,7 +455,8 @@ sudo ./deploy/openclaw/install-openclaw-relay.sh --target <feishu 用户或群 i
 ## 🗺 Roadmap
 
 - [ ] 更多官方目录差分（推理云平台 / 向量库 / GPU 云）
-- [ ] 羊毛到期提醒（结合已解析的 `expires_at`）
+- [x] 每天 09:00 早报：重列当前仍在效的免费/优惠，带收录时长与 `expires_at` 截止日
+- [ ] 到期前提醒（早报已展示截止日，尚缺"明天到期"单独一条）
 - [x] 近似标题去重：同一活动被多个源转发时只播一次（`meta.dup_of`，面板默认折叠）
 - [ ] 可选 SQLite 后端（当前 JSONL 对个人规模足够）
 - [ ] Webhook 多群路由与分类订阅

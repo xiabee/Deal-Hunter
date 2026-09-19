@@ -165,6 +165,7 @@
     <div class="status">
       <div class="pill"><span class="dot" id="dot-feishu"></span>飞书 <b id="feishu">—</b></div>
       <div class="pill"><span class="dot" id="dot-run"></span>下一轮 <b id="next">—</b></div>
+      <div class="pill" id="pill-daily" hidden>🌅 日报 <b id="daily">—</b></div>
       <div class="pill"><span class="dot ok" id="dot-sync"></span>最后同步 <b id="sync">—</b></div>
     </div>
   </header>
@@ -388,6 +389,11 @@ async function loadStatus(){
   const ok = !!s.feishu_ready;
   $('feishu').textContent = ok ? (s.feishu_mode || '就绪') : '未配置';
   $('dot-feishu').className = 'dot ' + (ok ? 'ok' : 'warn');
+  const daily = s.daily || {};
+  if (daily.enabled){
+    $('pill-daily').hidden = false;
+    $('daily').textContent = daily.at + (daily.next_due ? ' · ' + rel(daily.next_due) : '');
+  }
   const st = s.store || {};
   seen = st.deals_seen ?? 0;
   $('k-seen').textContent = seen;

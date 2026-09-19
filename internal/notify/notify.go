@@ -22,6 +22,7 @@ type Kind string
 const (
 	KindAlert  Kind = "alert"
 	KindDigest Kind = "digest"
+	KindDaily  Kind = "daily"
 	KindTest   Kind = "test"
 	KindError  Kind = "error"
 )
@@ -114,6 +115,10 @@ func (m Message) Plain() string {
 	}
 	b.WriteString("\n")
 	for i := range m.Deals {
+		if m.Kind == KindDaily {
+			b.WriteString("  " + DailyLine(&m.Deals[i], m.CreatedAt) + "\n")
+			continue
+		}
 		b.WriteString("  " + Line(&m.Deals[i]) + "\n")
 	}
 	return b.String()
@@ -131,6 +136,44 @@ func Line(d *model.Deal) string {
 		parts = append(parts, best)
 	}
 	return strings.Join(parts, " ")
+}
+
+// DailyLine states the offer plus its lifespan: how long we have known about it
+// and when it ends, which is what a morning briefing is actually for.
+func DailyLine(d *model.Deal, now time.Time) string {
+	return strings.Join([]string{Line(d), Lifespan(d, now)}, " · ")
+}
+
+// Lifespan states how long the offer has been on record and when it ends, which
+// is the difference a morning briefing has to answer: is this still gettable,
+// and how much of it have I already slept through.
+func Lifespan(d *model.Deal, now time.Time) string {
+	parts := []string{}
+	if age := KnownFor(d.DiscoveredAt, now); age != "" {
+		parts = append(parts, age)
+	}
+	if exp := d.Meta["expires_at"]; exp != "" {
+		if t, err := time.Parse(time.RFC3339, exp); err == nil {
+			parts = append(parts, "截止 "+t.Format("01-02"))
+		}
+	}
+	return strings.Join(parts, " · ")
+}
+
+// KnownFor renders how long a finding has been on record.
+func KnownFor(since, now time.Time) string {
+	if since.IsZero() {
+		return ""
+	}
+	d := now.Sub(since)
+	switch {
+	case d < time.Hour:
+		return "刚收录"
+	case d < 24*time.Hour:
+		return fmt.Sprintf("已收录 %d 小时", int(d.Hours()))
+	default:
+		return fmt.Sprintf("已收录 %d 天", int(d.Hours()/24))
+	}
 }
 
 // LinkFor returns the URL worth clicking, the post it came from, and how the

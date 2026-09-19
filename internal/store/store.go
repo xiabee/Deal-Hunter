@@ -308,6 +308,60 @@ func (s *Store) recentLocked(n int) []model.Deal {
 	return out
 }
 
+// Live returns offers that are still worth reporting: they carry a free or
+// discount signal, have not passed a stated deadline, and scored at or above
+// min. Highest score first, so a caller can truncate to the top N safely.
+func (s *Store) Live(min int, now time.Time, limit int) []model.Deal {
+	var out []model.Deal
+	for _, d := range s.Recent(20000) {
+		if d.Meta["dup_of"] != "" || d.Score < min || !liveOffer(d) {
+			continue
+		}
+		if exp, ok := deadline(d); ok && exp.Before(now) {
+			continue // the offer said when it ends, and that moment has passed
+		}
+		out = append(out, d)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Score != out[j].Score {
+			return out[i].Score > out[j].Score
+		}
+		return out[i].DiscoveredAt.After(out[j].DiscoveredAt)
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
+// liveOffer reports whether the finding describes an offer that can still be
+// taken, rather than a news item about pricing.
+func liveOffer(d model.Deal) bool {
+	if d.IsFree || d.DiscountPct > 0 {
+		return true
+	}
+	for _, o := range d.Offers {
+		switch o.Kind {
+		case model.KindFree, model.KindDiscount, model.KindTrial, model.KindCredit, model.KindCoupon:
+			return true
+		}
+	}
+	return false
+}
+
+// deadline reads the expiry recorded at scoring time.
+func deadline(d model.Deal) (time.Time, bool) {
+	v := d.Meta["expires_at"]
+	if v == "" {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339, v)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
 // Pending returns deals that scored at or above min but were never pushed.
 func (s *Store) Pending(min int, since time.Time) []model.Deal {
 	var out []model.Deal
