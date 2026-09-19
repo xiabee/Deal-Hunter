@@ -71,12 +71,16 @@ func (f *FanOut) Names() []string {
 // Len reports how many backends are wired up.
 func (f *FanOut) Len() int { return len(f.items) }
 
-// Send delivers m to all backends.
+// Send delivers m to all backends. Failure semantics matter: a finding counts
+// as delivered if ANY backend accepted it, so a broken secondary channel (for
+// example a relay awaiting credentials) cannot make alerts re-fire every round
+// or pile up in the digest. Only an all-backend failure is reported.
 func (f *FanOut) Send(ctx context.Context, m Message) error {
 	if len(f.items) == 0 {
 		return errors.New("notify: no backends configured")
 	}
 	var errs []error
+	ok := 0
 	for _, n := range f.items {
 		c, cancel := context.WithTimeout(ctx, 25*time.Second)
 		err := n.Send(c, m)
@@ -86,7 +90,15 @@ func (f *FanOut) Send(ctx context.Context, m Message) error {
 			f.log.Warn("notify: delivery failed", "backend", n.Name(), "kind", m.Kind, "err", err)
 			continue
 		}
+		ok++
 		f.log.Info("notify: delivered", "backend", n.Name(), "kind", m.Kind, "items", len(m.Deals))
+	}
+	if ok > 0 {
+		if len(errs) > 0 {
+			f.log.Warn("notify: partially delivered", "ok", ok, "failed", len(errs),
+				"backend_total", len(f.items), "err", errors.Join(errs...))
+		}
+		return nil
 	}
 	return errors.Join(errs...)
 }

@@ -313,11 +313,23 @@ systemd 单元带 `ProtectSystem=strict`、`PrivateTmp`、`RestrictAddressFamili
 **OpenClaw 联动（可选）**：
 
 ```bash
-# 以 OpenClaw 的运行用户执行：只放只读查询脚本 + 技能说明，不碰任何凭据
+# A. 只读拉取：以 OpenClaw 的运行用户执行，只放查询脚本 + 技能说明，不碰任何凭据
 ./deploy/openclaw/install-openclaw-integration.sh
-# 需要中转推送时，给服务账户一条最小 sudoers 规则
-sudo install -m 0440 deploy/sudoers-deal-hunter /etc/sudoers.d/deal-hunter
+
+# B. 主动中转：复用助手已连接的飞书会话，不再新建机器人
+sudo ./deploy/openclaw/install-openclaw-relay.sh --target <feishu 用户或群 id>
 ```
+
+中转的权限模型值得说明：网关 token 只落盘在 `root:<gatewayUser> 0640` 的文件里，
+服务账户通过一条 sudoers 规则只能调用那个「仅转发 `message send`、并拒绝
+`--media/--presentation` 等危险参数」的包装脚本 —— 它拿不到 token 本身，
+也无法借道执行别的 OpenClaw 子命令。
+
+> ⚠️ 已知限制：若 OpenClaw 配置里的 `gateway.auth.token` 是**密钥引用**（`{"source":"env",...}`）
+> 而不是字面量，该发行版的 `openclaw message send` 本地路径解析不到它，会直接回一句
+> `GATEWAY_SECRET_REF_UNAVAILABLE` —— 即使我们已经注入了同名环境变量也不行。
+> 此时用路径 A（拉取）或路径 一（群机器人 webhook）即可，脚本会在预检阶段把这条结论打印出来，
+> 并在失败时不把通道标记为可用，避免每轮空转刷日志。
 
 ---
 

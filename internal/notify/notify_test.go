@@ -263,22 +263,39 @@ func TestFileDropWritesArtifacts(t *testing.T) {
 	}
 }
 
-func TestFanOutToleratesOneFailingBackend(t *testing.T) {
+func TestFanOutTreatsPartialSuccessAsDelivered(t *testing.T) {
 	ok := &recordingNotifier{}
 	bad := &failingNotifier{err: errors.New("webhook down")}
 	f := NewFanOut(nil, bad, ok)
 	if f.Len() != 2 {
 		t.Fatalf("Len = %d", f.Len())
 	}
+	// A broken secondary channel must not make the pipeline re-alert findings
+	// that already reached the user through a healthy backend.
 	err := f.Send(context.Background(), NewMessage(KindAlert, "t", sampleDeal()))
-	if err == nil || !strings.Contains(err.Error(), "webhook down") {
-		t.Fatalf("expected the failure to be reported, got %v", err)
+	if err != nil {
+		t.Fatalf("partial success should not be an error, got %v", err)
 	}
 	if ok.calls != 1 {
 		t.Errorf("healthy backends must still receive the message, calls=%d", ok.calls)
 	}
 	if got := f.Names(); len(got) != 2 || got[0] != "failing" {
 		t.Errorf("Names = %v", got)
+	}
+}
+
+func TestFanOutErrorsOnlyWhenEveryBackendFails(t *testing.T) {
+	f := NewFanOut(nil,
+		&failingNotifier{err: errors.New("relay down")},
+		&failingNotifier{err: errors.New("webhook down")})
+	err := f.Send(context.Background(), NewMessage(KindAlert, "t", sampleDeal()))
+	if err == nil {
+		t.Fatal("all-backend failure must be reported")
+	}
+	for _, want := range []string{"relay down", "webhook down"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("joined error missing %q: %v", want, err)
+		}
 	}
 }
 
