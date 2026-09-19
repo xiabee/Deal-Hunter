@@ -22,6 +22,7 @@ import (
 	"github.com/xiabee/deal-hunter/internal/httpx"
 	"github.com/xiabee/deal-hunter/internal/keywords"
 	"github.com/xiabee/deal-hunter/internal/model"
+	"github.com/xiabee/deal-hunter/internal/notify"
 	"github.com/xiabee/deal-hunter/internal/pipeline"
 	"github.com/xiabee/deal-hunter/internal/scheduler"
 	"github.com/xiabee/deal-hunter/internal/secretlint"
@@ -313,6 +314,13 @@ func cmdProbe(ctx context.Context, cfg *config.Config, log *slog.Logger, stdout 
 	return 0
 }
 
+// presentedLink mirrors what the card and the panel point at: the verified
+// vendor page when we found one, otherwise the post the deal came from.
+func presentedLink(d model.Deal) (url, mark string) {
+	best, _, kind := notify.LinkFor(&d)
+	return best, notify.LinkMark(kind)
+}
+
 func newFetcher(cfg *config.Config) *httpx.Client {
 	return httpx.New(httpx.Options{
 		UserAgent:    cfg.HTTP.UserAgent,
@@ -392,7 +400,7 @@ func cmdDeals(cfg *config.Config, stdout io.Writer, args []string) int {
 	}
 	defer st.Close()
 	w := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "分数\t推送\t来源\t标题\t发现时间")
+	fmt.Fprintln(w, "分数\t推送\t来源\t标题\t链接\t发现时间")
 	shown := 0
 	for _, d := range st.Recent(5000) {
 		if d.Score < *minScore {
@@ -402,7 +410,9 @@ func cmdDeals(cfg *config.Config, stdout io.Writer, args []string) int {
 		if d.Meta["pushed"] == "true" {
 			pushed = "📣"
 		}
-		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\n", d.Score, pushed, truncate(d.Source, 18), truncate(d.Title, 52),
+		link, mark := presentedLink(d)
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s%s\t%s\n", d.Score, pushed, truncate(d.Source, 18),
+			truncate(d.Title, 52), mark, truncate(link, 46),
 			d.DiscoveredAt.Local().Format("01-02 15:04"))
 		if shown++; shown >= *n {
 			break

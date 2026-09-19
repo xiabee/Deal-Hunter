@@ -110,6 +110,29 @@ func TestCompactAndDealsOnEmptyStore(t *testing.T) {
 	}
 }
 
+func TestDealsPresentsTheVerifiedOfficialLink(t *testing.T) {
+	// A stored deal carries the resolver's verdict in meta; the operator must see
+	// the same link the Feishu card points at.
+	const row = `{"fingerprint":"abc","url":"https://www.v2ex.com/t/1","title":"智谱 GLM-5.3-flash 免费",` +
+		`"source":"rss","category":"ai_free","score":88,"is_free":true,` +
+		`"discovered_at":"2026-09-19T01:02:03Z","meta":{"link_kind":"vendor_entry",` +
+		`"official_url":"https://open.bigmodel.cn/pricing","original_url":"https://www.v2ex.com/t/1"}}` + "\n"
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "deals.jsonl"), []byte(row), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, out := run(t, "-data", dir, "deals")
+	if code != 0 {
+		t.Fatalf("code=%d out=%s", code, out)
+	}
+	if !strings.Contains(out, "open.bigmodel.cn/pricing") || !strings.Contains(out, "✅") {
+		t.Errorf("the verified vendor page should be listed:\n%s", out)
+	}
+	if strings.Contains(out, "v2ex.com/t/1") {
+		t.Errorf("the replaced community post should not be the presented link:\n%s", out)
+	}
+}
+
 func TestBadConfigIsReportedNotPanicking(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "bad.json")
 	if err := os.WriteFile(path, []byte(`{"interval":"nope"}`), 0o644); err != nil {

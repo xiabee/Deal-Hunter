@@ -301,7 +301,7 @@ func dealBlock(d *model.Deal) string {
 		meta = append(meta, "#"+strings.Join(d.Tags[:min(3, len(d.Tags))], " #"))
 	}
 	b.WriteString(strings.Join(meta, " · ") + "\n")
-	if badge := linkBadge(d.Meta[official.MetaLinkKind]); badge != "" {
+	if badge := LinkBadge(d.Meta[official.MetaLinkKind]); badge != "" {
 		b.WriteString(badge + "\n")
 	}
 	if s := strings.TrimSpace(d.Summary); s != "" {
@@ -316,7 +316,7 @@ func dealBlock(d *model.Deal) string {
 // buttons renders the link ladder: the verified official page leads, and the
 // post we found it in stays one tap away so nothing is hidden.
 func buttons(d *model.Deal) []map[string]any {
-	best, original, kind := linkInfo(d)
+	best, original, kind := LinkFor(d)
 	var out []map[string]any
 	if strings.HasPrefix(best, "https://") {
 		label, btnType := "查看原文 / 领取入口", "primary"
@@ -342,7 +342,7 @@ func buttons(d *model.Deal) []map[string]any {
 }
 
 func digestLine(d *model.Deal) string {
-	link, _, kind := linkInfo(d)
+	link, _, kind := LinkFor(d)
 	if link == "" {
 		link = "#"
 	}
