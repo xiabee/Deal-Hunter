@@ -473,6 +473,10 @@ func (a *App) judge(d *model.Deal, sc config.Source) (kept, push bool) {
 	}
 	d.SortOffersAndTags()
 	d.EnsureFingerprint()
+	// Mark the free verdicts now, while the record is still being written: an
+	// unlabelled row later reads as "not checked", which is only true for deals
+	// whose vendor we know but could not verify.
+	official.LabelCheap(d)
 	if len(f.AllowKeywords) > 0 && !anyContains(lower, f.AllowKeywords) {
 		return false, false
 	}

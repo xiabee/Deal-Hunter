@@ -262,6 +262,34 @@ func TestRunOnceRewritesLinksToOfficialPages(t *testing.T) {
 	}
 }
 
+// Verdicts that cost nothing apply to every stored deal, not just the handful
+// that reach the alert queue, so a badge in the panel means the same thing as
+// one in the card.
+func TestCheapLabelsApplyBelowThreshold(t *testing.T) {
+	f := &cannedFetcher{byURL: map[string][]byte{feedURL: feedBody(t)}}
+	spy := &spyNotifier{}
+	app := testApp(t, f, spy, func(c *config.Config) { c.Notify.Feishu.MinScore = 101 })
+	run, err := app.RunOnce(context.Background(), "unit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spy.count() != 0 || run.Pushed != 0 || run.Stored == 0 {
+		t.Fatalf("expected stored-but-not-pushed, got %+v spy=%d", run, spy.count())
+	}
+	byURL := map[string]model.Deal{}
+	for _, d := range app.RecentDeals(50) {
+		byURL[d.URL] = d
+	}
+	drive := byURL["https://www.example.com/drive"] // 「某云盘」 names no vendor
+	if drive.Meta[official.MetaLinkKind] != official.KindThirdParty {
+		t.Errorf("an unattributable find must be marked third party: %+v", drive)
+	}
+	glm := byURL["https://www.example.com/news/glm-free"]
+	if _, labelled := glm.Meta[official.MetaLinkKind]; labelled {
+		t.Errorf("a known vendor must not be judged without looking: %v", glm.Meta)
+	}
+}
+
 func TestAlertThresholdIsHonoured(t *testing.T) {
 	f := &cannedFetcher{byURL: map[string][]byte{feedURL: feedBody(t)}}
 	spy := &spyNotifier{}

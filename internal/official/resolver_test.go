@@ -289,6 +289,42 @@ func TestMissingDepsDegradeWithoutRewriting(t *testing.T) {
 	}
 }
 
+func TestLabelCheapOnlyUsesFreeVerdicts(t *testing.T) {
+	owned := testDeal("https://www.volcengine.com/activity/ai", "火山引擎", model.KindFree)
+	owned.Score = 50
+	LabelCheap(owned)
+	if owned.Meta[MetaLinkKind] != KindAlreadyOfficial || owned.Meta[MetaResolvedBy] != "domain" {
+		t.Errorf("a vendor-owned host needs no lookup: %v", owned.Meta)
+	}
+	if owned.Meta[MetaOfficialURL] != owned.URL || owned.Meta[MetaOriginalURL] != owned.URL {
+		t.Errorf("meta = %v", owned.Meta)
+	}
+	if owned.Score != 50 {
+		t.Errorf("the cheap pass must not score, got %d", owned.Score)
+	}
+
+	unowned := testDeal("https://blog.example.net/someone-says-free", "", model.KindFree)
+	LabelCheap(unowned)
+	if unowned.Meta[MetaLinkKind] != KindThirdParty || unowned.Meta[MetaResolvedBy] != "no-vendor" {
+		t.Errorf("a deal with no vendor is a retelling by definition: %v", unowned.Meta)
+	}
+
+	// A known vendor on someone else's host stays unlabelled until the ladder
+	// actually checks it: an absent badge must mean "not verified", never a
+	// conclusion we did not earn.
+	waiting := testDeal("https://www.v2ex.com/t/9", "智谱AI", model.KindFree)
+	LabelCheap(waiting)
+	if _, ok := waiting.Meta[MetaLinkKind]; ok {
+		t.Errorf("must not guess before looking: %v", waiting.Meta)
+	}
+
+	waiting.Meta[MetaLinkKind] = KindSearchVerified
+	LabelCheap(waiting)
+	if waiting.Meta[MetaLinkKind] != KindSearchVerified {
+		t.Error("an existing verdict must never be downgraded")
+	}
+}
+
 func TestScoreStaysInRange(t *testing.T) {
 	r, _ := newTestResolver(&fakeProbe{}, &fakeSearch{})
 	top := testDeal("https://www.v2ex.com/t/5", "智谱AI", model.KindFree)

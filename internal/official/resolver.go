@@ -118,18 +118,18 @@ func (r *Resolver) applyOne(ctx context.Context, d *model.Deal, lookups *int) bo
 
 	// Rung 1: already on the vendor's own domain. Free — no network.
 	if v := Classify(d.URL, vendor); v.Official {
-		r.label(d, d.URL, KindAlreadyOfficial, "domain")
+		setLabel(d, d.URL, KindAlreadyOfficial, "domain")
 		r.bump(d, bonusVerified, "链接为厂商官方域名")
 		return true
 	}
 	if vendor == "" {
-		r.label(d, d.URL, KindThirdParty, "no-vendor")
+		setLabel(d, d.URL, KindThirdParty, "no-vendor")
 		return false
 	}
 
 	// Cached verdict from an earlier round.
 	if v, ok := r.cached(d.Fingerprint); ok && time.Since(v.At) < r.ttl && v.URL != "" {
-		r.label(d, v.URL, v.Kind, v.By)
+		setLabel(d, v.URL, v.Kind, v.By)
 		if IsOfficialKind(v.Kind) {
 			r.bump(d, bonusVerified, "已校验的官方链接（缓存）")
 			return true
@@ -138,7 +138,7 @@ func (r *Resolver) applyOne(ctx context.Context, d *model.Deal, lookups *int) bo
 		return false
 	}
 	if *lookups >= r.maxLookups {
-		r.label(d, d.URL, KindThirdParty, "budget")
+		setLabel(d, d.URL, KindThirdParty, "budget")
 		return false
 	}
 
@@ -151,7 +151,7 @@ func (r *Resolver) applyOne(ctx context.Context, d *model.Deal, lookups *int) bo
 		*lookups++
 		if final, good := r.verify(ctx, u); good {
 			r.store(d.Fingerprint, final, KindVendorEntry, "canonical")
-			r.label(d, final, KindVendorEntry, "canonical")
+			setLabel(d, final, KindVendorEntry, "canonical")
 			r.bump(d, bonusVerified, "已定位并校验厂商入口页")
 			return true
 		}
@@ -193,7 +193,7 @@ func (r *Resolver) applyOne(ctx context.Context, d *model.Deal, lookups *int) bo
 			continue
 		}
 		r.store(d.Fingerprint, final, KindSearchVerified, "search")
-		r.label(d, final, KindSearchVerified, "search")
+		setLabel(d, final, KindSearchVerified, "search")
 		r.bump(d, bonusVerified, "检索到厂商官方页并校验通过")
 		return true
 	}
@@ -218,7 +218,7 @@ func searchQueryFor(vendor string, d *model.Deal) (string, bool) {
 
 func (r *Resolver) unresolved(d *model.Deal, by string, penalty int) {
 	r.store(d.Fingerprint, d.URL, KindThirdParty, by)
-	r.label(d, d.URL, KindThirdParty, by)
+	setLabel(d, d.URL, KindThirdParty, by)
 	if penalty > 0 {
 		r.bump(d, -penalty, "仅第三方来源，未定位到官方页")
 	}
@@ -249,7 +249,7 @@ func (r *Resolver) verify(ctx context.Context, u string) (string, bool) {
 	return final, good
 }
 
-func (r *Resolver) label(d *model.Deal, officialURL, kind, by string) {
+func setLabel(d *model.Deal, officialURL, kind, by string) {
 	if d.Meta == nil {
 		d.Meta = map[string]string{}
 	}
@@ -259,6 +259,30 @@ func (r *Resolver) label(d *model.Deal, officialURL, kind, by string) {
 	d.Meta[MetaLinkKind] = kind
 	d.Meta[MetaResolvedBy] = by
 	d.Meta[MetaOfficialURL] = officialURL
+}
+
+// LabelCheap records the verdicts that cost nothing: who owns this host, if
+// anybody. It runs for every stored deal, not just the handful that reach the
+// alert queue, so the panel and the digest never contradict the card. No
+// network, no cache writes, and deliberately no score change — only the full
+// ladder earns or loses points.
+func LabelCheap(d *model.Deal) {
+	if d.Meta == nil {
+		d.Meta = map[string]string{}
+	}
+	if d.Meta[MetaLinkKind] != "" {
+		return
+	}
+	vendor := primaryVendor(d)
+	if v := Classify(d.URL, vendor); v.Official {
+		setLabel(d, d.URL, KindAlreadyOfficial, "domain")
+		return
+	}
+	// With no vendor named at all there is nothing to look up: this is a
+	// retelling by definition. A known vendor stays unlabelled until verified.
+	if vendor == "" {
+		setLabel(d, d.URL, KindThirdParty, "no-vendor")
+	}
 }
 
 func (r *Resolver) bump(d *model.Deal, delta int, why string) {
