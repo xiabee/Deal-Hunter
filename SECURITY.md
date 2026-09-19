@@ -41,7 +41,7 @@ GitHub、Tailscale `tskey-`、AWS、GCP、Slack、Stripe、SendGrid、Hugging Fa
 Telegram、Server酱、钉钉、JWT、DSN、URL 内嵌账号密码、`key: value` 赋值、私钥块）、
 高熵字符串，以及**内网拓扑**（CGNAT 地址、`.ts.net` 主机名、RFC1918 地址）。
 
-扫描时会把**拼接的字面量先拼回去**再匹配：`"100.96.24." + "7"`、`"AKIA" + "<16位>"`
+扫描时会把**拼接的字面量先拼回去**再匹配：`"100.96.24." + "7"`、`"AKIA" + "<16位>"` <!-- secretlint:ignore synthetic documentation example, not a real host -->
 这类写法过去能躲过逐行匹配，现在不能。这条规则是被真实事故逼出来的——一个测试夹具
 用拼接藏起了运维者自己的 Tailscale 地址，源码里看不见，仓库里却已经是明文。
 
@@ -51,7 +51,7 @@ bash scripts/ci-local.sh                    # CI 会强制执行
 ```
 
 **示例值一律用合成数据**，不要拿真实地址/真实 ID 改改就当夹具：
-`100.96.24.7`、`router.example.ts.net`、`.invalid` 域名、`__PASTE_HERE__` 占位符。
+`100.96.24.7`、`router.example.ts.net`、`.invalid` 域名、`__PASTE_HERE__` 占位符。 <!-- secretlint:ignore synthetic documentation example, not a real host -->
 确需保留时在**该行末尾**注明原因（隐藏式绕过不接受）：
 
 ```go
