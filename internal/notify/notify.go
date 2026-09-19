@@ -134,6 +134,10 @@ func Line(d *model.Deal) string {
 	return strings.Join(parts, " | ")
 }
 
+// VendorSite is the vendor's own entry page, when we found and verified one. It
+// is offered as a place to check, never as the link that carries the claim.
+func VendorSite(d *model.Deal) string { return d.Meta[official.MetaVendorURL] }
+
 // LinkFor returns the URL worth clicking, the post it came from, and how the
 // link was classified. Deals collected before resolution simply point at
 // themselves.
@@ -155,10 +159,8 @@ func LinkBadge(kind string) string {
 	switch kind {
 	case official.KindAlreadyOfficial:
 		return "✅ 厂商官方域名"
-	case official.KindVendorEntry:
-		return "✅ 已定位并校验厂商入口页"
 	case official.KindSearchVerified:
-		return "✅ 已定位并校验厂商官方页"
+		return "✅ 已在厂商站内定位该 offer 并校验"
 	case official.KindThirdParty:
 		return "⚠️ 第三方转述，未找到官方页"
 	}

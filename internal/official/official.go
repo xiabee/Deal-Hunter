@@ -1,10 +1,11 @@
 // Package official turns a third-party mention into a verified vendor link.
 //
-// The rule is deliberately strict: a link is only rewritten when BOTH conditions
-// hold — the host belongs to a curated official domain of a vendor detected in
-// the finding, AND the URL answered HTTP 2xx after redirects. Anything else
-// keeps the original link and is labelled as third-party, because a wrong
-// "official" link is worse than an honest community link.
+// The rule is deliberately strict: a link is only rewritten when ALL three
+// conditions hold — the deal names a vendor we know, the candidate page sits on
+// that vendor's own curated domain (before AND after redirects), and it answers
+// HTTP 2xx. A curated entry page is attached as a place to check, never as proof
+// that the offer exists: a wrong "official" link is worse than an honest
+// community link.
 package official
 
 import (

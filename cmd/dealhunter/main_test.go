@@ -115,7 +115,7 @@ func TestDealsPresentsTheVerifiedOfficialLink(t *testing.T) {
 	// the same link the Feishu card points at.
 	const row = `{"fingerprint":"abc","url":"https://www.v2ex.com/t/1","title":"智谱 GLM-5.3-flash 免费",` +
 		`"source":"rss","category":"ai_free","score":88,"is_free":true,` +
-		`"discovered_at":"2026-09-19T01:02:03Z","meta":{"link_kind":"vendor_entry",` +
+		`"discovered_at":"2026-09-19T01:02:03Z","meta":{"link_kind":"search_verified",` +
 		`"official_url":"https://open.bigmodel.cn/pricing","original_url":"https://www.v2ex.com/t/1"}}` + "\n"
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "deals.jsonl"), []byte(row), 0o644); err != nil {

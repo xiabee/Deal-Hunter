@@ -18,16 +18,16 @@ const (
 	MetaOfficialURL = "official_url"
 	MetaOriginalURL = "original_url"
 	MetaResolvedBy  = "resolved_by"
+	MetaVendorURL   = "vendor_url"
 
 	KindAlreadyOfficial = "official"
-	KindVendorEntry     = "vendor_entry"
 	KindSearchVerified  = "search_verified"
 	KindThirdParty      = "third_party"
 )
 
 // Link kinds considered official (i.e. pointing at the vendor's own site).
 var officialKinds = map[string]bool{
-	KindAlreadyOfficial: true, KindVendorEntry: true, KindSearchVerified: true,
+	KindAlreadyOfficial: true, KindSearchVerified: true,
 }
 
 // IsOfficialKind reports whether a link_kind value denotes a verified vendor link.
@@ -126,6 +126,9 @@ func (r *Resolver) applyOne(ctx context.Context, d *model.Deal, lookups *int) bo
 		setLabel(d, d.URL, KindThirdParty, "no-vendor")
 		return false
 	}
+	// The vendor's front door is attached to every verdict below: it is a place
+	// to check, not evidence, so it never replaces the presented link.
+	r.attachVendorSite(ctx, d, vendor, lookups)
 
 	// Cached verdict from an earlier round.
 	if v, ok := r.cached(d.Fingerprint); ok && time.Since(v.At) < r.ttl && v.URL != "" {
@@ -142,22 +145,9 @@ func (r *Resolver) applyOne(ctx context.Context, d *model.Deal, lookups *int) bo
 		return false
 	}
 
-	// Rung 2: curated vendor entry page, verified to exist.
-	kinds := make([]string, 0, len(d.Offers))
-	for _, o := range d.Offers {
-		kinds = append(kinds, string(o.Kind))
-	}
-	if u, ok := CanonicalFor(vendor, kinds); ok && u != d.URL {
-		*lookups++
-		if final, good := r.verify(ctx, u); good {
-			r.store(d.Fingerprint, final, KindVendorEntry, "canonical")
-			setLabel(d, final, KindVendorEntry, "canonical")
-			r.bump(d, bonusVerified, "已定位并校验厂商入口页")
-			return true
-		}
-	}
-
-	// Rung 3: site-scoped search into the vendor's own domain, then verify.
+	// Rung 2: search the vendor's own domain with *this deal's words* — the model
+	// name, the offer wording — and verify the page answers. This is the only
+	// rewrite that claims to have found the offer itself.
 	if r.search == nil {
 		r.unresolved(d, "no-search", 0)
 		return false
@@ -188,18 +178,41 @@ func (r *Resolver) applyOne(ctx context.Context, d *model.Deal, lookups *int) bo
 			continue
 		}
 		*lookups++
-		final, good := r.verify(ctx, h)
+		final, good := r.verify(ctx, h, vendor)
 		if !good {
 			continue
 		}
 		r.store(d.Fingerprint, final, KindSearchVerified, "search")
 		setLabel(d, final, KindSearchVerified, "search")
-		r.bump(d, bonusVerified, "检索到厂商官方页并校验通过")
+		r.bump(d, bonusVerified, "在厂商站内检索到该 offer 并校验通过")
 		return true
 	}
 
 	r.unresolved(d, "unresolved", penaltyThirdParty)
 	return false
+}
+
+// attachVendorSite records the vendor's own entry page as a side link, verified
+// to answer. An entry page proves where the vendor lives, not that this offer
+// exists, so it earns no score and never becomes the presented URL.
+func (r *Resolver) attachVendorSite(ctx context.Context, d *model.Deal, vendor string, lookups *int) {
+	if d.Meta[MetaVendorURL] != "" {
+		return
+	}
+	kinds := make([]string, 0, len(d.Offers))
+	for _, o := range d.Offers {
+		kinds = append(kinds, string(o.Kind))
+	}
+	u, ok := CanonicalFor(vendor, kinds)
+	if !ok || u == d.URL || *lookups >= r.maxLookups {
+		return
+	}
+	*lookups++
+	// One probe per vendor page, then cached for the whole TTL, so this costs a
+	// round at most one request per vendor.
+	if final, good := r.verify(ctx, u, vendor); good {
+		d.Meta[MetaVendorURL] = final
+	}
 }
 
 // searchQueryFor aims a query at the vendor's own domain, preferring the model
@@ -224,7 +237,7 @@ func (r *Resolver) unresolved(d *model.Deal, by string, penalty int) {
 	}
 }
 
-func (r *Resolver) verify(ctx context.Context, u string) (string, bool) {
+func (r *Resolver) verify(ctx context.Context, u, vendor string) (string, bool) {
 	if r.probe == nil {
 		return "", false
 	}
@@ -238,6 +251,15 @@ func (r *Resolver) verify(ctx context.Context, u string) (string, bool) {
 	final, good := r.probe.OK(ctx, u)
 	if final == "" {
 		final = u
+	}
+	// Redirects are where "official" links go wrong: the destination must still
+	// belong to the vendor, or we would happily point at whatever a pricing page
+	// decides to promote today.
+	if good && vendor != "" {
+		if owner, isVendor := VendorForDomain(final); !isVendor || owner != vendor {
+			r.log.Debug("official: link left the vendor's own domains", "from", u, "to", final)
+			good = false
+		}
 	}
 	kind := "fail"
 	if good {

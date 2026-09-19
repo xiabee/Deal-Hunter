@@ -313,32 +313,35 @@ func dealBlock(d *model.Deal) string {
 	return b.String()
 }
 
-// buttons renders the link ladder: the verified official page leads, and the
-// post we found it in stays one tap away so nothing is hidden.
+// buttons renders the link ladder: the verified official page leads, the post we
+// found it in stays one tap away, and the vendor's own front door is offered
+// wherever the offer itself could not be confirmed.
 func buttons(d *model.Deal) []map[string]any {
 	best, original, kind := LinkFor(d)
 	var out []map[string]any
 	if strings.HasPrefix(best, "https://") {
-		label, btnType := "查看原文 / 领取入口", "primary"
+		label := "查看原文 / 领取入口"
 		if official.IsOfficialKind(kind) {
 			label = "官方入口（已校验）"
 		}
-		out = append(out, map[string]any{
-			"tag":  "button",
-			"text": map[string]any{"tag": "plain_text", "content": label},
-			"url":  best,
-			"type": btnType,
-		})
+		out = append(out, button(label, best, "primary"))
 	}
 	if original != best && strings.HasPrefix(original, "https://") {
-		out = append(out, map[string]any{
-			"tag":  "button",
-			"text": map[string]any{"tag": "plain_text", "content": "原始出处"},
-			"url":  original,
-			"type": "default",
-		})
+		out = append(out, button("原始出处", original, "default"))
+	}
+	if site := VendorSite(d); site != "" && site != best && site != original && strings.HasPrefix(site, "https://") {
+		out = append(out, button("去厂商官网核实", site, "default"))
 	}
 	return out
+}
+
+func button(label, url, btnType string) map[string]any {
+	return map[string]any{
+		"tag":  "button",
+		"text": map[string]any{"tag": "plain_text", "content": label},
+		"url":  url,
+		"type": btnType,
+	}
 }
 
 func digestLine(d *model.Deal) string {

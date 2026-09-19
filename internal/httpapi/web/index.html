@@ -161,8 +161,8 @@ async function j(path){
 
 function scoreClass(n){ return n >= 78 ? 'hi' : n >= 58 ? 'mid' : 'low'; }
 
-const KIND_LABEL = {official:'官方域名', vendor_entry:'官方入口页', search_verified:'官方页已校验', third_party:'第三方转述'};
-const OFFICIAL_KINDS = new Set(['official', 'vendor_entry', 'search_verified']);
+const KIND_LABEL = {official:'官方域名', search_verified:'厂商站内已校验', third_party:'第三方转述'};
+const OFFICIAL_KINDS = new Set(['official', 'search_verified']);
 
 function dealRow(d){
   const m = d.meta || {};
@@ -183,11 +183,16 @@ function dealRow(d){
   const origin = (m.original_url && m.original_url !== best && /^https:\/\//.test(m.original_url))
     ? '<a class="origin" href="' + esc(m.original_url) + '" target="_blank" rel="noopener noreferrer nofollow">原始出处</a>'
     : '';
+  // The vendor's front door is a place to check, so it is offered next to an
+  // unconfirmed link rather than replacing it.
+  const site = (m.vendor_url && m.vendor_url !== best && m.vendor_url !== m.original_url && /^https:\/\//.test(m.vendor_url))
+    ? '<a class="origin" href="' + esc(m.vendor_url) + '" target="_blank" rel="noopener noreferrer nofollow">厂商官网</a>'
+    : '';
   const when = d.published_at ? new Date(d.published_at).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) : '';
   const pushed = m.pushed === 'true' ? ' · 📣 已推送' : '';
   return '<div class="deal">' +
     '<div class="score ' + scoreClass(d.score) + '">' + d.score + '</div>' +
-    '<div><div class="t">' + link + origin + '</div>' +
+    '<div><div class="t">' + link + origin + site + '</div>' +
     '<div class="meta">' + badges.join('') + '<span>' + esc(d.source) + '</span>' +
     (when ? '<span>' + when + '</span>' : '') + '<span>' + esc((d.tags||[]).slice(0,3).map(t=>'#'+t).join(' ')) + pushed + '</span></div>' +
     (d.summary ? '<div class="sum">' + esc(d.summary.slice(0,240)) + '</div>' : '') +

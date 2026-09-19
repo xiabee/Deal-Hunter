@@ -135,28 +135,33 @@ func TestUnknownVendorIsLeftAlone(t *testing.T) {
 	}
 }
 
-func TestCanonicalEntryPageRewritesLink(t *testing.T) {
+// A curated entry page says where the vendor lives, not that this offer exists.
+// It is attached as a side door and must never be presented as the found offer.
+func TestEntryPageIsASideDoorNotAClaim(t *testing.T) {
 	canonical := "https://open.bigmodel.cn/pricing"
-	probe := &fakeProbe{answers: map[string]string{canonical: "https://open.bigmodel.cn/pricing/"}}
+	probe := &fakeProbe{answers: map[string]string{canonical: canonical}}
 	r, cache := newTestResolver(probe, &fakeSearch{})
 	d := testDeal("https://www.v2ex.com/t/123", "智谱AI", model.KindFree)
-	if r.Apply(context.Background(), []*model.Deal{d}) != 1 {
-		t.Fatal("the curated entry page answered, so this is verified")
+	if r.Apply(context.Background(), []*model.Deal{d}) != 0 {
+		t.Fatal("an entry page is not a verified offer")
 	}
-	if d.Meta[MetaLinkKind] != KindVendorEntry {
-		t.Errorf("link_kind = %q", d.Meta[MetaLinkKind])
+	if d.Meta[MetaLinkKind] != KindThirdParty {
+		t.Errorf("link_kind = %q, want third_party", d.Meta[MetaLinkKind])
 	}
-	if d.Meta[MetaOfficialURL] != canonical+"/" {
-		t.Errorf("should keep the redirect target actually served: %q", d.Meta[MetaOfficialURL])
+	if d.Meta[MetaOfficialURL] != d.URL {
+		t.Errorf("the presented link must stay the post itself: %q", d.Meta[MetaOfficialURL])
 	}
-	if d.URL != "https://www.v2ex.com/t/123" {
-		t.Error("the original post must never be overwritten, only the link we present")
+	if d.Meta[MetaVendorURL] != canonical {
+		t.Errorf("the vendor's front door should still be offered: %q", d.Meta[MetaVendorURL])
 	}
-	if d.Score != 78 {
-		t.Errorf("score = %d, want 70+8", d.Score)
+	if probe.calls[canonical] != 1 {
+		t.Errorf("the entry page should be probed exactly once, got %d", probe.calls[canonical])
 	}
-	if !strings.Contains(strings.Join(d.ScoreWhy, "|"), "厂商入口页") {
-		t.Errorf("the bonus must be explained: %v", d.ScoreWhy)
+	if d.Score != 64 {
+		t.Errorf("score = %d, want 70-6 (unverified third-party)", d.Score)
+	}
+	if !strings.Contains(strings.Join(d.ScoreWhy, "|"), "仅第三方来源") {
+		t.Errorf("the penalty must be explained: %v", d.ScoreWhy)
 	}
 	if _, ok := cache.m["official:deal:"+d.Fingerprint]; !ok {
 		t.Error("verdict should be cached for later rounds")
@@ -197,30 +202,33 @@ func TestSearchOnlyAcceptsVendorOwnedHosts(t *testing.T) {
 }
 
 func TestVerdictIsReusedNextRound(t *testing.T) {
-	canonical := "https://open.bigmodel.cn/pricing"
-	probe := &fakeProbe{answers: map[string]string{canonical: canonical}}
-	sr := &fakeSearch{hits: []string{"https://never-queried.example/x"}}
+	target := "https://open.bigmodel.cn/pricing/glm-free"
+	probe := &fakeProbe{answers: map[string]string{target: target}}
+	sr := &fakeSearch{hits: []string{target}}
 	r, _ := newTestResolver(probe, sr)
 	first := testDeal("https://www.v2ex.com/t/1", "智谱AI", model.KindFree)
 	if r.Apply(context.Background(), []*model.Deal{first}) != 1 {
-		t.Fatal("first round should verify")
+		t.Fatal("first round should verify via the vendor's own site")
 	}
-	after := probe.total()
+	if first.Meta[MetaLinkKind] != KindSearchVerified {
+		t.Fatalf("link_kind = %q", first.Meta[MetaLinkKind])
+	}
+	afterProbe, afterSearch := probe.total(), len(sr.calls)
 	second := testDeal(first.URL, "智谱AI", model.KindFree)
 	second.Title = "同一个活动的后续报道"
-	second.EnsureFingerprint()
 	if r.Apply(context.Background(), []*model.Deal{second}) != 1 {
 		t.Fatal("cached verdict should still count as verified")
 	}
-	if probe.total() != after || len(sr.calls) != 0 {
-		t.Errorf("cached deal must not touch the network (probes +%d, queries %d)", probe.total()-after, len(sr.calls))
+	if probe.total() != afterProbe || len(sr.calls) != afterSearch {
+		t.Errorf("a cached deal must not touch the network (probes +%d, queries +%d)",
+			probe.total()-afterProbe, len(sr.calls)-afterSearch)
 	}
-	if second.Meta[MetaLinkKind] != KindVendorEntry {
+	if second.Meta[MetaLinkKind] != KindSearchVerified {
 		t.Errorf("link_kind = %q", second.Meta[MetaLinkKind])
 	}
 }
 
-func TestUnverifiableCanonicalPageIsNotUsed(t *testing.T) {
+func TestDeadEntryPageIsNotOffered(t *testing.T) {
 	// The curated page 404s and search finds nothing on the vendor's domain:
 	// the deal must stay labelled third-party rather than link to a dead page.
 	probe := &fakeProbe{}
@@ -232,12 +240,38 @@ func TestUnverifiableCanonicalPageIsNotUsed(t *testing.T) {
 	if d.Meta[MetaOfficialURL] != d.URL {
 		t.Errorf("official_url should fall back to the post itself: %q", d.Meta[MetaOfficialURL])
 	}
+	if d.Meta[MetaVendorURL] != "" {
+		t.Errorf("a page that does not answer must not be offered as the vendor's site: %q", d.Meta[MetaVendorURL])
+	}
 	if d.Score != 64 {
 		t.Errorf("score = %d, want 70-6", d.Score)
 	}
 	var v verdict
 	if b, ok := cache.m["official:deal:"+d.Fingerprint]; !ok || json.Unmarshal(b, &v) != nil || v.Kind != KindThirdParty {
 		t.Error("negative verdicts are cached too, so a dead page is not retried every round")
+	}
+}
+
+// A pricing page that redirects into somebody else's promotion is the exact
+// failure this package exists to prevent: the destination must still be owned
+// by the vendor before we present it.
+func TestRedirectOffAllowlistIsRejected(t *testing.T) {
+	canonical := "https://open.bigmodel.cn/pricing"
+	target := "https://open.bigmodel.cn/activity/glm"
+	probe := &fakeProbe{answers: map[string]string{
+		canonical: "https://ads.example.net/landing",
+		target:    "https://sponsor.example.org/deal",
+	}}
+	r, _ := newTestResolver(probe, &fakeSearch{hits: []string{target}})
+	d := testDeal("https://www.v2ex.com/t/8", "智谱AI", model.KindFree)
+	if r.Apply(context.Background(), []*model.Deal{d}) != 0 {
+		t.Fatal("neither page stayed on the vendor's domains")
+	}
+	if d.Meta[MetaOfficialURL] != d.URL {
+		t.Errorf("must not present a redirected third-party page: %q", d.Meta[MetaOfficialURL])
+	}
+	if d.Meta[MetaVendorURL] != "" {
+		t.Errorf("vendor_url must be a vendor-owned host, got %q", d.Meta[MetaVendorURL])
 	}
 }
 
@@ -257,21 +291,25 @@ func TestSearchOutageIsNotPunished(t *testing.T) {
 
 func TestBudgetCapsLookups(t *testing.T) {
 	probe := &fakeProbe{}
-	r, _ := newTestResolver(probe, &fakeSearch{hits: []string{"https://open.bigmodel.cn/a"}})
-	r.SetBudget(1)
+	sr := &fakeSearch{hits: []string{"https://open.bigmodel.cn/a"}}
+	r, _ := newTestResolver(probe, sr)
+	r.SetBudget(2)
 	deals := []*model.Deal{
 		testDeal("https://www.v2ex.com/t/a", "智谱AI", model.KindFree),
 		testDeal("https://www.v2ex.com/t/b", "智谱AI", model.KindFree),
 	}
 	r.Apply(context.Background(), deals)
+	if len(sr.calls) != 1 {
+		t.Errorf("the budget must bound searches too, got %d", len(sr.calls))
+	}
+	if probe.total() != 1 {
+		t.Errorf("only the entry page may be probed, got %d probes", probe.total())
+	}
 	if deals[1].Meta[MetaResolvedBy] != "budget" {
 		t.Errorf("second deal should hit the budget: %v", deals[1].Meta)
 	}
 	if deals[1].Score != 70 {
 		t.Error("running out of budget is our limit, not the deal's fault")
-	}
-	if probe.total() > 1 {
-		t.Errorf("budget exceeded: %d probes", probe.total())
 	}
 }
 
@@ -343,17 +381,21 @@ func TestScoreStaysInRange(t *testing.T) {
 
 func TestExpiredCacheIsRechecked(t *testing.T) {
 	cache := &fakeCache{m: map[string][]byte{}}
-	stale := verdict{URL: "https://open.bigmodel.cn/old", Kind: KindVendorEntry, By: "canonical",
+	stale := verdict{URL: "https://open.bigmodel.cn/old", Kind: KindSearchVerified, By: "search",
 		At: time.Now().Add(-8 * 24 * time.Hour)}
 	b, _ := json.Marshal(stale)
-	probe := &fakeProbe{answers: map[string]string{"https://open.bigmodel.cn/pricing": "https://open.bigmodel.cn/pricing"}}
-	r := NewResolver(probe, &fakeSearch{}, cache, nil)
+	fresh := "https://open.bigmodel.cn/pricing/glm-free"
+	probe := &fakeProbe{answers: map[string]string{
+		"https://open.bigmodel.cn/pricing": "https://open.bigmodel.cn/pricing",
+		fresh:                              fresh,
+	}}
+	r := NewResolver(probe, &fakeSearch{hits: []string{fresh}}, cache, nil)
 	d := testDeal("https://www.v2ex.com/t/7", "智谱AI", model.KindFree)
 	cache.m["official:deal:"+d.Fingerprint] = b
 	if r.Apply(context.Background(), []*model.Deal{d}) != 1 {
 		t.Fatal("a stale verdict must not be trusted")
 	}
-	if d.Meta[MetaOfficialURL] == stale.URL {
-		t.Error("the old cached page should have been re-resolved")
+	if d.Meta[MetaOfficialURL] != fresh {
+		t.Errorf("should have re-resolved to the page found now, got %q", d.Meta[MetaOfficialURL])
 	}
 }

@@ -374,7 +374,7 @@ func resolvedDeal(kind, officialURL string) model.Deal {
 func TestCardPresentsVerifiedOfficialPageFirst(t *testing.T) {
 	f, _ := NewFeishu(config.Feishu{Timezone: "UTC"})
 	const officialURL = "https://open.bigmodel.cn/pricing"
-	m := NewMessage(KindAlert, "t", resolvedDeal(official.KindVendorEntry, officialURL))
+	m := NewMessage(KindAlert, "t", resolvedDeal(official.KindSearchVerified, officialURL))
 	elements := cardElements(f.card(m))
 
 	var joined strings.Builder
@@ -383,7 +383,7 @@ func TestCardPresentsVerifiedOfficialPageFirst(t *testing.T) {
 		joined.Write(b)
 	}
 	body := joined.String()
-	if !strings.Contains(body, "已定位并校验厂商入口页") {
+	if !strings.Contains(body, "已在厂商站内定位") {
 		t.Errorf("the card must say the link was verified: %s", body)
 	}
 
@@ -432,6 +432,39 @@ func TestCardKeepsUnverifiedLinkHonest(t *testing.T) {
 	}
 }
 
+// The vendor's front door is a place to check, so it must appear beside an
+// unconfirmed link without ever posing as the found offer.
+func TestCardOffersVendorSiteWithoutClaimingIt(t *testing.T) {
+	f, _ := NewFeishu(config.Feishu{Timezone: "UTC"})
+	d := resolvedDeal(official.KindThirdParty, "https://www.v2ex.com/t/1")
+	d.URL = "https://www.v2ex.com/t/1"
+	d.Meta[official.MetaOriginalURL] = d.URL
+	d.Meta[official.MetaVendorURL] = "https://open.bigmodel.cn/pricing"
+	elements := cardElements(f.card(NewMessage(KindAlert, "t", d)))
+
+	var actions []map[string]any
+	for _, e := range elements {
+		if e["tag"] == "action" {
+			raw, _ := json.Marshal(e["actions"])
+			_ = json.Unmarshal(raw, &actions)
+		}
+	}
+	if len(actions) != 2 {
+		t.Fatalf("expected the post plus the vendor's front door, got %v", actions)
+	}
+	if actions[0]["url"] != "https://www.v2ex.com/t/1" || actions[0]["type"] != "primary" {
+		t.Errorf("an unverified find must still present its own source: %v", actions[0])
+	}
+	site, _ := actions[1]["text"].(map[string]any)["content"].(string)
+	if actions[1]["url"] != "https://open.bigmodel.cn/pricing" || !strings.Contains(site, "官网") {
+		t.Errorf("the entry page should be offered as a place to check: %v", actions[1])
+	}
+	b, _ := json.Marshal(f.card(NewMessage(KindAlert, "t", d)))
+	if strings.Contains(string(b), "官方入口（已校验）") {
+		t.Error("a side door must never be labelled a verified offer")
+	}
+}
+
 func TestDigestAndPlainUseTheResolvedLink(t *testing.T) {
 	const officialURL = "https://open.bigmodel.cn/pricing"
 	d := resolvedDeal(official.KindSearchVerified, officialURL)
@@ -439,7 +472,7 @@ func TestDigestAndPlainUseTheResolvedLink(t *testing.T) {
 	if !strings.Contains(line, officialURL) {
 		t.Errorf("plain line should carry the vendor link: %q", line)
 	}
-	if !strings.Contains(line, "官方页") {
+	if !strings.Contains(line, "✅") {
 		t.Errorf("plain line should state the verdict: %q", line)
 	}
 	digest := NewMessage(KindDigest, "d", d)

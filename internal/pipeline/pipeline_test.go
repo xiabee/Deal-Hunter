@@ -20,10 +20,11 @@ import (
 
 // cannedFetcher serves fixtures so the whole pipeline is tested offline.
 type cannedFetcher struct {
-	byURL  map[string][]byte
-	status map[string]int
-	mu     sync.Mutex
-	calls  map[string]int
+	byURL    map[string][]byte
+	byPrefix map[string][]byte
+	status   map[string]int
+	mu       sync.Mutex
+	calls    map[string]int
 }
 
 func (c *cannedFetcher) Get(_ context.Context, u string, _ map[string]string) (*httpx.Response, error) {
@@ -34,6 +35,14 @@ func (c *cannedFetcher) Get(_ context.Context, u string, _ map[string]string) (*
 	}
 	c.calls[u]++
 	body, ok := c.byURL[u]
+	if !ok {
+		for p, b := range c.byPrefix {
+			if strings.HasPrefix(u, p) {
+				body, ok = b, true
+				break
+			}
+		}
+	}
 	if !ok {
 		return nil, errors.New("no canned body for " + u)
 	}
@@ -48,20 +57,6 @@ func (c *cannedFetcher) count(u string) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.calls[u]
-}
-
-// countPrefix reports how many requests went to a host or path prefix, so a
-// test can assert that a cheaper rung made the expensive one unnecessary.
-func (c *cannedFetcher) countPrefix(prefix string) int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	n := 0
-	for u, k := range c.calls {
-		if strings.HasPrefix(u, prefix) {
-			n += k
-		}
-	}
-	return n
 }
 
 type spyNotifier struct {
@@ -195,16 +190,27 @@ func TestRunOnceStoresScoresAndAlertsOnce(t *testing.T) {
 	}
 }
 
-// The curated vendor entry page answers, so the community link in the feed must
-// be replaced by the official one — in the alert, in the store and in the run
-// report, without ever contacting a search endpoint.
+// A community post is only rewritten when the vendor's own site turns up a page
+// matching this deal's words and that page answers. The entry page is attached
+// as a side door, and the store keeps every verdict so the panel agrees with the
+// card.
 func TestRunOnceRewritesLinksToOfficialPages(t *testing.T) {
-	const canonical = "https://open.bigmodel.cn/pricing"
-	f := &cannedFetcher{byURL: map[string][]byte{
-		feedURL:                               feedBody(t),
-		canonical:                             []byte("<html>智谱价格</html>"),
-		"https://www.aliyun.com/price/detail": []byte("<html>阿里云价格</html>"),
-	}}
+	const (
+		entry = "https://open.bigmodel.cn/pricing"
+		found = "https://open.bigmodel.cn/pricing/glm-free"
+	)
+	searchBody := []byte("<html><body>" +
+		"<a href=\"https://linux.do/t/9\" class='result-link'>别人也在说</a>" +
+		"<a href=\"" + found + "\" class='result-link'>GLM-5.3-flash 免费额度 - 智谱开放平台</a>" +
+		"</body></html>")
+	f := &cannedFetcher{
+		byURL: map[string][]byte{
+			feedURL: feedBody(t),
+			entry:   []byte("<html>智谱价格</html>"),
+			found:   []byte("<html>GLM 免费额度</html>"),
+		},
+		byPrefix: map[string][]byte{"https://lite.duckduckgo.com/lite/": searchBody},
+	}
 	spy := &spyNotifier{}
 	app := testApp(t, f, spy, nil)
 	run, err := app.RunOnce(context.Background(), "unit")
@@ -212,13 +218,10 @@ func TestRunOnceRewritesLinksToOfficialPages(t *testing.T) {
 		t.Fatalf("RunOnce: %v", err)
 	}
 	if run.Verified == 0 {
-		t.Fatalf("a curated vendor page answered, so something must be verified: %+v", run)
+		t.Fatalf("a vendor page answered, so something must be verified: %+v", run)
 	}
-	if f.count(canonical) == 0 {
-		t.Error("the canonical page should have been probed")
-	}
-	if n := f.countPrefix("https://lite.duckduckgo.com"); n != 0 {
-		t.Errorf("rung 2 succeeded, so search must not run (got %d queries)", n)
+	if f.count(entry) == 0 {
+		t.Error("the entry page should be probed as a side door")
 	}
 
 	var alerted *model.Deal
@@ -235,14 +238,20 @@ func TestRunOnceRewritesLinksToOfficialPages(t *testing.T) {
 	if alerted == nil {
 		t.Fatal("the GLM deal was not alerted")
 	}
-	if got := alerted.Meta[official.MetaOfficialURL]; got != canonical {
-		t.Errorf("alert link = %q, want %q", got, canonical)
+	if got := alerted.Meta[official.MetaOfficialURL]; got != found {
+		t.Errorf("alert link = %q, want %q", got, found)
 	}
-	if got := alerted.Meta[official.MetaLinkKind]; got != official.KindVendorEntry {
-		t.Errorf("link_kind = %q", got)
+	if got := alerted.Meta[official.MetaLinkKind]; got != official.KindSearchVerified {
+		t.Errorf("link_kind = %q, want %q", got, official.KindSearchVerified)
+	}
+	if got := alerted.Meta[official.MetaVendorURL]; got != entry {
+		t.Errorf("vendor_url = %q, want the entry page", got)
 	}
 	if got := alerted.Meta[official.MetaOriginalURL]; got != "https://www.example.com/news/glm-free" {
 		t.Errorf("the original post must be recorded, got %q", got)
+	}
+	if !strings.Contains(notify.Line(alerted), found) {
+		t.Error("the plain-text form must carry the same link as the card")
 	}
 
 	// The dashboard and the digest read from the store, so the resolved link has
@@ -257,7 +266,7 @@ func TestRunOnceRewritesLinksToOfficialPages(t *testing.T) {
 	if stored == nil {
 		t.Fatal("deal missing from the store")
 	}
-	if got := stored.Meta[official.MetaOfficialURL]; got != canonical {
+	if got := stored.Meta[official.MetaOfficialURL]; got != found {
 		t.Errorf("stored link = %q, want the verified official page", got)
 	}
 }
