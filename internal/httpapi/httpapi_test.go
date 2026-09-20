@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -168,6 +171,11 @@ func TestStatusReportsOperationalState(t *testing.T) {
 	}
 	if _, has := ev["due_now"]; !has {
 		t.Error("the panel cannot show how many events are waiting for a reminder")
+	}
+	for _, key := range []string{"due_opening", "due_expiry", "expiry_lead_minutes"} {
+		if _, has := ev[key]; !has {
+			t.Errorf("the status omits %s; an opening and a closing look identical without it", key)
+		}
 	}
 	if _, has := ev["sent_today"]; !has {
 		t.Error("the panel cannot show today's reminder budget")
@@ -446,5 +454,128 @@ func TestRunsEndpoint(t *testing.T) {
 	first := runs[0].(map[string]any)
 	if first["trigger"] != "test" {
 		t.Errorf("run payload = %v", first)
+	}
+}
+
+// 日间模式必须由门禁保证两件事：浅色块确实重定义了配色，而且文字在底色上读得清
+// （WCAG AA 的 4.5:1）。配色写在 CSS 里，Go 测不到像素，但"忘了配浅色变量"和
+// "浅底配浅字"这两类真事故是可以拦住的。
+func TestDashboardHasAReadableLightThemeAndAWayToSwitch(t *testing.T) {
+	ts, _, _ := newTestServer(t)
+	_, body := get(t, ts, "/")
+	html := string(body)
+
+	for _, want := range []string{`data-theme`, `dh-theme`, `prefers-color-scheme`} {
+		if !strings.Contains(html, want) {
+			t.Errorf("theme switch missing %q", want)
+		}
+	}
+	dark := cssVars(t, html, ":root")
+	light := cssVars(t, html, "[data-theme=light]")
+	for _, key := range []string{"--bg", "--panel", "--txt", "--dim", "--line"} {
+		if _, ok := light[key]; !ok {
+			t.Errorf("the light theme does not redefine %s; it would render half-dark", key)
+		}
+	}
+	for name, vars := range map[string]map[string]string{"dark": dark, "light": light} {
+		if r := contrast(vars["--txt"], vars["--bg"]); r < 4.5 {
+			t.Errorf("%s theme: body text on background contrasts %.2f:1, want >= 4.5", name, r)
+		}
+	}
+	// 白色半透明覆盖层留在浅色底上会直接看不见，必须全部收进变量。
+	if n := strings.Count(html, "rgba(255,255,255"); n > 0 {
+		t.Errorf("%d hardcoded white overlays left; move them behind --glass", n)
+	}
+}
+
+// cssVars reads the "--x:#hex" assignments of one CSS block by name.
+func cssVars(t *testing.T, html, block string) map[string]string {
+	t.Helper()
+	i := strings.Index(html, block)
+	if i < 0 {
+		t.Fatalf("css block %q not found in the panel", block)
+	}
+	rest := html[i+len(block):]
+	end := strings.Index(rest, "}")
+	if end < 0 {
+		t.Fatalf("css block %q is unterminated", block)
+	}
+	out := map[string]string{}
+	for _, m := range regexp.MustCompile(`(--[a-z0-9]+)\s*:\s*(#[0-9a-fA-F]{6})`).FindAllStringSubmatch(rest[:end], -1) {
+		out[m[1]] = m[2]
+	}
+	if len(out) == 0 {
+		t.Fatalf("no hex colours found in css block %q", block)
+	}
+	return out
+}
+
+// contrast is the WCAG 2.x ratio between two "#rrggbb" colours.
+func contrast(fg, bg string) float64 {
+	l1, ok1 := luminance(fg)
+	l2, ok2 := luminance(bg)
+	if !ok1 || !ok2 {
+		return 0
+	}
+	if l1 < l2 {
+		l1, l2 = l2, l1
+	}
+	return (l1 + 0.05) / (l2 + 0.05)
+}
+
+func luminance(hex string) (float64, bool) {
+	if len(hex) != 7 || hex[0] != '#' {
+		return 0, false
+	}
+	channels := []struct {
+		at     int
+		weight float64
+	}{{1, 0.2126}, {3, 0.7152}, {5, 0.0722}}
+	var out float64
+	for _, c := range channels {
+		v, err := strconv.ParseUint(hex[c.at:c.at+2], 16, 8)
+		if err != nil {
+			return 0, false
+		}
+		linear := float64(v) / 255
+		if linear <= 0.03928 {
+			linear /= 12.92
+		} else {
+			linear = math.Pow((linear+0.055)/1.055, 2.4)
+		}
+		out += linear * c.weight
+	}
+	return out, true
+}
+
+// 面板上"待提醒 3"这种混合计数回答不了读者的问题：下一次打扰是"要开抢了"还是
+// "要作废了"。两个数必须分开显示。
+func TestDashboardSplitsOpeningAndClosingReminders(t *testing.T) {
+	ts, _, _ := newTestServer(t)
+	_, body := get(t, ts, "/")
+	html := string(body)
+	for _, want := range []string{"due_opening", "due_expiry"} {
+		if !strings.Contains(html, want) {
+			t.Errorf("the panel never reads %s; it still shows one blended reminder count", want)
+		}
+	}
+	// Read the whole expression that builds the hint: the labels sit on either
+	// side of the numbers they describe, so slicing from one of them would drop
+	// the other.
+	hint := ""
+	open, close := strings.Index(html, "due_opening"), strings.Index(html, "due_expiry")
+	if open < 0 || close < 0 {
+		hint = "（面板没有同时读取 due_opening 与 due_expiry）"
+	} else {
+		start := strings.LastIndex(html[:open], "\n")
+		end := strings.Index(html[close:], ");")
+		if start < 0 || end < 0 {
+			hint = "（找不到 hint 表达式的边界）"
+		} else {
+			hint = html[start : close+end]
+		}
+	}
+	if !strings.Contains(hint, "开抢") || !strings.Contains(hint, "到期") {
+		t.Errorf("the hint must name both kinds, got %q", hint)
 	}
 }
