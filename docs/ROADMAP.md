@@ -48,7 +48,20 @@
 
 ## Next Candidates（按价值排序，未开工）
 
-1. **更多官方目录差分**：推理云平台 / 向量库 / GPU 云，复用 `openrouter` 的游标差分套路。
+1. **限时事件的另一半：区县与省级栏目按「信源准入」流程实测后再加**（M3 已给出做法与判据）。
+
+## 已实测否决的方向（别再试第二遍）
+
+- **「官方目录差分：推理云 / 向量库 / GPU 云」**（2026-09-21 从生产出口实测后否决）：
+  OpenAI 兼容的 `/v1/models` 全部要密钥 —— `api.deepseek.com` `api.moonshot.cn` `api.groq.com`
+  `api.together.xyz` `api.siliconflow.cn/v1/models` 一律 401，`api.siliconflow.cn/v1/model/list/all`
+  404，`api.github.com/models` 404；只有 `openrouter.ai/api/v1/models` 是公开 JSON（200 / 738KB /
+  446 个 id / 带 `prompt`、`completion` 每 token 价格），而它已经在采集。**公开目录这条路没有第二个入口。**
+  定价页方向同样不通：`siliconflow.cn/pricing`、`bigmodel.cn/pricing`、`autodl.com/pricing`、
+  `cloud.zilliz.com.cn/pricing`、`volcengine.com/product/vikingdb` 全部 200，但页面里
+  **服务端渲染的价格标记 `¥<数字>` 命中数为 0**，其中三个只有 3–6 KB 的 JS 壳。要读它们得上无头浏览器，
+  而本项目是零第三方依赖的单二进制、不跑浏览器，用户的夜间调度也明确要求不拉起可见窗口。
+  结论：这类信息只能靠现有的 `search` 采集器从第三方转述里拿（已在跑），或者等官方给出无需鉴权的目录接口。
 
 ## Known Risks
 
@@ -73,6 +86,8 @@
 ## Non-Goals
 
 - 不引入数据库、Docker、消息队列、微服务拆分或前端构建链（JSONL + 单二进制是特性不是债）。
+- 不跑无头浏览器去读 SPA 定价页：那等于把"零第三方依赖"换成一个 Chrome。这类信息拿不到就是拿不到，
+  宁缺毋滥（实测见「已实测否决的方向」）。
 - 不用 GitHub Actions 当门禁（额度优先留给代码托管与 Release）。
 - 不做多群路由 / 分类订阅：目前只有一个读者。
 - 不把 `0.0.0.0` 暴露成公网服务，也不为公网访问写认证层。
