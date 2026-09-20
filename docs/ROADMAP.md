@@ -64,6 +64,8 @@
 
 ## Technical Debt
 
+- `deploy/install.sh` 只接受带路径的二进制：`sudo ./deploy/install.sh dealhunter-linux-amd64` 会把它当
+  命令去找并报"无法在本机执行"。修法是一行（无斜杠时前缀 `./`）。本次部署踩过一次，记在这里备修。
 - `internal/scheduler` 没有测试文件：`Loop` 直接依赖 `*pipeline.App`，要测触发逻辑得先抽一个小接口（**故意没做**，避免为测试造抽象）。
 - `notify.feishu.timezone` 与顶层 `timezone` 语义重叠，前者现在只用于卡片页脚时间。
 - `notify.DealsOf` 只为测试存在。

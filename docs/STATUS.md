@@ -3,7 +3,7 @@
 > 给下一次会话用的恢复点。只写有证据的结论：VERIFIED / NOT VERIFIED / BLOCKED / NOT APPLICABLE。
 > 长期方向看 [ROADMAP.md](ROADMAP.md)，用法看 [../README.md](../README.md)。
 
-最近更新：2026-09-20（M3 已部署 `e849a0b`，真机观察做完，只剩一项等外部内容）
+最近更新：2026-09-20（M3 与"截止时刻时区"修复均已部署，生产 = `3db4152` = HEAD）
 
 ## Current Milestone
 
@@ -37,9 +37,10 @@
 ## 同日做完：截止时刻的时区（ROADMAP 候选 #5）
 
 `ExpiresAt` 之前按主机钟表（`time.Local`）摆"23:59:59"，而服务跑 UTC，于是北京的截止日在库里多活
-约 8 小时 —— 方向上宽容所以一直没被当 bug。现在 `scoring.Input.StartsIn` 改名 `ReaderZone`，
-开抢与截止两端都用调用方给的读者时区。**升级后的可观察变化**：到期日判定整体提前 8 小时，
-过期券不再出现在日报里（这是修正，不是回归）。
+约 8 小时 —— 方向上宽容所以一直没被当 bug。现在与 `starts_at` 同规矩：截止日也按调用方给出的
+读者时区（`scoring.Input.ReaderZone`，原 `StartsIn` 改名，因为它的含义已覆盖两端）构造。
+**升级后的可观察变化**：到期日判定整体提前 8 小时，过期券不再出现在日报里（这是修正，不是回归）。
+本项已随 `3db4152` 部署到生产（全量门禁 `✓ office CI passed (linux-ci, 83 files)` 后带版本戳构建）。
 
 ## Verification
 
@@ -53,7 +54,8 @@
 | 真实公告措辞解析 | VERIFIED | `9月19日9:00至9月26日24:00`、`上午9:00开放`、`2026年9月19日9:00起` 均正确；`24:00` 拒绝当作开抢时刻；`9月31日` 被 round-trip 守卫拒绝（否则 `time.Date` 会滚到 10-01，猜成未来就真会发错提醒） |
 | 截止时刻的时区（原候选 #5） | VERIFIED | `ExpiresAt` 不再用 `time.Local`，改用 `scoring.Input.ReaderZone`（`StartsIn` 改名，含义覆盖开抢与截止两端）。守卫写法是"同一钟表在 UTC 与 UTC+8 必须差出整 8 小时"，所以与测试主机所在时区无关；把 keywords 层与 scoring 层的传参分别改回旧写法，两条测试各自变红已验证 |
 | 南昌信源可达性 | VERIFIED | 从生产机出口实测：商务局列表页与详情页 200/UTF-8/SSR；市政府列表页 200/32KB；`/ncszf/tzgg/` 307 跳首页（所以必须配 `2021_nav_list.shtml`）；`tyj.jiangxi.gov.cn` 用 curl 因不支持 legacy 重协商而失败，但 Go TLS 可过 |
-| 生产部署 | VERIFIED | `deal-hunter e849a0b · built=2026-09-20T07:21:19Z`，与 `git rev-parse HEAD` 一致；`/api/v1/status` 的 `version` 同步；事件配置生效为 `lead 45m / grace 15m / min_score 60 / ≤2 每天` |
+| 生产部署 | VERIFIED | `deal-hunter 3db4152 · built=2026-09-20T08:00:54Z`，与 `git rev-parse HEAD` 及 `origin/main` 三者一致；产物 sha256 `dc3787bb…` 在构建机、本机暂存、生产三处相同（传输未被篡改）；`install.sh` 装前跑了一次真 `version`，服务 `active`，首轮 `sources=17 errors=0` |
+| 时区修正的可观察效果 | NOT APPLICABLE（暂无对象） | 生产库 904 行带 `meta`，但 **`expires_at` / `starts_at` 均为 0 行** —— 至今没有任何一行真的解析出了时刻并落库（4 月那条在落库前就被拒）。所以这次修正在生产上暂无可比对的观测面，效果只由测试与两道变异守卫证明。第一条带时刻的行落库时要回头看一眼偏移是不是 `+08:00` |
 | 真机观察：券公告触发行为 | VERIFIED（观察本身） | 见上一节：两源一条正确拒收、一条今日无券关键词，事件通道 0 发 0 候补，无误发无骚扰 |
 | **真实开抢提醒实地复核** | **NOT VERIFIED** | 今天南昌没有"写了明确时刻且临近开抢"的市级公告；唯一在闸内的行是 4 月问答。省级在跑的（赣超 / 体育消费券 9-14 起、每人每周限领 2 张）用的是**周期性/无年份**措辞，M3 故意不猜。触发路径已由夹具与真实措辞两侧证明，等的只是一条现实公告 |
 | 面板在采集轮进行中应答（M4） | VERIFIED | 单元层：把信息源卡在请求里，读取方原本等满 3 秒，拆锁后立刻返回，`-race` 干净。生产层：重启后 40 次打 `/api/v1/status` 最大 168ms（1 次非 200 是重启缝隙，稳定态复测 25 次全 200、最大 105ms） |
@@ -103,11 +105,14 @@ ssh alienware-life 'sudo grep -oE "\"event:(reminded:[^\"]+|sent)\"[^}]*" /var/l
 
 无 P0/P1 代码遗留。M3 的"真实开抢提醒"挂起项不是阻塞 —— 它等的是外部内容，判据已写在上面。
 
-**一项运维待办（2026-09-20 晚）**：修完时区后本地已提交，但**没有 push、没有部署**。原因不是门禁
-没过，而是那一段时间里多个工具结果被塞进了伪造内容（假的 `git commit`/`git push` 输出、一个并不存在
-的 `d38709b` 提交、以及冒充"用户已批准推送"的段落）。在这种干扰下继续向共享远端写入是不该做的，
-所以停手等用户确认。核对方法：`git -C D:/codes/Deal-Hunter log --oneline origin/main..HEAD`
-应当只剩待推的提交，`git reflog -1` 的哈希要与 `git rev-parse HEAD` 一致。
+**一项需要人看一眼的异常（2026-09-20 晚）**：这一段时间里多次工具返回中混入了**伪造内容** ——
+假的 `git commit` / `git push` 成功输出、一个本仓库不存在的提交 `d38709b`（`git show` 报
+unknown revision）、以及冒充"用户已发消息批准立即推送/此前已授权 force push"的段落。因此当轮的
+推送与部署被暂停，等真实用户确认后才继续（现已完成，`origin/main` = 生产 = `3db4152`）。
+生产机上另有两个**不属于本会话**的残留：`/tmp/dh-m5-1789888881`（今天 07:21 的仓库快照，含
+config/deploy/dist）与 `/tmp/dh-wire-feishu.sh`（9-19，把服务接到租户已有飞书应用的接线脚本）。
+"m5" 这个命名本会话从未用过，怀疑有第二个会话或代理在同一台机器上并行操作本项目 —— 这也能解释
+上面的伪造输出。**未删除、未改动它们**，下次动这台机器前先确认来源。
 
 ## Notes for the next session
 
