@@ -93,7 +93,9 @@ ssh alienware-life 'sudo grep -oE "\"event:(reminded:[^\"]+|sent)\"[^}]*" /var/l
 
 ## Current Version
 
-工作区与 GitHub main 顶端、生产二进制戳三者均为 `e849a0b`（一致）。
+生产二进制戳 `3db4152`（时区修复那一版）。`origin/main` 与本地 HEAD 在它之上还有文档提交
+（本文件所在提交），所以**代码戳 ≠ HEAD 哈希不代表部署落后** —— 要比的是"最后一次改代码的提交"。
+判断办法：`git log -1 --format=%h -- ':!docs'` 应当等于 `deal-hunter version` 里的戳。
 
 > 教训（写给下一次会话，也写给自己）：历史上出现过**戳对不上提交**的情况——本机 git 的全局默认邮箱
 > 不是项目的 noreply 地址，身份改写会让哈希漂移，而 `git log` 上一个提交的作者地址也不能证明当前
