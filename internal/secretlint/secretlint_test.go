@@ -193,3 +193,56 @@ func TestRepositoryIsOpenSourceClean(t *testing.T) {
 		t.Fatalf("repository must not contain secrets or private topology:\n%s", b.String())
 	}
 }
+
+// 提交身份门禁只看作者邮箱，凭证扫描只看凭证特征与内网拓扑 —— 所以文档里写死一个
+// 个人消费者邮箱不会触发任何一道闸。今晚写 STATUS 时就这么差点把刚抹掉的地址重新
+// 公开出去。这类地址必须被拦住。
+func TestConsumerMailboxIsReported(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"docs/status.md": "联系运维：zhang.san foxmail 上是 zhang.san@foxmail.com，备用 81234@qq.com\n", // secretlint:ignore 假地址，本规则的夹具
+		"a.go":           "const maintainer = \"liwei123@163.com\"\n",                         // secretlint:ignore 假地址，本规则的夹具
+	})
+	findings, err := Scan(DefaultOptions(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sawDoc, sawCode := false, false
+	for _, f := range findings {
+		if f.Rule != "consumer_mailbox" {
+			continue
+		}
+		switch {
+		case strings.HasSuffix(f.Path, "status.md"):
+			sawDoc = true
+		case strings.HasSuffix(f.Path, "a.go"):
+			sawCode = true
+		}
+	}
+	if !sawDoc || !sawCode {
+		t.Fatalf("both consumer addresses must be reported, got %+v", findings)
+	}
+}
+
+// 豁免走同一套 secretlint:ignore：公开披露渠道就是要留一个联系地址时，写清理由，
+// 而不是把整条规则关掉。
+func TestConsumerMailboxCanBeExemptedWithAReason(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"SECURITY.md": "报告漏洞请寄 security@foxmail.com <!-- secretlint:ignore 对外披露联系渠道 -->\n",
+		"notes.md":    "维护者邮箱 security@foxmail.com\n", // secretlint:ignore 假地址，本规则的夹具
+	})
+	findings, err := Scan(DefaultOptions(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range findings {
+		if f.Rule == "consumer_mailbox" && strings.HasSuffix(f.Path, "SECURITY.md") {
+			t.Errorf("the marked line must be exempt: %+v", f)
+		}
+		if f.Rule == "consumer_mailbox" && !strings.HasSuffix(f.Path, "notes.md") {
+			t.Errorf("unexpected file reported: %+v", f)
+		}
+	}
+	if len(findings) != 1 || !strings.HasSuffix(findings[0].Path, "notes.md") {
+		t.Fatalf("expected exactly the unmarked hit, got %+v", findings)
+	}
+}

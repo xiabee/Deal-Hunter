@@ -114,6 +114,11 @@ func Rules() []Rule {
 		{"serverchan_key", `\bSCT[A-Za-z0-9]{24,}\b|\bsctp[A-Za-z0-9]{24,}\b`},
 		{"dingtalk_webhook_token", `oapi\.dingtalk\.com/robot/send\?access_token=[0-9a-f]{20,}`},
 		{"telegram_bot_token", `\b\d{8,10}:AA[A-Za-z0-9_\-]{30,}\b`},
+		// A personal mailbox is not a credential, but it is not recoverable once
+		// published: this project's commit identity gate only looks at authors, so
+		// an address pasted into a doc used to pass every check. Project and
+		// noreply addresses (github.com) are deliberately not in this set.
+		{"consumer_mailbox", `(?i)\b[a-z0-9][a-z0-9._%+\-]*@(?:foxmail|qq|163|vip\.163|126|yeah|sina|sohu|aliyun|139|21cn|gmail|googlemail|outlook|hotmail|live|icloud|me)\.(?:com|net|cn)\b`},
 	}
 	out := make([]Rule, 0, len(raw))
 	for _, r := range raw {

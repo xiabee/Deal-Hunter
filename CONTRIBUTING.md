@@ -65,6 +65,9 @@ scripts/               ci-local.{sh,ps1} 与 ci-office.sh
 - ❌ 任何真实 webhook / token / 聊天 ID / 内网 IP / 主机名 / `.ts.net` 域名
 - ❌ 用个人邮箱提交：`scripts/check-identity.sh --pending` 会在 pre-commit 拦下消费者邮箱
   （`foxmail`/`qq`/`gmail`/`163`…），请用 `git -c user.email=<handle>@users.noreply.github.com commit ...`
+- ❌ 把个人邮箱写进**文件内容**（文档、注释、夹具都行）：`check-identity` 只看提交作者，管不到正文，
+  所以 `internal/secretlint` 增加了一条 `consumer_mailbox`，`dealhunter secretscan -C .` 会连文档一起扫。
+  对外披露渠道确实要留一个地址时，用 `secretlint:ignore` + 理由标在同一行，别把规则关掉
 - ❌ 把密钥写进 JSON 配置或测试字面量。**夹具请用合成值**（`.invalid` 域名、
   `100.96.24.7` 这类假地址、`__PASTE_HERE__` 占位符），确需保留示例值时用 <!-- secretlint:ignore synthetic documentation example, not a real host -->
   `secretlint:ignore` + 理由，写在同一行

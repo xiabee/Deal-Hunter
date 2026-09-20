@@ -43,16 +43,12 @@
 | M3（代码与部署，实地复核挂起） | 采集 `follow_detail` / 列表行日期；`starts_at` 解析；限时事件不再享受"无期限即在效"；事件提醒通道；`dealhunter events`；南昌两源上线 | `121e14d`…`e849a0b`，已部署 `alienware-life` |
 | M4 | 采集轮进行中不再锁住只读面板：roundMu 串行化轮次，mu 只保护运行历史 | `396543f` |
 | M5 | 到期前提醒复用同一张 ⏰ 卡（`expires_at` 侧）：`Store.Expiring`、`notify.event.expiry_lead`、两个 due 计数、只提醒未过期的截止；面板日间/夜间配色切换 | 本次提交 |
+| M6（门禁加固） | `secretlint` 新增 `consumer_mailbox`：个人邮箱写进**文档正文**也会被拦（`check-identity` 只管提交作者），豁免沿用同行 `secretlint:ignore` + 理由 | 本次提交 |
 
 ## Next Candidates（按价值排序，未开工）
 
 1. **更多官方目录差分**：推理云平台 / 向量库 / GPU 云，复用 `openrouter` 的游标差分套路。
 2. **ARM64 与真实部署验证**：交叉编译已过，但从未在 linux/arm64 与 systemd 下实跑过（见 Known Risks）。
-3. **把身份门禁扩到文件内容**（小改动，价值高）：`check-identity.sh` 只查提交作者，`internal/secretlint`
-   只查凭证特征与内网拓扑，所以**文档里写死一个个人邮箱地址不会触发任何一道闸**。M2 部署后写 STATUS
-   时正好差点把刚抹掉的地址重新公开出去。修法：给 secretlint 增加一类消费者邮箱特征
-   （foxmail / qq / 163 / gmail…），并配一套豁免（SECURITY.md 的披露联系地址必须能留下来）。
-   验收：一个 fixture 用例证明命中即失败、一个用例证明白名单生效。
 
 ## Known Risks
 
