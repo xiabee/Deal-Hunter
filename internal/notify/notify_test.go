@@ -577,3 +577,25 @@ func TestUrgentAndPlainUseTheResolvedLink(t *testing.T) {
 		t.Errorf("breakthrough rows should link the vendor page: %s", b)
 	}
 }
+
+// 提醒在三个通道上都必须带上开抢时刻：飞书卡片走 Intro，控制台/文件走 Plain()，
+// OpenClaw 中转走它自己的文本。少一条就是某类读者只看到"要开抢了"却不知道几点。
+func TestEventMessageCarriesTheMomentOnEveryPath(t *testing.T) {
+	when := time.Now().Add(20 * time.Minute).UTC().Format("01月02日 15:04")
+	m := NewMessage(KindEvent, "⏰ 09月21日 10:00 开抢 · 洪城消费券", sampleDeal())
+	m.Title = "⏰ " + when + " 开抢 · 洪城消费券"
+	f, _ := NewFeishu(config.Feishu{Timezone: "UTC"})
+	card, err := json.Marshal(f.card(m))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, out := range map[string]string{"card": string(card), "plain": m.Plain()} {
+		if !strings.Contains(out, when) {
+			t.Errorf("%s lost the moment: %s", name, out)
+		}
+	}
+	r, _ := NewOpenClawRelay(config.OpenClaw{Command: "openclaw", Target: "chat:1", Channel: "feishu"})
+	if body := r.Args(m)[len(r.Args(m))-1]; !strings.Contains(body, when) {
+		t.Errorf("relay text lost the moment: %s", body)
+	}
+}

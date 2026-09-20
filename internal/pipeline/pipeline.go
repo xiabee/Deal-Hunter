@@ -45,6 +45,8 @@ type Run struct {
 	NewDeals   int            `json:"new_deals"`
 	Stored     int            `json:"stored"`
 	Pushed     int            `json:"urgent_sent"`
+	EventSent  int            `json:"event_sent"`
+	EventHeld  int            `json:"event_held"`
 	UrgentHeld int            `json:"urgent_held"`
 	Dupes      int            `json:"dupes_folded"`
 	Verified   int            `json:"verified_official"`
@@ -354,10 +356,18 @@ func (a *App) RunOnce(ctx context.Context, trigger string) (*Run, error) {
 					a.log.Warn("mark pushed", "err", err)
 				}
 			}
-			if err := a.spendUrgent(now); err != nil {
+			if err := a.spendBudget(urgentCursor, now); err != nil {
 				a.log.Warn("charge urgent budget", "err", err)
 			}
 		}
+	}
+
+	// Reminders scan the store rather than this round's findings, because an
+	// announcement is usually published days before the thing it announces opens.
+	sent, held, evErr := a.sendDueEvents(ctx, time.Now())
+	run.EventSent, run.EventHeld = sent, held
+	if evErr != nil {
+		deliverErr = errors.Join(deliverErr, evErr)
 	}
 
 	run.FinishedAt = time.Now().UTC()
@@ -368,7 +378,7 @@ func (a *App) RunOnce(ctx context.Context, trigger string) (*Run, error) {
 	}
 	a.log.Info("round complete", "trigger", trigger, "sources", len(run.Sources),
 		"new", run.NewDeals, "stored", run.Stored, "urgent_sent", run.Pushed,
-		"urgent_held", run.UrgentHeld, "dupes", run.Dupes, "verified_official", run.Verified,
+		"urgent_held", run.UrgentHeld, "event_sent", run.EventSent, "event_held", run.EventHeld, "dupes", run.Dupes, "verified_official", run.Verified,
 		"third_party", run.ThirdParty, "errors", len(run.Errors), "took", run.duration().Round(time.Millisecond))
 	return run, errors.Join(append(a.collectSourceErrors(outcomes), deliverErr)...)
 }
@@ -572,14 +582,17 @@ const dailyCursor = "daily:last_sent"
 // dailyCursor, and only DailyDue lets us reach SendDaily.
 const dailyWatched = "daily:watched_since"
 
-// urgentCursor records what the current local day has spent of its breakthrough
-// budget. Counting per day in one key needs no cleanup and rolls over by itself,
-// which a list of timestamps would.
-const urgentCursor = "urgent:sent"
+// Per-day message budgets, one key each. Storing {local day, count} rather than
+// "the last send" is what makes a ceiling of N a day mean N and not "one every
+// N/2 hours" once sends accumulate, and the day rolls over with no cleanup.
+const (
+	urgentCursor = "urgent:sent"
+	eventCursor  = "event:sent"
+)
 
-type urgentBudget struct {
+type dayCount struct {
 	Date string `json:"date"` // local calendar day, as seen in the configured zone
-	N    int    `json:"n"`    // breakthrough messages already sent that day
+	N    int    `json:"n"`    // messages already sent that day
 }
 
 // loc resolves the configured timezone. The service often runs in UTC, so a
@@ -756,7 +769,7 @@ type UrgentInfo struct {
 func (a *App) Urgent(now time.Time) UrgentInfo {
 	u := a.cfg.Notify.Urgent
 	info := UrgentInfo{Enabled: u.Enabled, MinScore: u.MinScore, MaxPerDay: a.urgentMax()}
-	if day, n := a.urgentSpent(); day == a.localDay(now) {
+	if day, n := a.budgetSpent(urgentCursor); day == a.localDay(now) {
 		info.SentToday = n
 	}
 	return info
@@ -783,39 +796,42 @@ func (a *App) urgentLeft(now time.Time) int {
 	if !a.cfg.Notify.Urgent.Enabled {
 		return 0
 	}
-	if day, n := a.urgentSpent(); day == a.localDay(now) {
-		if left := a.urgentMax() - n; left > 0 {
-			return left
-		}
-		return 0
-	}
-	return a.urgentMax()
+	return a.budgetLeft(urgentCursor, a.urgentMax(), now)
+
 }
 
-// urgentSpent reads the {local day, messages sent} pair recorded for today.
-func (a *App) urgentSpent() (string, int) {
-	b, ok := a.st.GetState(urgentCursor)
+// budgetSpent reads the {local day, messages sent} pair recorded under key.
+func (a *App) budgetSpent(key string) (string, int) {
+	b, ok := a.st.GetState(key)
 	if !ok {
 		return "", 0
 	}
-	var u urgentBudget
+	var u dayCount
 	if json.Unmarshal(b, &u) != nil {
 		return "", 0
 	}
 	return u.Date, u.N
 }
 
-// spendUrgent charges one breakthrough against the local day it went out.
-func (a *App) spendUrgent(now time.Time) error {
-	day := a.localDay(now)
-	spent := 0
-	if b, ok := a.st.GetState(urgentCursor); ok {
-		var u urgentBudget
-		if json.Unmarshal(b, &u) == nil && u.Date == day {
-			spent = u.N
-		}
+// budgetLeft reports how many messages under key may still go out today.
+func (a *App) budgetLeft(key string, max int, now time.Time) int {
+	if max <= 0 {
+		max = 1
 	}
-	return a.st.PutState(urgentCursor, urgentBudget{Date: day, N: spent + 1})
+	if day, n := a.budgetSpent(key); day == a.localDay(now) {
+		if left := max - n; left > 0 {
+			return left
+		}
+		return 0
+	}
+	return max
+}
+
+// spendBudget charges one message under key to the local day it went out.
+func (a *App) spendBudget(key string, now time.Time) error {
+	day := a.localDay(now)
+	_, spent := a.budgetSpent(key)
+	return a.st.PutState(key, dayCount{Date: day, N: spent + 1})
 }
 
 // localDay is the calendar day in the configured zone, which is what "once a
@@ -868,4 +884,133 @@ func (a *App) NotifyTest(ctx context.Context) error {
 	msg := notify.NewMessage(notify.KindTest, "✅ Deal-Hunter 自检", probe)
 	msg.Intro = "推送链路连通性测试"
 	return a.nf.Send(ctx, msg)
+}
+
+// eventRemindedPrefix keys the one-reminder-per-event mark; it holds the moment
+// the reminder went out, which is also what makes the mark survive a restart.
+const eventRemindedPrefix = "event:reminded:"
+
+// EventInfo describes the reminder channel for the status endpoint.
+type EventInfo struct {
+	Enabled   bool `json:"enabled"`
+	LeadM     int  `json:"lead_minutes"`
+	GraceM    int  `json:"late_grace_minutes"`
+	MinScore  int  `json:"min_score"`
+	MaxPerDay int  `json:"max_per_day"`
+	SentToday int  `json:"sent_today"`
+	Upcoming  int  `json:"due_now"`
+}
+
+// Event reports the reminder schedule and how many tracked events are waiting.
+func (a *App) Event(now time.Time) EventInfo {
+	e := a.cfg.Notify.Event
+	info := EventInfo{Enabled: e.Enabled, LeadM: int(e.Lead.D() / time.Minute),
+		GraceM: int(e.LateGrace.D() / time.Minute), MinScore: e.MinScore, MaxPerDay: e.MaxPerDay}
+	if day, n := a.budgetSpent(eventCursor); day == a.localDay(now) {
+		info.SentToday = n
+	}
+	info.Upcoming = len(a.eventsDue(now))
+	return info
+}
+
+// eventsDue returns the tracked events whose announced start is inside the
+// reminder window and which have not been reminded about yet.
+func (a *App) eventsDue(now time.Time) []model.Deal {
+	e := a.cfg.Notify.Event
+	if !e.Enabled {
+		return nil
+	}
+	from, through := now.Add(-e.LateGrace.D()), now.Add(e.Lead.D())
+	var due []model.Deal
+	for _, d := range a.st.Upcoming(from, through, e.MinScore) {
+		if _, done := a.stateTime(eventRemindedPrefix + d.Fingerprint); done {
+			continue
+		}
+		due = append(due, d)
+	}
+	return due
+}
+
+// sendDueEvents reminds once per dated event. A row that cannot be delivered
+// stays unmarked, so the next round retries it; the budget is only charged for a
+// message that actually left.
+func (a *App) sendDueEvents(ctx context.Context, now time.Time) (sent, held int, err error) {
+	due := a.eventsDue(now)
+	if len(due) == 0 {
+		return 0, 0, nil
+	}
+	if n := a.cfg.Notify.Event.MaxItems; n > 0 && len(due) > n {
+		held += len(due) - n
+		due = due[:n]
+	}
+	if a.budgetLeft(eventCursor, a.cfg.Notify.Event.MaxPerDay, now) <= 0 {
+		a.log.Info("event budget spent: reminders wait for the next day",
+			"waiting", len(due), "max_per_day", a.cfg.Notify.Event.MaxPerDay)
+		return 0, len(due), nil
+	}
+	msg := notify.NewMessage(notify.KindEvent, a.eventTitle(due, now), due...)
+	if len(due) > 1 {
+		// A shared title can only carry one moment, so each row states its own.
+		lines := make([]string, 0, len(due))
+		for _, d := range due {
+			lines = append(lines, "· "+a.eventWhen(d)+" 开抢 · "+truncateRunes(d.Title, 30))
+		}
+		msg.Intro = strings.Join(lines, "\n")
+	}
+	if err := a.nf.Send(ctx, msg); err != nil {
+		a.log.Error("event reminder delivery failed; the next round retries", "err", err)
+		return 0, len(due), err
+	}
+	for _, d := range due {
+		if err := a.setStateTime(eventRemindedPrefix+d.Fingerprint, now.UTC()); err != nil {
+			a.log.Warn("record reminder", "err", err)
+		}
+	}
+	if err := a.spendBudget(eventCursor, now); err != nil {
+		a.log.Warn("charge event budget", "err", err)
+	}
+	return len(due), held, nil
+}
+
+// eventTitle leads with the moment, because that is the whole reason the reader
+// opened the message.
+func (a *App) eventTitle(deals []model.Deal, now time.Time) string {
+	if len(deals) > 1 {
+		return fmt.Sprintf("⏰ %d 项即将开抢", len(deals))
+	}
+	d := deals[0]
+	if _, ok := metaInstant(d); !ok {
+		return "⏰ 即将开始 · " + truncateRunes(d.Title, 40)
+	}
+	return "⏰ " + a.eventWhen(d) + " 开抢 · " + truncateRunes(d.Title, 40)
+}
+
+// eventWhen renders an event's start in the reader's zone.
+func (a *App) eventWhen(d model.Deal) string {
+	when, ok := metaInstant(d)
+	if !ok {
+		return "时间待定"
+	}
+	return when.In(a.loc()).Format("01月02日 15:04")
+}
+
+// metaInstant reads the start moment the scorer recorded.
+func metaInstant(d model.Deal) (time.Time, bool) {
+	v := d.Meta["starts_at"]
+	if v == "" {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339, v)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return strings.TrimSpace(string(r[:n])) + "…"
 }

@@ -3,11 +3,16 @@
 > 给下一次会话用的恢复点。只写有证据的结论：VERIFIED / NOT VERIFIED / BLOCKED / NOT APPLICABLE。
 > 长期方向看 [ROADMAP.md](ROADMAP.md)，用法看 [../README.md](../README.md)。
 
-最近更新：2026-09-20（M2 完成，并已部署到 LIFE 域生产机）
+最近更新：2026-09-20（M3 代码侧完成，未部署）
 
 ## Current Milestone
 
-无 —— M2 已完成、已提交、已部署并验收；等待选定下一项（首选：本地消费券，见 ROADMAP Next Candidates #1）。
+**M3 · 本地消费券与开抢前提醒**（设计见 [superpowers/specs/](superpowers/specs/)）。
+代码侧完成：`follow_detail` 与列表行日期、`starts_at` 解析、限时事件的日报口径分叉、
+事件提醒通道（配置 / 调度 / 三条渲染路径 / 状态字段 / 面板）。
+
+**M3 未完成的部分**：生产配置加南昌信源并部署、区县栏目按准入流程实测、
+以及"真实开抢前收到且只收到一次"的实地复核。详见 ROADMAP 的 Current Milestone。
 
 ## Last Completed：M2 交付形态改为「一天一份日报」
 
@@ -27,7 +32,11 @@
 
 | 项 | 结论 | 证据 |
 |---|---|---|
-| 单元 + 集成测试 | VERIFIED | 185 个测试函数，`go test -race ./...` 本地与 linux-ci 均全绿 |
+| 单元 + 集成测试 | VERIFIED | 202 个测试函数，`go test -race ./...` 本地与 linux-ci 均全绿 |
+| 事件提醒端到端（夹具驱动） | VERIFIED | 窗口内恰好一次、跨重启不重发、窗口外（提前 3 天 / 迟到 2 小时）静默、三条渲染路径都带时刻；窗口守卫经"临时翻宽→变红→还原"验证不是空过 |
+| 南昌信源可达性 | VERIFIED | 2026-09-20 从生产机出口实测：商务局列表页与详情页 200/UTF-8/SSR，含日期与链接；`/ncszf/tzgg/` 307 跳首页（必须配 `2021_nav_list.shtml`） |
+| 真实开抢提醒 | NOT VERIFIED | 需要等下一条带明确时刻的南昌公告；这是 M3 验收的最后一关 |
+| 生产部署（M3） | NOT VERIFIED | 生产仍是 M2 二进制；南昌信源尚未写入 `/etc/deal-hunter/config.json` |
 | 快速门禁（fmt/vet/build/扫描/离线冒烟） | VERIFIED | `bash scripts/ci-local.sh --quick` → `✓ CI PASSED` |
 | 全量门禁 | VERIFIED | `DH_CI_HOST=linux-ci bash scripts/ci-office.sh` → `✓ office CI passed (80 files)` |
 | 干净环境构建 | VERIFIED | 同上：CI 节点解包到 `/tmp/deal-hunter-ci-*` 全新目录，非本机工作区 |

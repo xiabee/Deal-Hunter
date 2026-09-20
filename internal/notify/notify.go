@@ -23,9 +23,11 @@ const (
 	// KindUrgent may interrupt the day's briefing; KindDaily is the one message
 	// a day that every other finding waits for.
 	KindUrgent Kind = "urgent"
-	KindDaily  Kind = "daily"
-	KindTest   Kind = "test"
-	KindError  Kind = "error"
+	// KindEvent is the heads-up before a dated event opens, such as a voucher round.
+	KindEvent Kind = "event"
+	KindDaily Kind = "daily"
+	KindTest  Kind = "test"
+	KindError Kind = "error"
 )
 
 // Message is one delivery: the daily briefing, or a finding urgent enough to

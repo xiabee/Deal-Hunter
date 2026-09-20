@@ -296,3 +296,36 @@ func TestParamAndTimeoutHelpers(t *testing.T) {
 		t.Error("missing timeout must fall back to 20s")
 	}
 }
+
+// 事件提醒是第三种消息：一个有时刻的事件值得一次独立于日报的提醒。默认值就是它对
+// 读者的承诺 —— 提前 45 分钟、迟到 15 分钟仍算数、一天最多两条、低于 60 分不配打断。
+func TestEventReminderDefaultsAndEnv(t *testing.T) {
+	e := Default().Notify.Event
+	if !e.Enabled {
+		t.Error("the reminder channel must be on by default, or it silently does nothing")
+	}
+	if e.Lead.D() != 45*time.Minute || e.LateGrace.D() != 15*time.Minute {
+		t.Errorf("lead/grace = %s/%s", e.Lead, e.LateGrace)
+	}
+	if e.MaxPerDay != 2 || e.MinScore != 60 || e.MaxItems != 3 {
+		t.Errorf("max_per_day/min_score/max_items = %d/%d/%d", e.MaxPerDay, e.MinScore, e.MaxItems)
+	}
+
+	t.Setenv(EnvEventEnabled, "false")
+	t.Setenv(EnvEventLeadTime, "90m")
+	t.Setenv(EnvEventMinScore, "75")
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got := cfg.Notify.Event
+	if got.Enabled || got.Lead.D() != 90*time.Minute || got.MinScore != 75 {
+		t.Errorf("env not applied: %+v", got)
+	}
+
+	bad := Default()
+	bad.Notify.Event.MinScore = 500
+	if err := bad.Validate(); err == nil || !strings.Contains(err.Error(), "event.min_score") {
+		t.Errorf("want event.min_score rejection, got %v", err)
+	}
+}

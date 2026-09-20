@@ -332,7 +332,12 @@ func (s *Store) Live(min int, now time.Time, limit int) []model.Deal {
 
 // deadline reads the expiry recorded at scoring time.
 func deadline(d model.Deal) (time.Time, bool) {
-	v := d.Meta["expires_at"]
+	return metaTime(d, "expires_at")
+}
+
+// metaTime reads an RFC3339 instant the scorer recorded under key.
+func metaTime(d model.Deal, key string) (time.Time, bool) {
+	v := d.Meta[key]
 	if v == "" {
 		return time.Time{}, false
 	}
@@ -341,6 +346,33 @@ func deadline(d model.Deal) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return t, true
+}
+
+// Upcoming returns dated events whose announced start falls inside
+// [from, through], soonest first. It is deliberately separate from Live: a dated
+// event is never "standing", so the briefing and the reminder read disjoint
+// sets and neither can double-report the other's items.
+func (s *Store) Upcoming(from, through time.Time, min int) []model.Deal {
+	var out []model.Deal
+	for _, d := range s.Recent(20000) {
+		if d.Meta["dup_of"] != "" || d.Score < min {
+			continue
+		}
+		start, ok := metaTime(d, "starts_at")
+		if !ok || start.Before(from) || start.After(through) {
+			continue
+		}
+		out = append(out, d)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		a, _ := metaTime(out[i], "starts_at")
+		b, _ := metaTime(out[j], "starts_at")
+		if !a.Equal(b) {
+			return a.Before(b)
+		}
+		return out[i].Title < out[j].Title
+	})
+	return out
 }
 
 // GetState reads a source cursor.

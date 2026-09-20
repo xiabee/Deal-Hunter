@@ -49,6 +49,14 @@
       "max_per_day": 1,
       "max_items": 5
     },
+    "event": {
+      "enabled": true,
+      "lead_time": "45m",
+      "late_grace": "15m",
+      "max_per_day": 2,
+      "min_score": 60,
+      "max_items": 3
+    },
     "console": false
   },
   "sources": [

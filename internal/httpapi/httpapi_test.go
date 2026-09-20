@@ -162,6 +162,16 @@ func TestStatusReportsOperationalState(t *testing.T) {
 	if _, has := store["live_in_briefing"]; !has {
 		t.Error("the number of rows the briefing would carry should be reported")
 	}
+	ev, ok := got["event"].(map[string]any)
+	if !ok {
+		t.Error("the reminder channel must report its schedule: the panel reads it by name")
+	}
+	if _, has := ev["due_now"]; !has {
+		t.Error("the panel cannot show how many events are waiting for a reminder")
+	}
+	if _, has := ev["sent_today"]; !has {
+		t.Error("the panel cannot show today's reminder budget")
+	}
 	if _, ok := got["urgent"].(map[string]any); !ok {
 		t.Error("today's breakthrough budget is missing from status")
 	}

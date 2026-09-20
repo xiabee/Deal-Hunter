@@ -134,12 +134,29 @@ type Urgent struct {
 	MaxItems  int  `json:"max_items,omitempty"`
 }
 
+// Event is the third kind of message: a heads-up before a dated event opens.
+// It is deliberately separate from Urgent — "worth interrupting for" and "has a
+// moment worth reminding about" are different judgements, and a voucher round
+// that opens at 10:00 is worth saying so before, not after, it starts.
+type Event struct {
+	Enabled bool `json:"enabled"`
+	// Lead is how early the reminder may fire. It is wider than a typical
+	// collection interval on purpose: reminders are evaluated at round end, so
+	// the discovery time is somewhere inside [start-lead, start+grace].
+	Lead      Duration `json:"lead_time,omitempty"`
+	LateGrace Duration `json:"late_grace,omitempty"`
+	MaxPerDay int      `json:"max_per_day,omitempty"`
+	MinScore  int      `json:"min_score,omitempty"`
+	MaxItems  int      `json:"max_items,omitempty"`
+}
+
 // Notify groups all delivery backends.
 type Notify struct {
 	Feishu   Feishu   `json:"feishu"`
 	OpenClaw OpenClaw `json:"openclaw"`
 	Daily    Daily    `json:"daily"`
 	Urgent   Urgent   `json:"urgent"`
+	Event    Event    `json:"event"`
 	Console  bool     `json:"console"`
 }
 
@@ -212,6 +229,9 @@ const (
 	EnvDailyAt        = "DH_DAILY_AT"
 	EnvUrgentEnabled  = "DH_URGENT_ENABLED"
 	EnvUrgentMinScore = "DH_URGENT_MIN_SCORE"
+	EnvEventEnabled   = "DH_EVENT_ENABLED"
+	EnvEventLeadTime  = "DH_EVENT_LEAD_TIME"
+	EnvEventMinScore  = "DH_EVENT_MIN_SCORE"
 	// OpenClaw relay: the destination chat id stays out of the config file.
 	EnvOpenClawTarget = "DH_OPENCLAW_TARGET"
 	EnvOpenClawCmd    = "DH_OPENCLAW_COMMAND"
@@ -249,7 +269,9 @@ func Default() *Config {
 			OpenClaw: OpenClaw{Enabled: true, SkillDir: "", APIPath: "/api/v1/", Description: "Deal-Hunter 羊毛情报"},
 			Daily:    Daily{Enabled: true, At: defaultDailyAt, MinScore: 45, MaxItems: 15},
 			Urgent:   Urgent{Enabled: true, MinScore: 90, MaxPerDay: 1, MaxItems: 5},
-			Console:  true,
+			Event: Event{Enabled: true, Lead: Duration(45 * time.Minute),
+				LateGrace: Duration(15 * time.Minute), MaxPerDay: 2, MinScore: 60, MaxItems: 3},
+			Console: true,
 		},
 		Sources: DefaultSources(),
 	}
@@ -436,6 +458,19 @@ func (c *Config) applyEnv() {
 			c.Notify.Urgent.MinScore = n
 		}
 	}
+	if v := os.Getenv(EnvEventEnabled); v != "" {
+		c.Notify.Event.Enabled = isTruthy(v)
+	}
+	if v := os.Getenv(EnvEventLeadTime); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			c.Notify.Event.Lead = Duration(d)
+		}
+	}
+	if v := os.Getenv(EnvEventMinScore); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Notify.Event.MinScore = n
+		}
+	}
 	if v := os.Getenv(EnvDailyEnabled); v != "" {
 		c.Notify.Daily.Enabled = isTruthy(v)
 	}
@@ -512,6 +547,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Notify.Urgent.MinScore < 0 || c.Notify.Urgent.MinScore > 100 {
 		return fmt.Errorf("config: notify.urgent.min_score %d out of 0..100", c.Notify.Urgent.MinScore)
+	}
+	if c.Notify.Event.MinScore < 0 || c.Notify.Event.MinScore > 100 {
+		return fmt.Errorf("config: notify.event.min_score %d out of 0..100", c.Notify.Event.MinScore)
+	}
+	if c.Notify.Event.Lead.D() < 0 || c.Notify.Event.LateGrace.D() < 0 || c.Notify.Event.MaxPerDay < 0 {
+		return fmt.Errorf("config: notify.event lead/grace/max_per_day must not be negative")
 	}
 	if c.Notify.Urgent.MaxPerDay < 0 {
 		return fmt.Errorf("config: notify.urgent.max_per_day %d must be >= 0", c.Notify.Urgent.MaxPerDay)

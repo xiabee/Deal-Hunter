@@ -127,7 +127,7 @@ func CardTemplate(m Message) string {
 	switch m.Kind {
 	case KindDaily:
 		return "blue"
-	case KindTest, KindError:
+	case KindEvent, KindTest, KindError:
 		return "grey"
 	}
 	if len(m.Deals) == 0 {

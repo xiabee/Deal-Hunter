@@ -196,6 +196,7 @@ func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 		},
 		"last_run": s.app.LastRun(),
 		"daily":    s.app.Daily(now),
+		"event":    s.app.Event(now),
 		"urgent":   s.app.Urgent(now),
 	})
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -928,5 +929,113 @@ func TestRunOnceRecordsStartMomentInReadersZone(t *testing.T) {
 	}
 	if cat != model.CatVoucher {
 		t.Errorf("category = %q, want %q", cat, model.CatVoucher)
+	}
+}
+
+// voucherZone is the zone the notice is written in: an announcement states its
+// times in the reader's zone, never the server's, and the app under test is
+// configured for Asia/Shanghai while the CI builder runs in UTC.
+var voucherZone = time.FixedZone("CST", 8*3600)
+
+// voucherFeed renders a notice whose opening time is `opens`, so the tests can
+// place an event inside or outside the reminder window regardless of when they run.
+func voucherFeed(opens time.Time) []byte {
+	local := opens.In(voucherZone)
+	return []byte(`<?xml version="1.0"?><rss version="2.0"><channel><title>t</title><item>
+<title>关于开展2026年洪城消费券发放的公告</title>
+<link>https://nc.test/tzgg/202609/a.shtml</link>
+<description>满100元减30元。本轮` + local.Format("1月2日15:04") + `开始发放，领完即止。核销期限至` +
+		local.AddDate(0, 0, 20).Format("2006年1月2日") + `。</description>
+<pubDate>` + opens.Add(-72*time.Hour).Format(time.RFC1123Z) + `</pubDate>
+</item></channel></rss>`)
+}
+
+func voucherApp(t *testing.T, f sources.Fetcher, spy *spyNotifier, opens time.Time) *App {
+	return testApp(t, f, spy, func(c *config.Config) {
+		c.Timezone = "Asia/Shanghai"
+		c.Notify.Event.MinScore = 50
+		c.Notify.Event.Lead = config.Duration(45 * time.Minute)
+		c.Notify.Event.LateGrace = config.Duration(15 * time.Minute)
+		c.Sources = []config.Source{{Name: "nc-voucher", Kind: config.KindRSS,
+			URL: feedURL, Trust: 9, Category: model.CatVoucher}}
+	})
+}
+
+// 提前 30 分钟开抢的公告必须提醒一次，而且只提醒一次 —— 第二轮再发一遍就是骚扰。
+func TestDatedEventRemindsOnceInsideItsWindow(t *testing.T) {
+	opens := time.Now().Add(30 * time.Minute)
+	f := &cannedFetcher{byURL: map[string][]byte{feedURL: voucherFeed(opens)}}
+	spy := &spyNotifier{}
+	app := voucherApp(t, f, spy, opens)
+
+	if _, err := app.RunOnce(context.Background(), "unit"); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	msgs := spy.all()
+	if len(msgs) != 1 {
+		t.Fatalf("one reminder expected, got %d: %+v", len(msgs), msgs)
+	}
+	if msgs[0].Kind != notify.KindEvent {
+		t.Errorf("kind = %s, want %s", msgs[0].Kind, notify.KindEvent)
+	}
+	if !strings.Contains(msgs[0].Title, "开抢") {
+		t.Errorf("the title should name the moment, got %q", msgs[0].Title)
+	}
+
+	spy.reset(nil)
+	if _, err := app.RunOnce(context.Background(), "unit2"); err != nil {
+		t.Fatal(err)
+	}
+	if spy.count() != 0 {
+		t.Errorf("must not remind twice, got %d", spy.count())
+	}
+}
+
+// 窗口之外保持安静：提前三天发布的公告不该今天就提醒，而开抢时刻过去 15 分钟宽限之后
+// 也不该再提 —— 那时提醒已经帮不上忙，只剩噪音。
+func TestDatedEventStaysSilentOutsideItsWindow(t *testing.T) {
+	for name, opens := range map[string]time.Time{
+		"days early": time.Now().Add(72 * time.Hour),
+		"long past":  time.Now().Add(-2 * time.Hour),
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := &cannedFetcher{byURL: map[string][]byte{feedURL: voucherFeed(opens)}}
+			spy := &spyNotifier{}
+			app := voucherApp(t, f, spy, opens)
+			if _, err := app.RunOnce(context.Background(), "unit"); err != nil {
+				t.Fatalf("RunOnce: %v", err)
+			}
+			if spy.count() != 0 {
+				t.Errorf("no reminder expected when the window has not opened or already closed, got %d", spy.count())
+			}
+		})
+	}
+}
+
+// 两条事件挤进同一张卡时，抬头只放得下一个时刻，所以每一条都要在正文里带上自己的开抢时间。
+func TestEventReminderCarriesEachMoment(t *testing.T) {
+	now := time.Now()
+	item := func(n int, opens time.Time) string {
+		local := opens.In(voucherZone)
+		return `<item><title>洪城消费券第` + strconv.Itoa(n) + `轮</title>
+<link>https://nc.test/tzgg/202609/` + strconv.Itoa(n) + `.shtml</link>
+<description>满100元减30元。本轮` + local.Format("1月2日15:04") + `开始发放，领完即止。
+核销期限至` + local.AddDate(0, 0, 20).Format("2006年1月2日") + `。</description>
+<pubDate>` + opens.Add(-24*time.Hour).Format(time.RFC1123Z) + `</pubDate></item>`
+	}
+	feed := []byte(`<?xml version="1.0"?><rss version="2.0"><channel><title>t</title>` +
+		item(1, now.Add(20*time.Minute)) + item(2, now.Add(40*time.Minute)) + `</channel></rss>`)
+	f := &cannedFetcher{byURL: map[string][]byte{feedURL: feed}}
+	spy := &spyNotifier{}
+	app := voucherApp(t, f, spy, now.Add(20*time.Minute))
+	if _, err := app.RunOnce(context.Background(), "unit"); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	msgs := spy.all()
+	if len(msgs) != 1 || len(msgs[0].Deals) != 2 {
+		t.Fatalf("one card with both rounds expected, got %+v", msgs)
+	}
+	if n := strings.Count(msgs[0].Plain(), "开抢"); n < 2 {
+		t.Errorf("each row should state its own moment, found %d in:\n%s", n, msgs[0].Plain())
 	}
 }

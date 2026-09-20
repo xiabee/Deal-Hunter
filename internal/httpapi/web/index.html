@@ -395,9 +395,11 @@ async function loadStatus(){
   $('k-seen-h').textContent = '最近 ' + (st.newest ? new Date(st.newest).toLocaleString('zh-CN') : '—');
   $('k-pushed').textContent = st.pushed ?? 0;
   const urgent = s.urgent || {};
+  const ev = s.event || {};
   $('k-daily').textContent = daily.sent_today ? '已发' : (daily.enabled ? '未发' : '已关');
   $('k-daily-h').textContent = '在效 ' + (st.live_in_briefing ?? 0) + ' 条 · 突破 ' +
-    (urgent.enabled ? ('≥' + (urgent.min_score ?? '—') + '，今日 ' + (urgent.sent_today ?? 0) + '/' + (urgent.max_per_day ?? 1)) : '已关');
+    (urgent.enabled ? ('≥' + (urgent.min_score ?? '—') + '，今日 ' + (urgent.sent_today ?? 0) + '/' + (urgent.max_per_day ?? 1)) : '已关') +
+    (ev.enabled ? ' · 待提醒 ' + (ev.due_now ?? 0) + '，今日 ' + (ev.sent_today ?? 0) + '/' + (ev.max_per_day ?? 2) : '');
   const src = s.sources || {};
   $('k-src').innerHTML = (src.enabled ?? 0) + '<small>/ ' + (src.configured ?? 0) + '</small>';
   paintQuality(st.live_in_briefing ?? 0, st.live_verified ?? 0);
