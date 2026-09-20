@@ -110,7 +110,7 @@ func Default() *Dict {
 	}
 	sort.Slice(d.vendors, func(i, j int) bool { return d.vendors[i].needle < d.vendors[j].needle })
 	d.expiry = []expiryRule{
-		{regexp.MustCompile(`(?:截止|截至|有效期至|结束时间|活动至|到期)\s*[:：至]?\s*(20\d{2})[-/.年]\s*(\d{1,2})[-/.月]\s*(\d{1,2})`), "ymd"},
+		{regexp.MustCompile(`(?:截止|截至|有效期至|核销期限|使用期限|结束时间|活动至|到期)\s*[:：至]?\s*(20\d{2})[-/.年]\s*(\d{1,2})[-/.月]\s*(\d{1,2})`), "ymd"},
 		{regexp.MustCompile(`(?i)(?:until|ends?\s+(?:on|by)|deadline|valid\s+(?:thru|through|until))\s+([a-z]{3,9})\.?\s+(\d{1,2})[, ]+(\d{4})`), "mdy"},
 		{regexp.MustCompile(`(?i)(20\d{2})-(\d{1,2})-(\d{1,2})\s*(?:前结束|截止|到期|失效|过期)`), "ymd"},
 	}
@@ -236,6 +236,60 @@ func (d *Dict) DiscountPct(text string) int {
 	return best
 }
 
+// StartsAt reports the moment an announcement says something opens.
+//
+// A bare "9月21日" borrows its year from the anchor instead of rolling to next
+// year when that lands in the past: a guessed future instant can fire a reminder
+// for something that is already over, while a parsed-but-past one can never fire
+// at all. Guessing low is the only safe direction here.
+func (d *Dict) StartsAt(text string, anchor time.Time) *time.Time {
+	m := startsAtRe.FindStringSubmatch(strings.ReplaceAll(text, "：", ":"))
+	if m == nil {
+		return nil
+	}
+	year := anchor.Year()
+	if m[1] != "" {
+		year, _ = strconv.Atoi(m[1])
+	}
+	mon, _ := strconv.Atoi(m[2])
+	day, _ := strconv.Atoi(m[3])
+	hour, _ := strconv.Atoi(m[5])
+	minute := 0
+	if m[6] != "" {
+		minute, _ = strconv.Atoi(m[6])
+	}
+	switch m[4] {
+	case "下午", "晚上":
+		if hour < 12 {
+			hour += 12
+		}
+	case "中午":
+		if hour < 11 {
+			hour += 12
+		}
+	}
+	if year < 2000 || year > 2100 || mon < 1 || mon > 12 || day < 1 || day > 31 ||
+		hour > 23 || minute > 59 {
+		return nil
+	}
+	// The anchor carries the zone the announcement's clock belongs to, so the
+	// result is right even though the service itself usually runs in UTC.
+	t := time.Date(year, time.Month(mon), day, hour, minute, 0, 0, anchor.Location())
+	// time.Date happily rolls 9月31日 over into October. An announcement with an
+	// impossible date is a misread, and a reminder on the wrong day is worse than
+	// no reminder at all.
+	if t.Day() != day || int(t.Month()) != mon {
+		return nil
+	}
+	return &t
+}
+
+// startsAtRe matches the date-and-hour spellings seen in government voucher
+// announcements. The month and day are required: a bare "9时" gives no way to
+// tell which day opens, and a reminder for the wrong day is worse than none.
+var startsAtRe = regexp.MustCompile(
+	`(?:(\d{4})年)?(\d{1,2})月(\d{1,2})日?[^0-9]{0,8}?(上午|中午|下午|晚上|凌晨)?[^0-9]{0,4}?(\d{1,2})\s*(?:时|点|:)\s*(\d{1,2})?`)
+
 // ExpiresAt parses a deadline mentioned in the text, if one is present.
 func (d *Dict) ExpiresAt(text string) *time.Time {
 	for _, rule := range d.expiry {
@@ -266,6 +320,12 @@ func (d *Dict) ExpiresAt(text string) *time.Time {
 			continue
 		}
 		t := time.Date(year, time.Month(mon), day, 23, 59, 59, 0, time.Local)
+		// time.Date rolls 9月31日 into October. An unreadable deadline must not
+		// become a later one, or a finished offer keeps a day of airtime in the
+		// briefing.
+		if t.Day() != day || int(t.Month()) != mon {
+			continue
+		}
 		return &t
 	}
 	return nil

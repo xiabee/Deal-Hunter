@@ -166,3 +166,85 @@ func TestWindowStaysWithinBounds(t *testing.T) {
 		t.Errorf("evidence window too wide: %d runes", n)
 	}
 }
+
+// 开抢时刻是消费券提醒唯一的前提。写法实测下来很杂：年月日齐全、只写月日、
+// 12 小时制带"上午/中午/晚上"、以及全角冒号。锚点（公告发布日）用来补年份。
+func TestStartsAtParsesAnnouncementWordings(t *testing.T) {
+	anchor := time.Date(2026, 9, 11, 8, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name, text string
+		want       time.Time
+	}{
+		{"full date and hour", "第一轮自2026年6月18日上午9时开始发放",
+			time.Date(2026, 6, 18, 9, 0, 0, 0, time.UTC)},
+		{"month-day borrows the year", "9月21日上午10:00开始发放，领完即止",
+			time.Date(2026, 9, 21, 10, 0, 0, 0, time.UTC)},
+		{"noon", "发放时间：8月24日中午12:00",
+			time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)},
+		{"evening", "2月3日晚上8点开抢",
+			time.Date(2026, 2, 3, 20, 0, 0, 0, time.UTC)},
+		{"full-width colon", "10月1日10：00起",
+			time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)},
+		{"bare hour with 时", "每场9时整开始",
+			time.Time{}},
+	}
+	d := Default()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := d.StartsAt(tc.text, anchor)
+			if tc.want.IsZero() {
+				if got != nil {
+					t.Fatalf("must not guess a day from %q, got %v", tc.text, *got)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatalf("nil for %q", tc.text)
+			}
+			if !got.Equal(tc.want) {
+				t.Errorf("%q -> %v, want %v", tc.text, got.UTC(), tc.want)
+			}
+		})
+	}
+}
+
+// 猜错开抢时刻会推一条假提醒，那比不提醒糟得多，所以下面这些一律必须返回 nil。
+func TestStartsAtRefusesToGuess(t *testing.T) {
+	anchor := time.Date(2026, 9, 11, 8, 0, 0, 0, time.UTC)
+	for _, text := range []string{
+		"活动期间每日上午9:00发放一定数量，领完即止",
+		"暂定近期发放，具体待定",
+		"9月20日至9月25日 每日两轮",
+		"上午10:00开抢",
+		"9月31日10:00",
+		"2026年13月2日10:00",
+		"满100减30，先到先得",
+		"",
+	} {
+		if got := Default().StartsAt(text, anchor); got != nil {
+			t.Errorf("must not guess from %q, got %v", text, *got)
+		}
+	}
+}
+
+// ExpiresAt 与 StartsAt 同族，同样会被 time.Date 的进位骗过：核销期限写成
+// "9月31日" 应该判为读不懂，而不是悄悄变成 10 月 1 日 —— 那会让一张早已结束的券
+// 在日报里多活一天。
+func TestExpiresAtRejectsImpossibleDates(t *testing.T) {
+	if got := Default().ExpiresAt("有效期至 2026年9月31日"); got != nil {
+		t.Errorf("impossible deadline must not resolve, got %v", *got)
+	}
+	if got := Default().ExpiresAt("有效期至 2026年10月15日"); got == nil {
+		t.Error("a real deadline must still parse")
+	}
+}
+
+// 消费券公告用「核销期限」表述截止，而现有前置词里没有它。不补上，spec 里
+// 「券必须有 expires_at 才进日报」这条规则会把所有券一律挡在门外。
+func TestExpiresAtReadsVoucherRedemptionDeadline(t *testing.T) {
+	for _, text := range []string{"核销期限至2026年10月15日", "使用期限：2026年11月3日"} {
+		if got := Default().ExpiresAt(text); got == nil {
+			t.Errorf("no deadline parsed from %q", text)
+		}
+	}
+}
