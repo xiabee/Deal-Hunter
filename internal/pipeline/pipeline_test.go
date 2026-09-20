@@ -1273,3 +1273,33 @@ func TestUpcomingEventsIncludesDeadlineOnlyRows(t *testing.T) {
 		t.Error("two hours out with a 3h lead is inside the window")
 	}
 }
+
+// 生产真实丢过一条：linux.do 的免费额度公告用「起至止」区间写有效期，没有"截止"字样。
+// 解析不到截止时刻时，它算"没说何时结束的限时事件"，按 M3 的口径整条不进日报 —— 一条
+// 89 分、还有十天有效期的免费额度，读者在日报里根本看不到。
+func TestBriefingKeepsADatedEventWrittenAsARange(t *testing.T) {
+	body := "9月30日前免费获取Qwen3.8-Flash，0.0×积分。新加坡时间：2026年9月18日10:00至2026年9月30日23:59"
+	feed := []byte(`<?xml version="1.0"?><rss version="2.0"><channel><title>t</title><item>
+<title>9月30日前免费获取Qwen3.8-Flash</title><link>https://linux.test/t/2926925</link>
+<description>` + body + `</description>
+<pubDate>` + time.Now().Add(-time.Hour).Format(time.RFC1123Z) + `</pubDate>
+</item></channel></rss>`)
+	f := &cannedFetcher{byURL: map[string][]byte{feedURL: feed}}
+	spy := &spyNotifier{}
+	app := testApp(t, f, spy, func(c *config.Config) {
+		c.Timezone = "Asia/Shanghai"
+		c.Sources = []config.Source{{Name: "linux-do", Kind: config.KindRSS, URL: feedURL, Trust: 8}}
+	})
+	if _, err := app.RunOnce(context.Background(), "unit"); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	rows := app.st.Live(app.cfg.Notify.Daily.MinScore, time.Now(), 45)
+	if len(rows) != 1 {
+		t.Fatalf("the range-worded offer must reach the briefing, got %d rows", len(rows))
+	}
+	if v := rows[0].Meta["expires_at"]; v == "" {
+		t.Error("no deadline was read out of the range")
+	} else if end, err := time.Parse(time.RFC3339, v); err != nil || end.Format("01-02") != "09-30" {
+		t.Errorf("expires_at = %s, want 09-30", v)
+	}
+}

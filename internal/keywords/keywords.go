@@ -334,7 +334,64 @@ func (d *Dict) ExpiresAt(text string, loc *time.Location) *time.Time {
 		}
 		return &t
 	}
+	// A range announces its own end: "2026年9月18日10:00至2026年9月30日23:59" carries
+	// no 截止/有效期 lead-in, so the rules above miss it and the row would look like an
+	// event that never said when it closes.
+	if t, ok := rangeEnd(text, loc); ok {
+		return &t
+	}
 	return nil
+}
+
+// A range is written by joining two complete dates, so it is read with two small
+// regexes rather than one with optional groups: Go numbers submatches by
+// participation, and an optional clock silently shifts m[2]/m[3] out from under the
+// month and day.
+var (
+	rangeLeadRe  = regexp.MustCompile(`20\d{2}[-/.年]\s*\d{1,2}[-/.月]\s*\d{1,2}`)
+	rangeTailRe  = regexp.MustCompile(`(?:至|到|~|—|–)\s*(20\d{2})[-/.年]\s*(\d{1,2})[-/.月]\s*(\d{1,2})`)
+	rangeClockRe = regexp.MustCompile(`^\s*(\d{1,2})\s*[:时点]\s*(\d{1,2})?`)
+)
+
+func rangeEnd(text string, loc *time.Location) (time.Time, bool) {
+	se := rangeTailRe.FindStringSubmatchIndex(text)
+	if se == nil {
+		return time.Time{}, false
+	}
+	// The joiner must connect two dates. "有效期至2026年9月30日" also contains 至, but
+	// there is no date before it — that form belongs to the lead-in rules above.
+	if !rangeLeadRe.MatchString(text[:se[0]]) {
+		return time.Time{}, false
+	}
+	year, _ := strconv.Atoi(text[se[2]:se[3]])
+	mon, _ := strconv.Atoi(text[se[4]:se[5]])
+	day, _ := strconv.Atoi(text[se[6]:se[7]])
+	hour, minute, sec := 23, 59, 59
+	if cm := rangeClockRe.FindStringSubmatch(text[se[7]:]); cm != nil {
+		h, err := strconv.Atoi(cm[1])
+		if err != nil || h > 23 {
+			return time.Time{}, false
+		}
+		hour, sec = h, 0
+		minute = 0
+		if cm[2] != "" {
+			minute, _ = strconv.Atoi(cm[2])
+			if minute > 59 {
+				return time.Time{}, false
+			}
+		}
+	}
+	if year < 2000 || year > 2100 || mon < 1 || mon > 12 || day < 1 || day > 31 {
+		return time.Time{}, false
+	}
+	if loc == nil {
+		loc = time.Local
+	}
+	t := time.Date(year, time.Month(mon), day, hour, minute, sec, 0, loc)
+	if t.Day() != day || int(t.Month()) != mon {
+		return time.Time{}, false
+	}
+	return t, true
 }
 
 func monthNumber(s string) (int, bool) {

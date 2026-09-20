@@ -294,3 +294,28 @@ func TestStartsAtHandlesRealAnnouncementPhrasing(t *testing.T) {
 		t.Errorf("a 24:00 deadline must not become a start, got %v", got)
 	}
 }
+
+// 生产里真实丢过一条：linux.do 的「新加坡时间：2026年9月18日10:00至2026年9月30日23:59」
+// 是"起止区间"写法，没有"截止/有效期至"这类前置词。前半句被 starts_at 认走，后半句
+// 没人认，于是这条限时事件在日报口径里变成"没说何时结束"，整条被丢掉 —— 一份明明还
+// 有十天有效期、89 分的免费额度，读者在日报里看不到。
+func TestExpiresAtReadsExplicitDateRange(t *testing.T) {
+	text := "新加坡时间：2026年9月18日10:00至2026年9月30日23:59"
+	zone := time.FixedZone("CST", 8*3600)
+	got := Default().ExpiresAt(text, zone)
+	if got == nil {
+		t.Fatalf("the end of an explicit range is a deadline: %q", text)
+	}
+	if s := got.Format("2006-01-02 15:04"); s != "2026-09-30 23:59" {
+		t.Errorf("range end = %s, want 2026-09-30 23:59", s)
+	}
+
+	// 没有小时的时候仍按"当天过完"算，与既有规则一致。
+	dayOnly := Default().ExpiresAt("活动时间：2026年9月1日至2026年9月20日", zone)
+	if dayOnly == nil {
+		t.Fatal("a day-only range must still yield a deadline")
+	}
+	if s := dayOnly.Format("2006-01-02 15:04"); s != "2026-09-20 23:59" {
+		t.Errorf("day-only range end = %s, want 2026-09-20 23:59", s)
+	}
+}
