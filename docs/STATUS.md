@@ -51,8 +51,17 @@
 
 ## Current Version
 
-`git describe` 注入；生产机与 GitHub main 均为 `0cf8416`（`deal-hunter version` 实测）。
-未发布 GitHub Release。
+`git describe` 注入；GitHub main 顶端为 `8f3e164`。
+生产机跑的二进制戳是 `0cf8416` —— 那是 M2 提交身份改写**之前**的哈希，内容与 `8f3e164`
+逐字节相同（`git diff` 为空已验证），只是作者与提交者邮箱从个人邮箱换成了项目的
+`@users.noreply.github.com` 地址。所以：**别用 `deal-hunter version` 的哈希去 GitHub 找提交**，
+对不上是身份改写的结果，不是部署错了。要一致就用当前顶端重新 `make build-linux` 再装一次。
+
+> 教训（写给下一次会话，也写给自己）：本机 git 的全局默认邮箱不是项目的 noreply 地址，
+> 而 `git log` 上一个提交的作者地址也不能证明当前配置就是对的。**提交前**先跑
+> `bash scripts/ci-local.sh --quick`（它含 `scripts/check-identity.sh`），
+> 并用 `-c user.email=<handle>@users.noreply.github.com` 显式指定身份；
+> 构建机上的门禁对无 `.git` 的检出目录会直接放行，帮不了这一步。
 
 ## Known Blockers
 

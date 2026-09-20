@@ -41,6 +41,11 @@
 3. **到期前提醒**：日报已展示截止日，缺「明天到期」单独一条 —— 与 1 共用 `starts_at`/调度的改造，适合并成一个 Milestone。
 4. **更多官方目录差分**：推理云平台 / 向量库 / GPU 云，复用 `openrouter` 的游标差分套路。
 5. **ARM64 与真实部署验证**：交叉编译已过，但从未在 linux/arm64 与 systemd 下实跑过（见 Known Risks）。
+6. **把身份门禁扩到文件内容**（小改动，价值高）：`check-identity.sh` 只查提交作者，`internal/secretlint`
+   只查凭证特征与内网拓扑，所以**文档里写死一个个人邮箱地址不会触发任何一道闸**。M2 部署后写 STATUS
+   时正好差点把刚抹掉的地址重新公开出去。修法：给 secretlint 增加一类消费者邮箱特征
+   （foxmail / qq / 163 / gmail…），并配一套豁免（SECURITY.md 的披露联系地址必须能留下来）。
+   验收：一个 fixture 用例证明命中即失败、一个用例证明白名单生效。
 
 ## Known Risks
 
