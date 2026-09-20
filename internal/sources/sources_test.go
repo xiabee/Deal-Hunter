@@ -586,3 +586,150 @@ func TestUserAgentAndHeadersAreSent(t *testing.T) {
 }
 
 func urlEscape(s string) string { return url.QueryEscape(s) }
+
+// 政府门户的通知公告行普遍写成 <a>标题</a><i class="time">2026-09-11</i>，而 </a>
+// 正好是段落边界，于是日期落进了下一段。没有发布日，正文里「9月21日10:00开抢」这类
+// 不写年份的时刻就没有推断锚点，所以日期段必须挂回前一条。
+func TestHTMLListRowDateAttachesToPreviousItem(t *testing.T) {
+	list := []byte(`<html><body><ul>
+<li><a href="https://nc.test/tzgg/202609/a.shtml">关于开展2026年洪城消费券发放的公告</a><i class="time">2026-09-11</i></li>
+<li><a href="https://nc.test/tzgg/202608/b.shtml">关于举办业务培训的通知</a><i class="time">2026-08-02</i></li>
+</ul></body></html>`)
+	cfg := config.Source{Name: "nc-tzgg", Kind: config.KindHTML,
+		URL: "https://nc.test/ncsswj/tzgg/index.shtml", Keywords: []string{"消费券"}}
+	src := mustSource(t, Deps{Cfg: cfg, HTTP: newStub("nc-tzgg", list)})
+	deals, err := src.Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if len(deals) != 1 {
+		t.Fatalf("only the voucher row passes the gate, got: %s", titles(deals))
+	}
+	want := time.Date(2026, 9, 11, 0, 0, 0, 0, time.UTC)
+	if !deals[0].PublishedAt.Equal(want) {
+		t.Errorf("published = %v, want %v", deals[0].PublishedAt, want)
+	}
+}
+
+// 开抢时间写在公告正文里，列表行只有标题。follow_detail 让采集器在关键词门之后再抓
+// 一次正文 —— 顺序是要守住的：过不了门的行一次请求都不该发出，否则一轮 20 条列表
+// 就变成 20 次外连去 hammer 政务站。
+func TestHTMLFollowDetailFetchesOnlyGatedRows(t *testing.T) {
+	const detail = "https://nc.test/tzgg/202609/a.shtml"
+	list := []byte(`<html><body><ul>
+<li><a href="` + detail + `">关于开展2026年洪城消费券发放的公告</a><i class="time">2026-09-11</i></li>
+<li><a href="https://nc.test/tzgg/202608/b.shtml">关于举办业务培训的通知</a><i class="time">2026-08-02</i></li>
+</ul></body></html>`)
+	// 正文长度按真实公告取：实测徐汇 427 字、兴城 1.6 KB、高台 3.5 KB，都远在
+	// detail_min_text_len=200 之上；写一条短夹具会让它被"频控页"守卫误杀。
+	body := []byte(`<html><head><title>公告</title></head><body><div class="content">` +
+		`现将2026年洪城消费券发放事项公告如下：一、发放时间：第一轮9月21日上午10:00开始发放，` +
+		`第二轮10月1日上午10:00开始发放，领完即止。二、面额与用途：满100元减30元、满50元减15元，` +
+		`限本市指定商超、餐饮主体使用。三、核销期限：自领取之日起至2026年10月15日止，逾期未使用自动作废。` +
+		`四、发放平台：云闪付APP，进入"洪城消费券"活动页面定位本市后领取，每人每轮限领一份。` +
+		`五、其他事项：活动期间请合理安排时间，如页面提示已领完则说明本轮额度已发放完毕。` +
+		`</div></body></html>`)
+	stub := &stubFetcher{body: list, byURL: map[string][]byte{detail: body}}
+	cfg := config.Source{Name: "nc-tzgg", Kind: config.KindHTML,
+		URL: "https://nc.test/ncsswj/tzgg/index.shtml", Keywords: []string{"消费券"},
+		Params: map[string]string{"follow_detail": "1"}}
+	src := mustSource(t, Deps{Cfg: cfg, HTTP: stub})
+	deals, err := src.Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if len(deals) != 1 {
+		t.Fatalf("gate should keep only the voucher row: %s", titles(deals))
+	}
+	if stub.calls != 2 {
+		t.Errorf("want 1 list + 1 detail fetch, got %d", stub.calls)
+	}
+	if !strings.Contains(deals[0].Summary, "9月21日上午10:00") {
+		t.Errorf("summary must come from the announcement body, got %q", deals[0].Summary)
+	}
+}
+
+// 政务站会用 HTTP 200 返回一个"频繁访问"拦截页（实测遇到过）。这种假成功不能把列表行
+// 已有的文本换成拦截页文字 —— 否则事件解析读到的是垃圾，而条目看起来却像抓到了正文。
+func TestHTMLFollowDetailKeepsRowTextWhenBodyIsTooShort(t *testing.T) {
+	const detail = "https://nc.test/tzgg/202609/a.shtml"
+	list := []byte(`<html><body><ul>
+<li><a href="` + detail + `">关于开展2026年洪城消费券发放的公告</a><i class="time">2026-09-11</i></li>
+</ul></body></html>`)
+	throttle := []byte(`<html><head><title>提示</title></head><body><p>频繁访问，请稍后再试。</p></body></html>`)
+	stub := &stubFetcher{body: list, byURL: map[string][]byte{detail: throttle}}
+	cfg := config.Source{Name: "nc-tzgg", Kind: config.KindHTML,
+		URL: "https://nc.test/ncsswj/tzgg/index.shtml", Keywords: []string{"消费券"},
+		Params: map[string]string{"follow_detail": "1"}}
+	src := mustSource(t, Deps{Cfg: cfg, HTTP: stub})
+	deals, err := src.Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if len(deals) != 1 {
+		t.Fatalf("one gated row expected, got %s", titles(deals))
+	}
+	if strings.Contains(deals[0].Summary, "频繁访问") {
+		t.Errorf("a throttle page must not become the body: %q", deals[0].Summary)
+	}
+	if !strings.Contains(deals[0].Summary, "消费券") {
+		t.Errorf("the row text should survive: %q", deals[0].Summary)
+	}
+}
+
+// 一段没有链接的文本会退回列表页自己的 URL。这时候再"二跳"就是把自己重抓一遍，
+// 白涨一倍外连还什么新信息都拿不到。
+func TestHTMLFollowDetailNeverRefetchesTheListPage(t *testing.T) {
+	list := []byte(`<html><body>
+<p>本页专题：洪城消费券发放安排汇总，点击各期公告查看。</p>
+</body></html>`)
+	stub := newStub("nc-tzgg", list)
+	cfg := config.Source{Name: "nc-tzgg", Kind: config.KindHTML,
+		URL: "https://nc.test/ncsswj/tzgg/index.shtml", Keywords: []string{"消费券"},
+		Params: map[string]string{"follow_detail": "1"}}
+	src := mustSource(t, Deps{Cfg: cfg, HTTP: stub})
+	deals, err := src.Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if len(deals) != 1 {
+		t.Fatalf("the summary paragraph should pass the gate, got %s", titles(deals))
+	}
+	if deals[0].URL != cfg.URL {
+		t.Fatalf("linkless row should keep the list URL, got %q", deals[0].URL)
+	}
+	if stub.calls != 1 {
+		t.Errorf("must not refetch the list page as its own detail, got %d calls", stub.calls)
+	}
+}
+
+// 详情正文直接进 Summary，而 Summary 会写进 JSONL 并被面板整段渲染。实测政务与公众
+// 号页面能到 MB 级，所以必须有上限；截断留在解析之后，保证开头的发放时间不会被切掉。
+func TestHTMLFollowDetailCapsBodySize(t *testing.T) {
+	const detail = "https://nc.test/tzgg/202609/a.shtml"
+	list := []byte(`<html><body><ul>
+<li><a href="` + detail + `">关于开展2026年洪城消费券发放的公告</a><i class="time">2026-09-11</i></li>
+</ul></body></html>`)
+	verbose := "现将2026年洪城消费券发放事项公告如下：9月21日上午10:00开始发放。" +
+		strings.Repeat("本市指定商超餐饮主体均可参与，具体名单见附件说明。", 400)
+	body := []byte("<html><body><div>" + verbose + "</div></body></html>")
+	stub := &stubFetcher{body: list, byURL: map[string][]byte{detail: []byte(body)}}
+	cfg := config.Source{Name: "nc-tzgg", Kind: config.KindHTML,
+		URL: "https://nc.test/ncsswj/tzgg/index.shtml", Keywords: []string{"消费券"},
+		Params: map[string]string{"follow_detail": "1"}}
+	src := mustSource(t, Deps{Cfg: cfg, HTTP: stub})
+	deals, err := src.Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if len(deals) != 1 {
+		t.Fatalf("one gated row expected, got %s", titles(deals))
+	}
+	got := []rune(deals[0].Summary)
+	if len(got) > 2000 {
+		t.Errorf("body must be capped for storage, got %d runes", len(got))
+	}
+	if !strings.Contains(deals[0].Summary, "9月21日上午10:00") {
+		t.Error("the cap must keep the beginning, where the start time is stated")
+	}
+}
