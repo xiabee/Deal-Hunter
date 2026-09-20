@@ -169,3 +169,17 @@ func TestTruncateHelper(t *testing.T) {
 		t.Error("degenerate width should return empty")
 	}
 }
+
+// 体检查配置那一行必须把三种消息都说清楚：读者靠它判断"今天还会不会有消息、在等
+// 哪几场"。漏掉提醒通道，就等于第三个通道在健康检查里不存在。
+func TestDoctorReportsAllThreeMessageTypes(t *testing.T) {
+	code, out := run(t, "-data", t.TempDir(), "doctor", "-net=false")
+	if code != 0 {
+		t.Fatalf("doctor should pass with defaults: code=%d out=%s", code, out)
+	}
+	for _, want := range []string{"日报=", "突破=", "提醒="} {
+		if !strings.Contains(out, want) {
+			t.Errorf("doctor config row missing %q:\n%s", want, out)
+		}
+	}
+}

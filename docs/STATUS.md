@@ -35,8 +35,18 @@
 | 单元 + 集成测试 | VERIFIED | 202 个测试函数，`go test -race ./...` 本地与 linux-ci 均全绿 |
 | 事件提醒端到端（夹具驱动） | VERIFIED | 窗口内恰好一次、跨重启不重发、窗口外（提前 3 天 / 迟到 2 小时）静默、三条渲染路径都带时刻；窗口守卫经"临时翻宽→变红→还原"验证不是空过 |
 | 南昌信源可达性 | VERIFIED | 2026-09-20 从生产机出口实测：商务局列表页与详情页 200/UTF-8/SSR，含日期与链接；`/ncszf/tzgg/` 307 跳首页（必须配 `2021_nav_list.shtml`） |
-| 真实开抢提醒 | NOT VERIFIED | 需要等下一条带明确时刻的南昌公告；这是 M3 验收的最后一关 |
-| 生产部署（M3） | NOT VERIFIED | 生产仍是 M2 二进制；南昌信源尚未写入 `/etc/deal-hunter/config.json` |
+| 真实开抢提醒 | NOT VERIFIED | 需要等下一条带明确时刻且临近开抢的南昌公告；这是 M3 验收的最后一关 |
+| 生产部署（M3） | VERIFIED | `alienware-life` 跑 `121e14d`；17 源全部启用；`event={45m/15m/≤2/≥60}`、`due_now=0`、`sent_today=0`；`event_sent=0` 未产生任何骚扰；旧二进制备份为 `deal-hunter.bak-20260920-064343` |
+| 南昌源真机抓取 | VERIFIED | 商务局源 `found=1`：那条是 4 月的《如何领取养老服务消费券》问答，**列表行日期解析正确**（probe 打出 2026-04-29），随后被 14 天年龄闸门与 `event.min_score` 双重挡下 —— 即"抓到但拒收"是设计行为而非失效 |
+| 短正文守卫真机验证 | VERIFIED | 对局公告外链到 `mp.weixin.qq.com`，取回 65 字，被 `detail body too thin` 正确拒收 |
+
+## M3 的结构性限制（真机确认，别反复尝试）
+
+南昌市商务局消费券公告的正文常**指向微信公众号单篇**，而公众号无法枚举历史、单篇也常只返回
+占位页。因此"从列表页解析出开抢时刻"对本市**部分公告成立、对另一部分永远拿不到时刻**。
+不追加镜像/爬虫类旁路（会引入不可信的第三方，且违反项目"只读官方页"的立场）；
+拿不到时刻的公告就不提醒，是有意为之。区县商务局页面直出正文的可能性更大，按 ROADMAP 的
+「信源准入」流程逐条实测后再加。
 | 快速门禁（fmt/vet/build/扫描/离线冒烟） | VERIFIED | `bash scripts/ci-local.sh --quick` → `✓ CI PASSED` |
 | 全量门禁 | VERIFIED | `DH_CI_HOST=linux-ci bash scripts/ci-office.sh` → `✓ office CI passed (80 files)` |
 | 干净环境构建 | VERIFIED | 同上：CI 节点解包到 `/tmp/deal-hunter-ci-*` 全新目录，非本机工作区 |

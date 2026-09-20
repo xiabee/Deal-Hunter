@@ -506,8 +506,12 @@ func cmdDoctor(ctx context.Context, cfg *config.Config, log *slog.Logger, stdout
 	if cfg.Notify.Urgent.Enabled {
 		urgent = fmt.Sprintf("≥%d，每天最多 %d 条", cfg.Notify.Urgent.MinScore, cfg.Notify.Urgent.MaxPerDay)
 	}
-	add("config", "ok", fmt.Sprintf("interval=%s 日报=%s（%s，地板 %d 分）突破=%s",
-		cfg.Interval, cfg.Notify.Daily.At, cfg.Timezone, cfg.Notify.Daily.MinScore, urgent))
+	remind := "关"
+	if cfg.Notify.Event.Enabled {
+		remind = fmt.Sprintf("开抢前 %v，每天最多 %d 条", cfg.Notify.Event.Lead, cfg.Notify.Event.MaxPerDay)
+	}
+	add("config", "ok", fmt.Sprintf("interval=%s 日报=%s（%s，地板 %d 分）突破=%s 提醒=%s",
+		cfg.Interval, cfg.Notify.Daily.At, cfg.Timezone, cfg.Notify.Daily.MinScore, urgent, remind))
 	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
 		add("data_dir", "fail", err.Error())
 	} else if probe := filepath.Join(cfg.DataDir, ".write-test"); os.WriteFile(probe, []byte("x"), 0o600) != nil {
