@@ -57,7 +57,7 @@ if [[ ! -f "$ETC/config.json" ]]; then
 else
 	cp -a "$ETC/config.json" "$ETC/config.json.bak-$STAMP"
 	log "保留现有配置，备份为 config.json.bak-$STAMP"
-	log "注意：本版交付形态改为每天一份日报。旧配置里的 notify.digest、notify.feishu.{min_score,max_per_run,silent_hours} 已废弃——留着不报错，但不再生效；filter.min_score 与 DH_MIN_SCORE 从未参与过任何过滤，已一并删除。可按 $ETC/config.example.json 清理。"
+	log "注意：本版交付形态改为每天一份日报。旧配置里的 notify.digest、notify.feishu.{min_score,max_per_run,silent_hours} 已废弃——留着不报错，但不再生效；filter.min_score 与 DH_MIN_SCORE 从未参与过任何过滤，已一并删除。可对照仓库里的 config/deal-hunter.example.json 清理，原配置已备份。"
 fi
 
 if [[ ! -f "$ETC/deal-hunter.env" ]]; then

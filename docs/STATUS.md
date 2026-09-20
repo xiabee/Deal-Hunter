@@ -3,11 +3,11 @@
 > 给下一次会话用的恢复点。只写有证据的结论：VERIFIED / NOT VERIFIED / BLOCKED / NOT APPLICABLE。
 > 长期方向看 [ROADMAP.md](ROADMAP.md)，用法看 [../README.md](../README.md)。
 
-最近更新：2026-09-20（M2 完成时）
+最近更新：2026-09-20（M2 完成，并已部署到 LIFE 域生产机）
 
 ## Current Milestone
 
-无 —— M2 已完成并提交，等待选定下一项（首选：本地消费券，见 ROADMAP Next Candidates #1）。
+无 —— M2 已完成、已提交、已部署并验收；等待选定下一项（首选：本地消费券，见 ROADMAP Next Candidates #1）。
 
 ## Last Completed：M2 交付形态改为「一天一份日报」
 
@@ -34,14 +34,24 @@
 | 三平台产物 | VERIFIED | 交叉编译 linux/amd64、linux/arm64、windows/amd64 全过；**产物未在目标机运行过** |
 | 敏感信息 / 提交身份 | VERIFIED | `secretscan` 无命中；`check-identity.sh` 本地通过（CI 检出无 git 历史 → 直接放行，属预期） |
 | 真实工作流（常驻循环） | VERIFIED | linux-ci 上以 `DH_INTERVAL=1m`、`DH_DAILY_AT=+90s` 跑 `run` 300s：排程到点后发出**一份** `items=15` 的日报，当天无第二次，`kind=urgent` 0 次；`state.json` 只见单次 `daily:last_sent`，且 `daily:watched_since` = 进程启动时刻 |
-| 部署 | NOT VERIFIED | 本次未部署；改动只到构建 |
-| 部署目标 | BLOCKED | 生活域默认 `life-vm`，但当前 `~/.ssh/config` 里没有 `life-vm` 条目（有 `alienware-life`/`work-vm`/`linux-ci`/`kylin-pc`/`ALIENWARE`）；需确认这台机器上是否已有 deal-hunter 服务，再决定是首发还是升级 |
+| 部署 | VERIFIED | `alienware-life`（LIFE 域生产机，即基础设施文档里的 life-vm 角色）：install.sh 装 `0cf8416`，旧二进制备份为 `deal-hunter.bak-20260920-034657`，旧配置备份为 `config.json.bak-20260920-034657`，服务 `active` |
+| 部署后验收 | VERIFIED | `/healthz` 200；`/api/v1/status` 报 `daily{enabled,at 09:00,sent_today true,next_due 明早 09:00}`、`urgent{≥90,max 1,sent_today 0}`；重启后日志里 `kind=alert|digest` **0 次**；面板 HTML 确实提供新磁贴（今日日报 / 突破推送）；`state.json` 出现 `daily:watched_since` = 重启瞬间 |
+| 生产数据完整性 | VERIFIED | 升级后 `deals_seen=514 / pushed=248 / 游标 85`，未丢库；全库链接判定 30 official / 246 third_party / 8 vendor_entry |
 | ARM64 实跑 | NOT VERIFIED | 只做了交叉编译，未在 arm64 上 start/smoke |
 | GitHub Actions | NOT APPLICABLE | 项目故意不使用（额度），门禁是本地脚本 + 办公室构建机 |
 
+## 次日确认项（2026-09-21 09:00 之后）
+
+1. **是否恰好发了一份日报**：`journalctl -u deal-hunter --since today | grep "kind=daily"` 应为 2 行
+   （两个通道各一次），且 `daily:last_sent` 落在 09:00–09:31 之间。今天 09:25 旧版已发过一次，
+   新版的 `sent_today` 判定正确地没有补发——这条要在真实跨天后复核。
+2. **`live_verified` 是否上升**：目前 0，因为官方链接的联网校验按新设计在**日报发出时**才做。
+   若发出后仍长期为 0，说明 `filter.max_official_lookups=16` 对 15 行日报不够（每行最多 3 次外连）。
+3. **是否还需要插队**：`urgent.sent_today` 若天天为 1，说明 90 分门槛偏低，读者又被打扰了。
+
 ## Current Version
 
-`git describe` 注入（无 tag 时为 `cbed755-dirty` 一类）；`dealhunter version` 打印 version/commit/buildDate。
+`git describe` 注入；生产机与 GitHub main 均为 `0cf8416`（`deal-hunter version` 实测）。
 未发布 GitHub Release。
 
 ## Known Blockers
@@ -50,14 +60,20 @@
 
 ## Notes for the next session
 
+- **部署目标是 `alienware-life`**（SSH 里的名字，用户基础设施文档中 LIFE 域的 life-vm 角色）。
+  `work-vm` 上从未装过本项目 —— 它是 LIFE 域服务，不要挪过去。
+- 面板实际绑定地址来自 `/etc/deal-hunter/deal-hunter.env` 里的 `DH_SERVER_BIND`（当前是一台
+  Tailscale mesh 地址），**覆盖** config.json 的 `server.bind`；所以在本机 `curl 127.0.0.1:8765`
+  连不上不是故障，要用 env 里那个地址。
 - 交付相关的状态键：`daily:last_sent`（RFC3339）、`daily:watched_since`（RFC3339，进程启动即刷新）、
   `urgent:sent`（`{"date":"2006-01-02","n":1}`，按 `timezone` 的本地日记账）。
-  `state.json` 里可能残留已无人读取的 `digest:last_sent`。
-- 部署过旧版本的机器，`/etc/deal-hunter/config.json` 与 `deal-hunter.env` 里的废弃键不报错也不生效；
-  `install.sh` 升级分支会打印一行提示。旧的 `DH_MIN_SCORE=62` 从此彻底无意义（它本来也没生效过）。
+  `state.json` 里残留着已无人读取的 `digest:last_sent`，没有功能影响，故未动生产状态文件。
+- 生产 `/etc/deal-hunter/config.json` 已在本次部署中清理：删掉 digest 与 feishu 的废弃键，
+  显式写入 `daily` / `urgent`；`openclaw.{command,args}`（sudo 包装脚本）原样保留。
+- 旧版本的 `DH_MIN_SCORE=62` 之类的废弃项已从生产配置移除；env 文件本身未改（密钥未动）。
 - `notify.feishu.timezone` 现在只用于卡片页脚时间，与顶层 `timezone` 语义重叠。
 - OpenClaw 的开关只有 JSON 里的 `notify.openclaw.enabled`，**没有** `DH_OPENCLAW_ENABLED` 环境变量。
-- 远端跑过一次冒烟的构建机上留有 `/tmp/dh-smoke` 与一个 `/tmp/deal-hunter-ci-*` 工作区，可随意删除。
+- 临时目录：构建机 `linux-ci` 已清理；`alienware-life:/tmp/dh-deploy-20260920-114649` 留着部署素材，可删。
 
 ## Next Candidate
 
