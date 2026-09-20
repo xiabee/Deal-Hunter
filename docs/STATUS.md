@@ -81,7 +81,8 @@ doctor 报"到期前 3h0m0s"、面板 hint 分开显示两个数。顺带：面�
 | 真实公告措辞解析 | VERIFIED | `9月19日9:00至9月26日24:00`、`上午9:00开放`、`2026年9月19日9:00起` 均正确；`24:00` 拒绝当作开抢时刻；`9月31日` 被 round-trip 守卫拒绝（否则 `time.Date` 会滚到 10-01，猜成未来就真会发错提醒） |
 | 截止时刻的时区（原候选 #5） | VERIFIED | `ExpiresAt` 不再用 `time.Local`，改用 `scoring.Input.ReaderZone`（`StartsIn` 改名，含义覆盖开抢与截止两端）。守卫写法是"同一钟表在 UTC 与 UTC+8 必须差出整 8 小时"，所以与测试主机所在时区无关；把 keywords 层与 scoring 层的传参分别改回旧写法，两条测试各自变红已验证 |
 | 南昌信源可达性 | VERIFIED | 从生产机出口实测：商务局列表页与详情页 200/UTF-8/SSR；市政府列表页 200/32KB；`/ncszf/tzgg/` 307 跳首页（所以必须配 `2021_nav_list.shtml`）；`tyj.jiangxi.gov.cn` 用 curl 因不支持 legacy 重协商而失败，但 Go TLS 可过 |
-| 生产部署 | VERIFIED | `deal-hunter 3db4152 · built=2026-09-20T08:00:54Z`，与 `git rev-parse HEAD` 及 `origin/main` 三者一致；产物 sha256 `dc3787bb…` 在构建机、本机暂存、生产三处相同（传输未被篡改）；`install.sh` 装前跑了一次真 `version`，服务 `active`，首轮 `sources=17 errors=0` |
+| 生产部署 | VERIFIED | `deal-hunter 1209fe0 · built=2026-09-20T10:44:18Z`；今晚三次部署（`378fd8d`→`9daa3d3`→`1209fe0`）产物 sha256 在构建机 / 本机暂存 / 生产三处逐次一致；`healthz` 200，17 源，首轮 0 错误，备份各留最近 3 份 |
+| 只读命令不再换掉状态文件所有者 | VERIFIED（生产实测） | 修复前后各跑一次 `sudo dealhunter events` + `doctor`：`state.json` 的所有者与 mtime 都不再变动（修复前它会变成 `root:root`，服务下次写状态即 permission denied 进入崩溃循环 —— 今晚真实发生并恢复过一次） |
 | 时区修正的可观察效果 | NOT APPLICABLE（暂无对象） | 生产库 904 行带 `meta`，但 **`expires_at` / `starts_at` 均为 0 行** —— 至今没有任何一行真的解析出了时刻并落库（4 月那条在落库前就被拒）。所以这次修正在生产上暂无可比对的观测面，效果只由测试与两道变异守卫证明。第一条带时刻的行落库时要回头看一眼偏移是不是 `+08:00` |
 | 真机观察：券公告触发行为 | VERIFIED（观察本身） | 见上一节：两源一条正确拒收、一条今日无券关键词，事件通道 0 发 0 候补，无误发无骚扰 |
 | **真实"到时候提醒"实地复核（开抢与到期两端）** | **NOT VERIFIED** | 今天南昌没有"写了明确时刻且临近开抢或截止"的市级公告；唯一在闸内的行是 4 月问答。省级在跑的（赣超 / 体育消费券 9-14 起、每人每周限领 2 张）用的是**周期性/无年份**措辞，M3 故意不猜。触发路径已由夹具与真实措辞两侧证明，等的只是一条现实公告 |
@@ -155,6 +156,15 @@ config/deploy/dist）与 `/tmp/dh-wire-feishu.sh`（9-19，把服务接到租户
 
 ## Notes for the next session
 
+- **在这台机器上跑 CLI 一律 `sudo -u dealhunter`**，不要 `sudo dealhunter`。今晚以 root 跑过一次
+  `events`，`state.json` 变成 root 所有，服务立刻崩溃循环（`permission denied`），恢复要把文件
+  chown 回去。`1209fe0` 之后只读命令不再写状态，但写类命令（`notify-test`、`compact`）仍会。
+- **不要把 `install.sh` 的输出接进 `| head`**：远端脚本被 SIGPIPE 打断后会在"备份完、没重启完"
+  的地方停下，看起来装好了其实服务还跑着旧版（今晚 `9daa3d3` 就是这样落后了一次）。要截断就先
+  `> /tmp/x.log 2>&1` 再 `tail`，并确认 `installer rc=0`。
+- **解析器的修正不会追溯已经入库的行**：RSS/搜索类源靠游标只播新条目，所以 `rangeEnd` 修好之后，
+  今晚那条已经存下来的 `Qwen3.8-Flash`（有 `starts_at`、缺 `expires_at`）仍不进日报，除非它再次
+  被采集到。想要一次性回填，得先设计"重解析全库"的命令，别手改 `deals.jsonl`。
 - **部署目标是 `alienware-life`**（SSH 里的名字，用户基础设施文档中 LIFE 域的 life-vm 角色）。
   `work-vm` 上从未装过本项目 —— 它是 LIFE 域服务，不要挪过去。
   二进制在 `/opt/deal-hunter/deal-hunter`（不是 `/usr/local/bin`），状态目录 `/var/lib/deal-hunter`，
