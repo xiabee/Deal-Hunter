@@ -729,9 +729,13 @@ func TestFreshInstallSendsItsFirstBriefing(t *testing.T) {
 	// Two minutes out, truncated to the minute, so the slot always lands after
 	// the moment this process armed itself.
 	slot := time.Now().UTC().Add(2 * time.Minute)
-	app := testApp(t, &cannedFetcher{}, spy, func(c *config.Config) {
+	f := &cannedFetcher{byURL: map[string][]byte{feedURL: feedBody(t)}}
+	app := testApp(t, f, spy, func(c *config.Config) {
 		c.Timezone = "UTC"
 		c.Notify.Daily.At = slot.Format("15:04")
+		// The round exists only to arm the schedule; collecting fixture rows would
+		// put them in the briefing this test checks the payload of.
+		c.Sources = nil
 	})
 	seed := &model.Deal{URL: "https://a.test/free", Title: "智谱 GLM-5.3-flash 限时免费",
 		Source: "rss", Score: 88, IsFree: true, DiscoveredAt: time.Now().UTC().Add(-time.Hour)}
@@ -739,6 +743,12 @@ func TestFreshInstallSendsItsFirstBriefing(t *testing.T) {
 	if err := app.Store().Save(seed); err != nil {
 		t.Fatal(err)
 	}
+	// The schedule is armed by the first round, not by construction: read-only
+	// commands build an App too and must not write state.
+	if _, err := app.RunOnce(context.Background(), "unit"); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	spy.reset(nil)
 
 	if app.DailyDue(time.Now().UTC()) {
 		t.Error("the briefing must not be due before its slot")
@@ -1301,5 +1311,39 @@ func TestBriefingKeepsADatedEventWrittenAsARange(t *testing.T) {
 		t.Error("no deadline was read out of the range")
 	} else if end, err := time.Parse(time.RFC3339, v); err != nil || end.Format("01-02") != "09-30" {
 		t.Errorf("expires_at = %s, want 09-30", v)
+	}
+}
+
+// 只读命令（events / doctor / probe）也要先 New 一个 App。如果构造过程就写 state.json，
+// 那么运维"看一眼"就会换掉状态文件的所有者：以 root 跑一次 `sudo dealhunter events`，
+// 服务下次要写状态时直接 permission denied 崩溃循环 —— 生产真实发生过（2026-09-20）。
+func TestNewWritesNoState(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.DataDir = dir
+	cfg.Server.Enabled = false
+	app, err := New(cfg, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer app.Close()
+	if _, err := os.Stat(filepath.Join(dir, "state.json")); !os.IsNotExist(err) {
+		t.Errorf("New() wrote the state file (err=%v); a read-only command must not dirty it", err)
+	}
+}
+
+// 但日报的"本进程从何时起开始守排程"必须仍然被记住 —— 那是新装上日报永不触发的死锁修复。
+// 把它挪到第一轮采集开始时落盘。
+func TestFirstRoundArmsTheBriefingSchedule(t *testing.T) {
+	f := &cannedFetcher{byURL: map[string][]byte{feedURL: feedBody(t)}}
+	spy := &spyNotifier{}
+	app := testApp(t, f, spy, func(c *config.Config) {
+		c.Notify.Daily.At = "00:00"
+	})
+	if _, err := app.RunOnce(context.Background(), "unit"); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if _, ok := app.stateTime(dailyWatched); !ok {
+		t.Error("a real round must arm the briefing schedule, or a fresh install never sends")
 	}
 }

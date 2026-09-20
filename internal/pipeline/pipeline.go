@@ -148,13 +148,9 @@ func New(cfg *config.Config, log *slog.Logger, opts ...Option) (*App, error) {
 		Timeout:  25 * time.Second,
 	}, st, log)
 	a.off.SetBudget(cfg.Filter.MaxOfficialLookups)
-	// Arm this process against the schedule: see dailyWatched.
-	if cfg.Notify.Daily.Enabled {
-		if err := a.setStateTime(dailyWatched, time.Now().UTC()); err != nil {
-			st.Close()
-			return nil, err
-		}
-	}
+	// Nothing here may write state: read-only commands (events, doctor, probe) build
+	// an App too, and running one as root used to hand state.json to root and put the
+	// service into a crash loop. The briefing schedule is armed by the first round.
 
 	var backends []notify.Notifier
 	if cfg.Notify.Feishu.Enabled {
@@ -258,6 +254,14 @@ func (a *App) RunOnce(ctx context.Context, trigger string) (*Run, error) {
 		trigger = "manual"
 	}
 	run := &Run{StartedAt: time.Now().UTC(), Trigger: trigger}
+	// A round is the earliest point where writing state is legitimate: see dailyWatched.
+	if a.cfg.Notify.Daily.Enabled {
+		if _, ok := a.stateTime(dailyWatched); !ok {
+			if err := a.setStateTime(dailyWatched, run.StartedAt); err != nil {
+				return run, err
+			}
+		}
+	}
 	srcCfgs := a.cfg.EnabledSources()
 	outcomes := a.fetchAll(ctx, srcCfgs)
 

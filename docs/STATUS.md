@@ -103,7 +103,7 @@ doctor 报"到期前 3h0m0s"、面板 hint 分开显示两个数。顺带：面�
   而不是提醒通道坏了。
 
 ```bash
-ssh alienware-life 'sudo /opt/deal-hunter/deal-hunter events -config /etc/deal-hunter/config.json'
+ssh alienware-life 'sudo -u dealhunter /opt/deal-hunter/deal-hunter events -config /etc/deal-hunter/config.json'
 # 面板地址只写在 root 可读的 env 里，别把字面量搬进仓库
 ssh alienware-life 'B=$(sudo grep -m1 "^DH_SERVER_BIND=" /etc/deal-hunter/deal-hunter.env | cut -d= -f2-); sudo curl -s "http://$B/api/v1/status" | grep -A11 "\"event\""'  # due_opening / due_expiry / sent_today
 ssh alienware-life 'sudo journalctl -u deal-hunter --since today | grep "kind=event"'               # 每个事件 2 行（两个通道）
