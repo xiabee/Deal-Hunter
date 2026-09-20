@@ -10,27 +10,29 @@
     "bind": "127.0.0.1:8765"
   },
   "filter": {
-    "min_score": 55,
     "require_offer": true,
     "max_age_hours": 336
   },
   "notify": {
     "feishu": {
       "enabled": true,
-      "min_score": 62,
-      "max_per_run": 6,
-      "timezone": "Asia/Shanghai",
-      "silent_hours": [0, 1, 2, 3, 4, 5, 6]
+      "timezone": "Asia/Shanghai"
     },
     "openclaw": {
       "enabled": true,
       "relay": false
     },
-    "digest": {
+    "daily": {
       "enabled": true,
-      "every": "6h",
+      "at": "09:00",
       "min_score": 45,
-      "max_items": 12
+      "max_items": 15
+    },
+    "urgent": {
+      "enabled": true,
+      "min_score": 90,
+      "max_per_day": 1,
+      "max_items": 5
     },
     "console": false
   }

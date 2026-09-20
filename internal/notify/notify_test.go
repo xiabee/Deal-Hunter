@@ -54,7 +54,7 @@ func TestFeishuDeliversSignedCard(t *testing.T) {
 	if !f.Ready() {
 		t.Fatal("a loopback webhook must be accepted for local relays")
 	}
-	msg := NewMessage(KindAlert, Headline(&[]model.Deal{sampleDeal()}[0]), sampleDeal())
+	msg := NewMessage(KindUrgent, Headline(&[]model.Deal{sampleDeal()}[0]), sampleDeal())
 	if err := f.Send(context.Background(), msg); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestFeishuSurfacesUpstreamErrorCode(t *testing.T) {
 	}))
 	defer srv.Close()
 	f, _ := NewFeishu(config.Feishu{WebhookURL: srv.URL, Timezone: "UTC"})
-	err := f.Send(context.Background(), NewMessage(KindAlert, "x", sampleDeal()))
+	err := f.Send(context.Background(), NewMessage(KindUrgent, "x", sampleDeal()))
 	if err == nil || !strings.Contains(err.Error(), "19021") {
 		t.Fatalf("expected the upstream code to be reported, got %v", err)
 	}
@@ -139,14 +139,14 @@ func TestFeishuReportsHTTPFailure(t *testing.T) {
 	}))
 	defer srv.Close()
 	f, _ := NewFeishu(config.Feishu{WebhookURL: srv.URL, Timezone: "UTC"})
-	if err := f.Send(context.Background(), NewMessage(KindAlert, "x", sampleDeal())); err == nil {
+	if err := f.Send(context.Background(), NewMessage(KindUrgent, "x", sampleDeal())); err == nil {
 		t.Fatal("expected an error on HTTP 500")
 	}
 }
 
 func TestFeishuWithoutWebhookNamesTheEnvVar(t *testing.T) {
 	f, _ := NewFeishu(config.Feishu{Enabled: true, Timezone: "UTC"})
-	err := f.Send(context.Background(), NewMessage(KindAlert, "x", sampleDeal()))
+	err := f.Send(context.Background(), NewMessage(KindUrgent, "x", sampleDeal()))
 	if err == nil || !strings.Contains(err.Error(), config.EnvFeishuWebhook) {
 		t.Fatalf("error should tell the operator which env var to set, got %v", err)
 	}
@@ -168,42 +168,14 @@ func TestWebhookURLRules(t *testing.T) {
 	}
 }
 
-func TestQuietHoursUseConfiguredTimezone(t *testing.T) {
-	f, err := NewFeishu(config.Feishu{SilentHours: []int{3}, Timezone: "Asia/Shanghai"})
-	if err != nil {
-		t.Fatal(err)
+func TestFeishuResolvesItsTimezoneOrRefusesToStart(t *testing.T) {
+	if _, err := NewFeishu(config.Feishu{Timezone: "Asia/Shanghai"}); err != nil {
+		t.Fatalf("a real zone must load: %v", err)
 	}
-	shanghai3 := time.Date(2026, 9, 18, 3, 30, 0, 0, time.FixedZone("CST", 8*3600))
-	if !f.QuietNow(shanghai3) {
-		t.Error("03:30 +0800 is inside the silent window")
-	}
-	if f.QuietNow(time.Date(2026, 9, 18, 9, 0, 0, 0, shanghai3.Location())) {
-		t.Error("09:00 must not be quiet")
-	}
-	open, _ := NewFeishu(config.Feishu{Timezone: "UTC"})
-	if open.QuietNow(time.Now()) {
-		t.Error("no silent hours means never quiet")
-	}
+	// The service usually runs in UTC while the card footer is read by someone
+	// on +0800, so the zone is not decoration and a typo in it must not pass.
 	if _, err := NewFeishu(config.Feishu{Timezone: "Mars/Valles"}); err == nil {
 		t.Error("an invalid timezone must be rejected")
-	}
-}
-
-func TestDigestCardListsEveryDeal(t *testing.T) {
-	f, _ := NewFeishu(config.Feishu{Timezone: "UTC"})
-	msg := NewMessage(KindDigest, "🧺 羊毛盘点", sampleDeal(), sampleDeal(), sampleDeal())
-	card := f.card(msg)
-	divs := 0
-	for _, e := range cardElements(card) {
-		if e["tag"] == "div" {
-			divs++
-		}
-	}
-	if divs < 3 {
-		t.Errorf("digest should render one row per deal, got %d divs", divs)
-	}
-	if card["header"].(map[string]any)["template"] != "blue" {
-		t.Error("digest cards use the blue template")
 	}
 }
 
@@ -213,8 +185,8 @@ func TestTemplateChoiceReflectsValue(t *testing.T) {
 		want string
 	}{
 		{NewMessage(KindTest, "t", sampleDeal()), "grey"},
-		{NewMessage(KindDigest, "d", sampleDeal()), "blue"},
-		{NewMessage(KindAlert, "a", sampleDeal()), "red"},
+		{NewMessage(KindDaily, "d", sampleDeal()), "blue"},
+		{NewMessage(KindUrgent, "a", sampleDeal()), "red"},
 	}
 	for _, c := range cases {
 		if got := CardTemplate(c.msg); got != c.want {
@@ -229,7 +201,7 @@ func TestFileDropWritesArtifacts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFileDrop: %v", err)
 	}
-	if err := fd.Send(context.Background(), NewMessage(KindAlert, "测试标题", sampleDeal())); err != nil {
+	if err := fd.Send(context.Background(), NewMessage(KindUrgent, "测试标题", sampleDeal())); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 	md, err := os.ReadFile(filepath.Join(dir, "deal-hunter-latest.md"))
@@ -241,7 +213,7 @@ func TestFileDropWritesArtifacts(t *testing.T) {
 			t.Errorf("markdown missing %q:\n%s", want, md)
 		}
 	}
-	// The markdown is a digest of the alert, not a duplicate of the record.
+	// The markdown summarises the message; it must not restate the whole record.
 	if lines := strings.Count(strings.TrimSpace(string(md)), "\n"); lines > 5 {
 		t.Errorf("markdown should stay a few lines, got %d:\n%s", lines+1, md)
 	}
@@ -258,7 +230,7 @@ func TestFileDropWritesArtifacts(t *testing.T) {
 	if err := json.Unmarshal(js, &payload); err != nil {
 		t.Fatalf("json artifact invalid: %v", err)
 	}
-	if payload["Kind"] != string(KindAlert) {
+	if payload["Kind"] != string(KindUrgent) {
 		t.Errorf("json payload = %v", payload)
 	}
 	entries, err := os.ReadDir(dir)
@@ -282,7 +254,7 @@ func TestFanOutTreatsPartialSuccessAsDelivered(t *testing.T) {
 	}
 	// A broken secondary channel must not make the pipeline re-alert findings
 	// that already reached the user through a healthy backend.
-	err := f.Send(context.Background(), NewMessage(KindAlert, "t", sampleDeal()))
+	err := f.Send(context.Background(), NewMessage(KindUrgent, "t", sampleDeal()))
 	if err != nil {
 		t.Fatalf("partial success should not be an error, got %v", err)
 	}
@@ -298,7 +270,7 @@ func TestFanOutErrorsOnlyWhenEveryBackendFails(t *testing.T) {
 	f := NewFanOut(nil,
 		&failingNotifier{err: errors.New("relay down")},
 		&failingNotifier{err: errors.New("webhook down")})
-	err := f.Send(context.Background(), NewMessage(KindAlert, "t", sampleDeal()))
+	err := f.Send(context.Background(), NewMessage(KindUrgent, "t", sampleDeal()))
 	if err == nil {
 		t.Fatal("all-backend failure must be reported")
 	}
@@ -310,7 +282,7 @@ func TestFanOutErrorsOnlyWhenEveryBackendFails(t *testing.T) {
 }
 
 func TestFanOutWithoutBackendsErrors(t *testing.T) {
-	if err := NewFanOut(nil).Send(context.Background(), NewMessage(KindAlert, "t")); err == nil {
+	if err := NewFanOut(nil).Send(context.Background(), NewMessage(KindUrgent, "t")); err == nil {
 		t.Error("expected an error when nothing is configured")
 	}
 }
@@ -318,11 +290,11 @@ func TestFanOutWithoutBackendsErrors(t *testing.T) {
 func TestConsoleRendersPlainText(t *testing.T) {
 	var buf strings.Builder
 	c := NewConsoleWriter(&buf)
-	if err := c.Send(context.Background(), NewMessage(KindAlert, "告警标题", sampleDeal())); err != nil {
+	if err := c.Send(context.Background(), NewMessage(KindUrgent, "插队标题", sampleDeal())); err != nil {
 		t.Fatal(err)
 	}
 	out := buf.String()
-	for _, want := range []string{"[ALERT]", "告警标题", "92", "🆓", "https://example.com/glm-free"} {
+	for _, want := range []string{"[URGENT]", "插队标题", "92", "🆓", "https://example.com/glm-free"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("console output missing %q:\n%s", want, out)
 		}
@@ -383,7 +355,7 @@ func resolvedDeal(kind, officialURL string) model.Deal {
 func TestCardPresentsVerifiedOfficialPageFirst(t *testing.T) {
 	f, _ := NewFeishu(config.Feishu{Timezone: "UTC"})
 	const officialURL = "https://open.bigmodel.cn/pricing"
-	m := NewMessage(KindAlert, "t", resolvedDeal(official.KindSearchVerified, officialURL))
+	m := NewMessage(KindUrgent, "t", resolvedDeal(official.KindSearchVerified, officialURL))
 	elements := cardElements(f.card(m))
 
 	var joined strings.Builder
@@ -421,7 +393,7 @@ func TestCardPresentsVerifiedOfficialPageFirst(t *testing.T) {
 func TestCardKeepsUnverifiedLinkHonest(t *testing.T) {
 	f, _ := NewFeishu(config.Feishu{Timezone: "UTC"})
 	d := sampleDeal() // no resolution metadata at all
-	b, _ := json.Marshal(f.card(NewMessage(KindAlert, "t", d)))
+	b, _ := json.Marshal(f.card(NewMessage(KindUrgent, "t", d)))
 	body := string(b)
 	if strings.Contains(body, "官方入口") {
 		t.Error("an unresolved link must not be dressed up as official")
@@ -430,7 +402,7 @@ func TestCardKeepsUnverifiedLinkHonest(t *testing.T) {
 		t.Error("the original post should still be offered")
 	}
 	third := resolvedDeal(official.KindThirdParty, d.URL)
-	elements := cardElements(f.card(NewMessage(KindAlert, "t", third)))
+	elements := cardElements(f.card(NewMessage(KindUrgent, "t", third)))
 	var joined strings.Builder
 	for _, e := range elements {
 		b, _ := json.Marshal(e)
@@ -449,7 +421,7 @@ func TestCardOffersVendorSiteWithoutClaimingIt(t *testing.T) {
 	d.URL = "https://www.v2ex.com/t/1"
 	d.Meta[official.MetaOriginalURL] = d.URL
 	d.Meta[official.MetaVendorURL] = "https://open.bigmodel.cn/pricing"
-	elements := cardElements(f.card(NewMessage(KindAlert, "t", d)))
+	elements := cardElements(f.card(NewMessage(KindUrgent, "t", d)))
 
 	var actions []map[string]any
 	for _, e := range elements {
@@ -481,7 +453,7 @@ func TestMultiDealAlertIsOneLinePerDeal(t *testing.T) {
 	long := sampleDeal()
 	long.Title = strings.Repeat("限", 90) + " 免费额度"
 	long.Summary = strings.Repeat("很长的一段说明，", 30)
-	msg := NewMessage(KindAlert, "🧾 新羊毛 3 条", resolvedDeal(official.KindAlreadyOfficial, "https://openrouter.ai/x:free"), long, sampleDeal())
+	msg := NewMessage(KindUrgent, "🧾 新羊毛 3 条", resolvedDeal(official.KindAlreadyOfficial, "https://openrouter.ai/x:free"), long, sampleDeal())
 	divs, actions, total := 0, 0, 0
 	for _, e := range cardElements(f.card(msg)) {
 		switch e["tag"] {
@@ -588,7 +560,7 @@ func TestDailySplitsFreshFromOngoing(t *testing.T) {
 	}
 }
 
-func TestDigestAndPlainUseTheResolvedLink(t *testing.T) {
+func TestUrgentAndPlainUseTheResolvedLink(t *testing.T) {
 	const officialURL = "https://open.bigmodel.cn/pricing"
 	d := resolvedDeal(official.KindSearchVerified, officialURL)
 	line := Line(&d)
@@ -598,10 +570,10 @@ func TestDigestAndPlainUseTheResolvedLink(t *testing.T) {
 	if !strings.Contains(line, "✅") {
 		t.Errorf("plain line should state the verdict: %q", line)
 	}
-	digest := NewMessage(KindDigest, "d", d)
+	breakthrough := NewMessage(KindUrgent, "⚡ 值得立刻看", d)
 	f, _ := NewFeishu(config.Feishu{Timezone: "UTC"})
-	b, _ := json.Marshal(f.card(digest))
+	b, _ := json.Marshal(f.card(breakthrough))
 	if !strings.Contains(string(b), officialURL) {
-		t.Errorf("digest rows should link the vendor page: %s", b)
+		t.Errorf("breakthrough rows should link the vendor page: %s", b)
 	}
 }

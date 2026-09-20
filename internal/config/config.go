@@ -79,16 +79,13 @@ type Source struct {
 // custom-bot webhook, or an application identity (app_id/app_secret) that posts
 // to a user or chat through the Open API. All four values come from the
 // environment only, never from the config file.
+//
+// What gets delivered is not decided here: see Notify.Urgent and Notify.Daily.
 type Feishu struct {
-	Enabled            bool   `json:"enabled"`
-	MinScore           int    `json:"min_score"`
-	SilentHours        []int  `json:"silent_hours,omitempty"`
-	Timezone           string `json:"timezone,omitempty"`
-	AtAll              bool   `json:"at_all,omitempty"`
-	MaxPerRun          int    `json:"max_per_run,omitempty"`
-	DeduplicateMinutes int    `json:"dedupe_minutes,omitempty"`
-	APIBase            string `json:"api_base,omitempty"`
-	ReceiveIDType      string `json:"receive_id_type,omitempty"`
+	Enabled       bool   `json:"enabled"`
+	Timezone      string `json:"timezone,omitempty"`
+	APIBase       string `json:"api_base,omitempty"`
+	ReceiveIDType string `json:"receive_id_type,omitempty"`
 
 	WebhookURL string `json:"-"`
 	Secret     string `json:"-"`
@@ -114,10 +111,12 @@ type OpenClaw struct {
 	Target      string   `json:"-"`
 }
 
-// Daily is the morning briefing: every offer still worth claiming right now,
-// with how long we have known about it and when it ends. Unlike the digest it
-// re-reads the whole store instead of what arrived since last time, because a
-// three-day-old free tier is still free today.
+// Daily is the one message a day: every offer still worth claiming right now,
+// with how long we have known about it and when it ends. It re-reads the whole
+// store instead of what arrived since last time, because a three-day-old free
+// tier is still free today. It is sent even when nothing is live — an empty
+// briefing says "today there is nothing", which is the answer to the question
+// "is the radar still running?".
 type Daily struct {
 	Enabled  bool   `json:"enabled"`
 	At       string `json:"at,omitempty"` // "09:00" in the configured timezone
@@ -125,21 +124,22 @@ type Daily struct {
 	MaxItems int    `json:"max_items,omitempty"`
 }
 
-// Digest batches sub-threshold findings into one periodic summary.
-type Digest struct {
-	Enabled  bool     `json:"enabled"`
-	Every    Duration `json:"every,omitempty"`
-	MinScore int      `json:"min_score,omitempty"`
-	At       string   `json:"at,omitempty"` // "08:30" local; overrides Every
-	MaxItems int      `json:"max_items,omitempty"`
+// Urgent is the only thing allowed to interrupt the briefing: a finding scored
+// so high that waiting for tomorrow's report would waste it. Capped per day so
+// "urgent" cannot degrade back into the old firehose.
+type Urgent struct {
+	Enabled   bool `json:"enabled"`
+	MinScore  int  `json:"min_score,omitempty"`
+	MaxPerDay int  `json:"max_per_day,omitempty"`
+	MaxItems  int  `json:"max_items,omitempty"`
 }
 
 // Notify groups all delivery backends.
 type Notify struct {
 	Feishu   Feishu   `json:"feishu"`
 	OpenClaw OpenClaw `json:"openclaw"`
-	Digest   Digest   `json:"digest"`
 	Daily    Daily    `json:"daily"`
+	Urgent   Urgent   `json:"urgent"`
 	Console  bool     `json:"console"`
 }
 
@@ -159,9 +159,11 @@ type HTTP struct {
 	AllowPrivateHosts bool     `json:"allow_private_hosts,omitempty"`
 }
 
-// Filter decides what is worth storing and pushing.
+// Filter decides what is worth storing. Note there is deliberately no score
+// floor here: "has an offer signal, or it never enters history" is the gate that
+// actually bites, and the floors that tune what you *see* live in
+// notify.daily.min_score, `dealhunter deals -min` and the API's ?min=.
 type Filter struct {
-	MinScore        int      `json:"min_score"`
 	MaxAgeHours     int      `json:"max_age_hours,omitempty"`
 	RequireOffer    bool     `json:"require_offer"`
 	DenyKeywords    []string `json:"deny_keywords,omitempty"`
@@ -193,7 +195,6 @@ const (
 	EnvConfig        = "DH_CONFIG"
 	EnvEnvFile       = "DH_ENV_FILE"
 	EnvInterval      = "DH_INTERVAL"
-	EnvMinScore      = "DH_MIN_SCORE"
 	EnvLogLevel      = "DH_LOG_LEVEL"
 	EnvFeishuWebhook = "DH_FEISHU_WEBHOOK"
 	EnvFeishuSecret  = "DH_FEISHU_SECRET"
@@ -207,15 +208,19 @@ const (
 	EnvServerBind     = "DH_SERVER_BIND"
 	EnvServerEnabled  = "DH_SERVER_ENABLED"
 	EnvAllowPublic    = "DH_ALLOW_PUBLIC_BIND"
-	EnvDigestEnabled  = "DH_DIGEST_ENABLED"
 	EnvDailyEnabled   = "DH_DAILY_ENABLED"
 	EnvDailyAt        = "DH_DAILY_AT"
+	EnvUrgentEnabled  = "DH_URGENT_ENABLED"
+	EnvUrgentMinScore = "DH_URGENT_MIN_SCORE"
 	// OpenClaw relay: the destination chat id stays out of the config file.
 	EnvOpenClawTarget = "DH_OPENCLAW_TARGET"
 	EnvOpenClawCmd    = "DH_OPENCLAW_COMMAND"
 	EnvOpenClawChan   = "DH_OPENCLAW_CHANNEL"
 	EnvOpenClawRelay  = "DH_OPENCLAW_RELAY"
 )
+
+// defaultDailyAt is the briefing hour a config without one gets.
+const defaultDailyAt = "09:00"
 
 // Default returns a ready-to-run configuration using sources verified to be
 // reachable from the deployment host.
@@ -235,16 +240,15 @@ func Default() *Config {
 		},
 		Server: Server{Enabled: true, Bind: "127.0.0.1:8765"},
 		Filter: Filter{
-			MinScore:           55,
 			MaxAgeHours:        24 * 14,
 			RequireOffer:       true,
 			MaxOfficialLookups: 16,
 		},
 		Notify: Notify{
-			Feishu:   Feishu{Enabled: true, MinScore: 62, MaxPerRun: 6, DeduplicateMinutes: 90, Timezone: "Asia/Shanghai"},
+			Feishu:   Feishu{Enabled: true, Timezone: "Asia/Shanghai"},
 			OpenClaw: OpenClaw{Enabled: true, SkillDir: "", APIPath: "/api/v1/", Description: "Deal-Hunter 羊毛情报"},
-			Digest:   Digest{Enabled: true, Every: Duration(6 * time.Hour), MinScore: 45, MaxItems: 12},
-			Daily:    Daily{Enabled: true, At: "09:00", MinScore: 45, MaxItems: 15},
+			Daily:    Daily{Enabled: true, At: defaultDailyAt, MinScore: 45, MaxItems: 15},
+			Urgent:   Urgent{Enabled: true, MinScore: 90, MaxPerDay: 1, MaxItems: 5},
 			Console:  true,
 		},
 		Sources: DefaultSources(),
@@ -418,20 +422,19 @@ func (c *Config) applyEnv() {
 			c.Interval = Duration(d)
 		}
 	}
-	if v := os.Getenv(EnvMinScore); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			c.Filter.MinScore = n
-			c.Notify.Feishu.MinScore = n
-		}
-	}
 	if v := os.Getenv(EnvFeishuEnabled); v != "" {
 		c.Notify.Feishu.Enabled = isTruthy(v)
 	}
 	if v := os.Getenv(EnvServerEnabled); v != "" {
 		c.Server.Enabled = isTruthy(v)
 	}
-	if v := os.Getenv(EnvDigestEnabled); v != "" {
-		c.Notify.Digest.Enabled = isTruthy(v)
+	if v := os.Getenv(EnvUrgentEnabled); v != "" {
+		c.Notify.Urgent.Enabled = isTruthy(v)
+	}
+	if v := os.Getenv(EnvUrgentMinScore); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Notify.Urgent.MinScore = n
+		}
 	}
 	if v := os.Getenv(EnvDailyEnabled); v != "" {
 		c.Notify.Daily.Enabled = isTruthy(v)
@@ -448,6 +451,23 @@ func isTruthy(v string) bool {
 	default:
 		return false
 	}
+}
+
+// ParseHHMM reads a "HH:MM" schedule field. A lone-digit minute is rejected:
+// the Sscanf this replaces read "9:5" as 09:05, while a human typing it at
+// midnight usually means 09:50 or 09:05, and a briefing that arrives 45 minutes
+// off is not a rounding error.
+func ParseHHMM(s string) (hour, minute int, err error) {
+	t, err := time.Parse("15:04", strings.TrimSpace(s))
+	if err != nil {
+		return 0, 0, fmt.Errorf("config: %q is not HH:MM: %w", s, err)
+	}
+	return t.Hour(), t.Minute(), nil
+}
+
+func validHHMM(s string) bool {
+	_, _, err := ParseHHMM(s)
+	return err == nil
 }
 
 // loadEnvFile applies KEY=VALUE lines without failing on comments. Values may
@@ -490,11 +510,18 @@ func (c *Config) Validate() error {
 	if c.Interval.D() < time.Minute {
 		return fmt.Errorf("config: interval %s is too aggressive; use >= 1m", c.Interval)
 	}
-	if c.Filter.MinScore < 0 || c.Filter.MinScore > 100 {
-		return fmt.Errorf("config: filter.min_score %d out of 0..100", c.Filter.MinScore)
+	if c.Notify.Urgent.MinScore < 0 || c.Notify.Urgent.MinScore > 100 {
+		return fmt.Errorf("config: notify.urgent.min_score %d out of 0..100", c.Notify.Urgent.MinScore)
 	}
-	if c.Notify.Feishu.MinScore < 0 || c.Notify.Feishu.MinScore > 100 {
-		return fmt.Errorf("config: notify.feishu.min_score %d out of 0..100", c.Notify.Feishu.MinScore)
+	if c.Notify.Urgent.MaxPerDay < 0 {
+		return fmt.Errorf("config: notify.urgent.max_per_day %d must be >= 0", c.Notify.Urgent.MaxPerDay)
+	}
+	if c.Notify.Daily.Enabled && c.Notify.Daily.At != "" && !validHHMM(c.Notify.Daily.At) {
+		return fmt.Errorf("config: notify.daily.at %q must be HH:MM", c.Notify.Daily.At)
+	}
+	// Normalise here so nothing downstream has to carry the same default.
+	if c.Notify.Daily.At == "" {
+		c.Notify.Daily.At = defaultDailyAt
 	}
 	switch c.LogLevel {
 	case "debug", "info", "warn", "error", "":

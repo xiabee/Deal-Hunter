@@ -70,7 +70,6 @@ func TestExplicitPublicOverrideStillNeedsOptIn(t *testing.T) {
 }
 
 func TestEnvOverrides(t *testing.T) {
-	t.Setenv(EnvMinScore, "77")
 	t.Setenv(EnvInterval, "45m")
 	t.Setenv(EnvFeishuWebhook, "https://open.feishu.cn/open-apis/bot/v2/hook/redacted")
 	t.Setenv(EnvFeishuSecret, "s3cr3t-value")
@@ -80,9 +79,6 @@ func TestEnvOverrides(t *testing.T) {
 	cfg, err := Load("")
 	if err != nil {
 		t.Fatalf("Load: %v", err)
-	}
-	if cfg.Filter.MinScore != 77 || cfg.Notify.Feishu.MinScore != 77 {
-		t.Errorf("min score not applied: %d/%d", cfg.Filter.MinScore, cfg.Notify.Feishu.MinScore)
 	}
 	if cfg.Interval.D() != 45*time.Minute {
 		t.Errorf("interval = %s", cfg.Interval)
@@ -137,6 +133,45 @@ func TestDailyBriefingDefaultsAndEnv(t *testing.T) {
 	}
 }
 
+// The whole point of the delivery model is that a day produces one message.
+// These defaults are that promise, so they are asserted as a contract: anything
+// that loosens them has to say so here first.
+func TestOneReportADayIsTheDefault(t *testing.T) {
+	d := Default().Notify.Daily
+	if !d.Enabled {
+		t.Error("the briefing must be on by default, or nothing is ever delivered")
+	}
+	u := Default().Notify.Urgent
+	if u.MaxPerDay != 1 {
+		t.Errorf("breakthroughs per day = %d, want 1", u.MaxPerDay)
+	}
+	if u.MinScore <= d.MinScore {
+		t.Errorf("the breakthrough gate (%d) must sit above what a briefing row needs (%d)",
+			u.MinScore, d.MinScore)
+	}
+	if u.MinScore < 80 {
+		t.Errorf("breakthrough gate %d is low enough to interrupt on ordinary finds", u.MinScore)
+	}
+	if !u.Enabled {
+		t.Error("a free model that just went free should not wait for tomorrow")
+	}
+}
+
+func TestUrgentGateEnv(t *testing.T) {
+	t.Setenv(EnvUrgentMinScore, "97")
+	t.Setenv(EnvUrgentEnabled, "false")
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Notify.Urgent.MinScore != 97 {
+		t.Errorf("min_score = %d", cfg.Notify.Urgent.MinScore)
+	}
+	if cfg.Notify.Urgent.Enabled {
+		t.Error("DH_URGENT_ENABLED=false must retire the breakthrough channel")
+	}
+}
+
 func TestSecretsCannotBeSmuggledThroughTheConfigFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
@@ -164,20 +199,20 @@ func TestSecretsCannotBeSmuggledThroughTheConfigFile(t *testing.T) {
 
 func TestPartialFileKeepsDefaults(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "c.json")
-	if err := os.WriteFile(path, []byte(`{"interval":"5m","filter":{"min_score":70}}`), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"interval":"5m","filter":{"max_age_hours":48}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Interval.D() != 5*time.Minute || cfg.Filter.MinScore != 70 {
+	if cfg.Interval.D() != 5*time.Minute || cfg.Filter.MaxAgeHours != 48 {
 		t.Errorf("overrides lost: %+v", cfg.Filter)
 	}
 	if len(cfg.Sources) != len(DefaultSources()) {
 		t.Errorf("sources should fall back to defaults, got %d", len(cfg.Sources))
 	}
-	if cfg.Notify.Feishu.MinScore == 0 {
+	if cfg.Notify.Urgent.MinScore == 0 || cfg.Notify.Daily.At == "" {
 		t.Error("unspecified notify fields must keep their defaults")
 	}
 }
@@ -189,7 +224,6 @@ func TestValidationRejectsBadConfigs(t *testing.T) {
 		want   string
 	}{
 		{"interval", func(c *Config) { c.Interval = Duration(time.Second) }, "too aggressive"},
-		{"minscore", func(c *Config) { c.Filter.MinScore = 500 }, "min_score"},
 		{"dupes", func(c *Config) {
 			c.Sources = []Source{{Name: "x", Kind: KindRSS, URL: "https://a/"}, {Name: "x", Kind: KindRSS, URL: "https://b/"}}
 		}, "duplicate"},
@@ -197,6 +231,11 @@ func TestValidationRejectsBadConfigs(t *testing.T) {
 		{"url", func(c *Config) { c.Sources = []Source{{Name: "x", Kind: KindRSS, URL: "ftp://a/"}} }, "must be http"},
 		{"loglevel", func(c *Config) { c.LogLevel = "verbose" }, "log_level"},
 		{"trust", func(c *Config) { c.Sources = []Source{{Name: "x", Kind: KindRSS, URL: "https://a/", Trust: 99}} }, "trust"},
+		{"urgent score", func(c *Config) { c.Notify.Urgent.MinScore = 101 }, "urgent.min_score"},
+		// A briefing hour that does not parse would silently cost the day's only
+		// message, so it has to fail at startup rather than at 09:00.
+		{"daily at", func(c *Config) { c.Notify.Daily.At = "9am" }, "daily.at"},
+		{"daily at single digit", func(c *Config) { c.Notify.Daily.At = "9:5" }, "daily.at"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -213,19 +252,19 @@ func TestValidationRejectsBadConfigs(t *testing.T) {
 func TestEnvFileIsAppliedWithoutOverridingRealEnv(t *testing.T) {
 	dir := t.TempDir()
 	envFile := filepath.Join(dir, "secrets.env")
-	body := "# comment\nDH_MIN_SCORE=81\nDH_LOG_LEVEL=\"debug\"\nDH_FEISHU_WEBHOOK=https://example.invalid/hook/x\n"
+	body := "# comment\nDH_INTERVAL=45m\nDH_LOG_LEVEL=\"debug\"\nDH_FEISHU_WEBHOOK=https://example.invalid/hook/x\n"
 	if err := os.WriteFile(envFile, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv(EnvEnvFile, envFile)
-	t.Setenv(EnvMinScore, "64") // real env must win over the file
+	t.Setenv(EnvInterval, "5m") // real env must win over the file
 
 	cfg, err := Load("")
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Filter.MinScore != 64 {
-		t.Errorf("process env should beat the env file, got %d", cfg.Filter.MinScore)
+	if cfg.Interval.D() != 5*time.Minute {
+		t.Errorf("process env should beat the env file, got %s", cfg.Interval)
 	}
 	if cfg.LogLevel != "debug" {
 		t.Errorf("env file value ignored: %q", cfg.LogLevel)

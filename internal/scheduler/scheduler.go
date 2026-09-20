@@ -1,4 +1,4 @@
-// Package scheduler repeats collection rounds and honours the digest cadence.
+// Package scheduler repeats collection rounds and sends the daily briefing.
 package scheduler
 
 import (
@@ -64,14 +64,11 @@ func (l *Loop) round(ctx context.Context, trigger string) {
 		return
 	}
 	now := time.Now()
+	// The briefing is the day's only scheduled message, so a failed send stays
+	// due and is retried on the next round instead of being written off.
 	if l.App.DailyDue(now) {
 		if err := l.App.SendDaily(ctx, now); err != nil && ctx.Err() == nil {
 			l.Log.Warn("daily briefing failed", "err", err)
-		}
-	}
-	if l.App.DigestDue(now) {
-		if err := l.App.SendDigest(ctx); err != nil && ctx.Err() == nil {
-			l.Log.Warn("digest delivery failed", "err", err)
 		}
 	}
 }

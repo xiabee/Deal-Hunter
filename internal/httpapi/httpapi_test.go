@@ -58,7 +58,7 @@ func newTestServer(t *testing.T) (*httptest.Server, *pipeline.App, *recorder) {
 	cfg.Notify.Feishu.Enabled = true
 	cfg.Notify.Feishu.WebhookURL = webhookToken
 	cfg.Notify.Feishu.Secret = "TOPSECRETVALUE"
-	cfg.Notify.Digest.Enabled = false
+	cfg.Notify.Urgent.Enabled = false
 	cfg.Sources = []config.Source{{Name: "rss", Kind: config.KindRSS, URL: "https://feeds.example/latest.rss", Trust: 8}}
 
 	rec := &recorder{}
@@ -149,6 +149,27 @@ func TestStatusReportsOperationalState(t *testing.T) {
 	store := got["store"].(map[string]any)
 	if store["deals_seen"].(float64) == 0 {
 		t.Error("store stats should be populated")
+	}
+	// The delivery tiles read these keys by name. A rename here would fail
+	// silently in the browser, so it has to fail in the test instead.
+	daily, ok := got["daily"].(map[string]any)
+	if !ok || daily["at"] != "09:00" {
+		t.Errorf("the briefing schedule is missing from status: %v", got["daily"])
+	}
+	if _, has := daily["sent_today"]; !has {
+		t.Error("the panel cannot tell whether today's report already went out")
+	}
+	if _, has := store["live_in_briefing"]; !has {
+		t.Error("the number of rows the briefing would carry should be reported")
+	}
+	if _, ok := got["urgent"].(map[string]any); !ok {
+		t.Error("today's breakthrough budget is missing from status")
+	}
+	if _, present := store["pending_alerts"]; present {
+		t.Error("pending_alerts belongs to the queue the daily model replaced")
+	}
+	if filters := got["filters"].(map[string]any); filters["alert_min_score"] != nil {
+		t.Error("there is no per-round alert threshold any more")
 	}
 	lastRun, ok := got["last_run"].(map[string]any)
 	if !ok || lastRun["trigger"] != "test" {
@@ -271,7 +292,7 @@ func TestDigestServesMarkdownForOpenClaw(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := fd.Send(context.Background(), notify.NewMessage(notify.KindDigest, "🧺 测试盘点")); err != nil {
+	if err := fd.Send(context.Background(), notify.NewMessage(notify.KindDaily, "🌅 测试日报")); err != nil {
 		t.Fatal(err)
 	}
 	resp2, body2 := get(t, ts, "/api/v1/digest")
@@ -282,7 +303,7 @@ func TestDigestServesMarkdownForOpenClaw(t *testing.T) {
 	if ct := resp2.Header.Get("Content-Type"); !strings.Contains(ct, "text/markdown") {
 		t.Errorf("content type = %q", ct)
 	}
-	if !strings.Contains(string(body2), "测试盘点") {
+	if !strings.Contains(string(body2), "测试日报") {
 		t.Errorf("markdown body = %s", body2)
 	}
 }

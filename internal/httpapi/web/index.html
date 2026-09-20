@@ -172,11 +172,11 @@
 
   <div class="grid stats">
     <div class="card stat"><div class="label">累计发现</div><div class="kpi" id="k-seen">0</div><div class="hint" id="k-seen-h">&nbsp;</div></div>
-    <div class="card stat"><div class="label">已推送</div><div class="kpi" id="k-pushed">0</div><div class="hint">进入飞书消息的条数</div></div>
-    <div class="card stat"><div class="label">待推送</div><div class="kpi" id="k-pending">0</div><div class="hint">静默期或失败会留在队列</div></div>
+    <div class="card stat"><div class="label">突破推送</div><div class="kpi" id="k-pushed">0</div><div class="hint">高分插队，其余等日报</div></div>
+    <div class="card stat"><div class="label">今日日报</div><div class="kpi" id="k-daily">—</div><div class="hint" id="k-daily-h">一天一份，空报也发</div></div>
     <div class="card stat"><div class="label">信息源</div><div class="kpi" id="k-src">0<small>/ 0</small></div><div class="hint" id="k-src-h">启用 / 配置</div></div>
     <div class="card stat"><div class="label">最近一轮</div><div class="kpi" id="k-dur">—</div><div class="hint" id="k-dur-h">&nbsp;</div></div>
-    <div class="card stat"><div class="label">链接成色</div><div class="kpi" id="k-off">—</div><div class="bar" style="margin-top:9px"><i id="k-off-bar" style="width:0%"></i></div><div class="hint" id="k-off-h">待推送条目的官方页定位率</div></div>
+    <div class="card stat"><div class="label">链接成色</div><div class="kpi" id="k-off">—</div><div class="bar" style="margin-top:9px"><i id="k-off-bar" style="width:0%"></i></div><div class="hint" id="k-off-h">日报条目的官方页定位率</div></div>
   </div>
 
   <div class="section">
@@ -188,7 +188,7 @@
       <button type="button" class="chip" data-cat="discount" aria-pressed="false">🏷️ 折扣</button>
       <button type="button" class="chip" data-cat="resource" aria-pressed="false">📦 资源</button>
       <button type="button" class="chip" data-cat="official" aria-pressed="false">✅ 官方页已校验</button>
-      <button type="button" class="chip" data-cat="pushed" aria-pressed="false">📣 已推送</button>
+      <button type="button" class="chip" data-cat="pushed" aria-pressed="false">⚡ 已插队</button>
       <button type="button" class="chip" data-cat="dupes" aria-pressed="false">↻ 含重复</button>
       <div class="spacer"></div>
       <span class="num" id="count"></span>
@@ -297,7 +297,7 @@ function dealRow(d, i){
       (d.score_why && d.score_why.length ? '<p class="why">评分：' + esc(d.score_why.slice(0,6).join('，')) + '</p>' : '') +
       '<div class="foot"><span>来源 ' + esc(d.source) + '</span>' +
         (m.resolved_by ? '<span>定位 ' + esc(m.resolved_by) + '</span>' : '') +
-        (m.pushed === 'true' ? '<span>📣 已推送</span>' : '') +
+        (m.pushed === 'true' ? '<span>⚡ 已插队</span>' : '') +
         (m.expires_at ? '<span>截止 ' + esc(String(m.expires_at).slice(0,10)) + '</span>' : '') +
         links.map(x => '<span>' + x + '</span>').join('') +
       '</div></div></div>';
@@ -350,8 +350,8 @@ function runRow(r){
   const errs = r.errors || [];
   const dur = (new Date(r.finished_at) - new Date(r.started_at)) / 1000;
   return '<div class="run"><div><span class="n">' + hhmm(r.finished_at) + '</span> · ' + esc(r.trigger || '—') + '</div>' +
-    '<div class="num">新增 ' + (r.new_deals || 0) + ' · 推送 ' + (r.pushed || 0) +
-      (r.held_quiet ? ' · 静默 ' + r.held_quiet : '') +
+    '<div class="num">新增 ' + (r.new_deals || 0) + ' · 突破 ' + (r.urgent_sent || 0) +
+      (r.urgent_held ? ' · 转日报 ' + r.urgent_held : '') +
       (total ? ' · 官方 ' + off + '/' + total : '') +
       (errs.length ? ' · <span class="bad-text">错误 ' + errs.length + '</span>' : '') + '</div>' +
     '<div class="tail">' +
@@ -359,20 +359,15 @@ function runRow(r){
       '<span class="num">' + fmtDur(dur) + '</span></div></div>';
 }
 
-// Link quality is a property of the recent rounds, not of whichever round
-// happened to finish last: a quiet round must not blank the card out.
-function paintQuality(runs){
-  let off = 0, total = 0, rounds = 0;
-  for (const r of runs){
-    const v = r.verified_official || 0, t = v + (r.third_party_links || 0);
-    if (t){ off += v; total += t; rounds++; }
-  }
+// Link quality is a property of what the briefing will show, not of whichever
+// round finished last: a round that interrupted nothing says nothing about it.
+function paintQuality(total, off){
   const pct = total ? Math.round(off * 100 / total) : 0;
   $('k-off').textContent = total ? pct + '%' : '—';
   $('k-off-bar').style.width = pct + '%';
   $('k-off-h').textContent = total
-    ? '近 ' + rounds + ' 轮共 ' + off + '/' + total + ' 定位到厂商官方页'
-    : '最近的采集轮里没有待推送的新条目';
+    ? '在效 ' + total + ' 条中 ' + off + ' 条定位到厂商官方页'
+    : '当前没有在效的羊毛可报';
 }
 
 async function loadRuns(){
@@ -380,14 +375,14 @@ async function loadRuns(){
   $('runs').innerHTML = runs.length
     ? runs.map(runRow).join('')
     : '<div class="empty">还没有采集记录</div>';
-  paintQuality(runs);
 }
 
 async function loadStatus(){
   const s = await j('/api/v1/status');
   $('banner').textContent = s.version + ' · 已运行 ' + fmtDur(s.uptime_seconds) + ' · 轮询 ' + s.interval;
-  const ok = !!s.feishu_ready;
-  $('feishu').textContent = ok ? (s.feishu_mode || '就绪') : '未配置';
+  const n = s.notify || {};
+  const ok = !!n.feishu_ready;
+  $('feishu').textContent = ok ? (n.feishu_mode || '就绪') : '未配置';
   $('dot-feishu').className = 'dot ' + (ok ? 'ok' : 'warn');
   const daily = s.daily || {};
   if (daily.enabled){
@@ -399,19 +394,22 @@ async function loadStatus(){
   $('k-seen').textContent = seen;
   $('k-seen-h').textContent = '最近 ' + (st.newest ? new Date(st.newest).toLocaleString('zh-CN') : '—');
   $('k-pushed').textContent = st.pushed ?? 0;
-  $('k-pending').textContent = st.pending_alerts ?? 0;
+  const urgent = s.urgent || {};
+  $('k-daily').textContent = daily.sent_today ? '已发' : (daily.enabled ? '未发' : '已关');
+  $('k-daily-h').textContent = '在效 ' + (st.live_in_briefing ?? 0) + ' 条 · 突破 ' +
+    (urgent.enabled ? ('≥' + (urgent.min_score ?? '—') + '，今日 ' + (urgent.sent_today ?? 0) + '/' + (urgent.max_per_day ?? 1)) : '已关');
   const src = s.sources || {};
   $('k-src').innerHTML = (src.enabled ?? 0) + '<small>/ ' + (src.configured ?? 0) + '</small>';
-  $('k-src-h').textContent = '告警阈值 ≥ ' + (s.filters ? s.filters.alert_min_score : '—');
+  paintQuality(st.live_in_briefing ?? 0, st.live_verified ?? 0);
   const lr = s.last_run;
   if (!lr){
     $('k-dur').textContent = '—';
     $('k-dur-h').textContent = '尚未运行过';
-    return; // loadRuns owns the quality card, so it stays consistent.
+    return;
   }
   const dur = (new Date(lr.finished_at) - new Date(lr.started_at)) / 1000;
   $('k-dur').innerHTML = fmtDur(dur) + '<small> 用时</small>';
-  $('k-dur-h').textContent = '新增 ' + (lr.new_deals ?? 0) + ' · 推送 ' + (lr.pushed ?? 0) +
+  $('k-dur-h').textContent = '新增 ' + (lr.new_deals ?? 0) + ' · 突破 ' + (lr.urgent_sent ?? 0) +
     ' · 错误 ' + ((lr.errors||[]).length);
   const wait = (new Date(s.next_round_at) - Date.now()) / 1000;
   $('next').textContent = wait > 0 ? fmtDur(wait) : '即将';

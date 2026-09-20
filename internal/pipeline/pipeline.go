@@ -44,8 +44,8 @@ type Run struct {
 	Trigger    string         `json:"trigger"`
 	NewDeals   int            `json:"new_deals"`
 	Stored     int            `json:"stored"`
-	Pushed     int            `json:"pushed"`
-	HeldQuiet  int            `json:"held_quiet"`
+	Pushed     int            `json:"urgent_sent"`
+	UrgentHeld int            `json:"urgent_held"`
 	Dupes      int            `json:"dupes_folded"`
 	Verified   int            `json:"verified_official"`
 	ThirdParty int            `json:"third_party_links"`
@@ -143,6 +143,13 @@ func New(cfg *config.Config, log *slog.Logger, opts ...Option) (*App, error) {
 		Timeout:  25 * time.Second,
 	}, st, log)
 	a.off.SetBudget(cfg.Filter.MaxOfficialLookups)
+	// Arm this process against the schedule: see dailyWatched.
+	if cfg.Notify.Daily.Enabled {
+		if err := a.setStateTime(dailyWatched, time.Now().UTC()); err != nil {
+			st.Close()
+			return nil, err
+		}
+	}
 
 	var backends []notify.Notifier
 	if cfg.Notify.Feishu.Enabled {
@@ -254,7 +261,7 @@ func (a *App) RunOnce(ctx context.Context, trigger string) (*Run, error) {
 		byName[s.Name] = s
 	}
 
-	var candidates []*model.Deal
+	var interrupts []*model.Deal
 	for _, oc := range outcomes {
 		rep := SourceReport{Name: oc.cfg.Name, Kind: oc.cfg.Kind, Found: len(oc.deals), Ms: oc.ms}
 		if oc.err != nil {
@@ -265,7 +272,7 @@ func (a *App) RunOnce(ctx context.Context, trigger string) (*Run, error) {
 			a.log.Warn("source failed", "source", oc.cfg.Name, "err", msg, "ms", oc.ms)
 		}
 		for _, d := range oc.deals {
-			kept, push := a.judge(d, byName[oc.cfg.Name])
+			kept, urgent := a.judge(d, byName[oc.cfg.Name])
 			if !kept {
 				continue
 			}
@@ -279,8 +286,8 @@ func (a *App) RunOnce(ctx context.Context, trigger string) (*Run, error) {
 				continue
 			}
 			run.Stored++
-			if push {
-				candidates = append(candidates, d)
+			if urgent {
+				interrupts = append(interrupts, d)
 			}
 		}
 		run.Sources = append(run.Sources, rep)
@@ -289,10 +296,10 @@ func (a *App) RunOnce(ctx context.Context, trigger string) (*Run, error) {
 	// Resolve links to official, verified vendor pages first, then rank: a
 	// community post that we could not tie back to the vendor is worth less than
 	// a confirmed official page, and that must affect which few alerts fire.
-	run.Verified = a.off.Apply(ctx, candidates)
-	for _, d := range candidates {
-		// Persist the resolved link, else the dashboard, the digest and the
-		// OpenClaw pull would keep showing the community post the alert replaced.
+	run.Verified = a.off.Apply(ctx, interrupts)
+	for _, d := range interrupts {
+		// Persist the resolved link, else the dashboard and the OpenClaw pull
+		// would keep showing the community post the alert replaced.
 		if err := a.st.Save(d); err != nil {
 			a.log.Warn("persist resolved link", "err", err)
 		}
@@ -301,39 +308,54 @@ func (a *App) RunOnce(ctx context.Context, trigger string) (*Run, error) {
 		}
 		run.ThirdParty++
 	}
-	sort.SliceStable(candidates, func(i, j int) bool {
-		if candidates[i].Score != candidates[j].Score {
-			return candidates[i].Score > candidates[j].Score
+	sort.SliceStable(interrupts, func(i, j int) bool {
+		if interrupts[i].Score != interrupts[j].Score {
+			return interrupts[i].Score > interrupts[j].Score
 		}
-		return candidates[i].Title < candidates[j].Title
+		return interrupts[i].Title < interrupts[j].Title
 	})
-	if max := a.cfg.Notify.Feishu.MaxPerRun; max > 0 && len(candidates) > max {
-		a.log.Info("alert candidates capped", "have", len(candidates), "max_per_run", max)
-		candidates = candidates[:max]
-	}
 
 	var deliverErr error
-	if len(candidates) > 0 {
-		if a.fs != nil && a.fs.QuietNow(time.Now()) {
-			run.HeldQuiet = len(candidates)
-			a.log.Info("quiet hours: holding alerts for the digest", "count", len(candidates))
+	// Everything stored but not urgent enough to interrupt simply waits: the
+	// briefing re-reads the whole live store, so waiting costs nothing but delay.
+	if n := a.urgentMaxItems(); len(interrupts) > n {
+		a.log.Info("interrupting findings capped", "have", len(interrupts), "max_items", n)
+		run.UrgentHeld += len(interrupts) - n
+		interrupts = interrupts[:n]
+	}
+	if len(interrupts) > 0 {
+		// The budget counts messages, not rows: today's one breakthrough card
+		// carries everything urgent found so far, and once it is out the day is
+		// done interrupting.
+		if a.urgentLeft(time.Now()) <= 0 {
+			run.UrgentHeld = len(interrupts)
+			interrupts = nil
+			a.log.Info("urgent budget spent: waiting for the next briefing",
+				"count", run.UrgentHeld, "max_per_day", a.urgentMax())
+		}
+	}
+	if len(interrupts) > 0 {
+		vals := make([]model.Deal, 0, len(interrupts))
+		for _, d := range interrupts {
+			vals = append(vals, *d)
+		}
+		now := time.Now()
+		msg := notify.NewMessage(notify.KindUrgent, urgentTitle(vals), vals...)
+		if err := a.nf.Send(ctx, msg); err != nil {
+			// Nothing is charged to the budget and nothing is marked pushed, so
+			// the next round retries the same findings.
+			deliverErr = err
+			run.Errors = append(run.Errors, err.Error())
+			a.log.Error("breakthrough delivery failed; findings wait for the briefing", "err", err)
 		} else {
-			vals := make([]model.Deal, 0, len(candidates))
-			for _, d := range candidates {
-				vals = append(vals, *d)
-			}
-			msg := notify.NewMessage(notify.KindAlert, alertTitle(vals), vals...)
-			if err := a.nf.Send(ctx, msg); err != nil {
-				deliverErr = err
-				run.Errors = append(run.Errors, err.Error())
-				a.log.Error("delivery incomplete; findings stay pending for the digest", "err", err)
-			} else {
-				for _, d := range candidates {
-					run.Pushed++
-					if err := a.st.MarkPushed(d.Fingerprint); err != nil {
-						a.log.Warn("mark pushed", "err", err)
-					}
+			for _, d := range interrupts {
+				run.Pushed++
+				if err := a.st.MarkPushed(d.Fingerprint); err != nil {
+					a.log.Warn("mark pushed", "err", err)
 				}
+			}
+			if err := a.spendUrgent(now); err != nil {
+				a.log.Warn("charge urgent budget", "err", err)
 			}
 		}
 	}
@@ -345,8 +367,8 @@ func (a *App) RunOnce(ctx context.Context, trigger string) (*Run, error) {
 		a.runs = a.runs[len(a.runs)-n:]
 	}
 	a.log.Info("round complete", "trigger", trigger, "sources", len(run.Sources),
-		"new", run.NewDeals, "stored", run.Stored, "pushed", run.Pushed,
-		"held_quiet", run.HeldQuiet, "dupes", run.Dupes, "verified_official", run.Verified,
+		"new", run.NewDeals, "stored", run.Stored, "urgent_sent", run.Pushed,
+		"urgent_held", run.UrgentHeld, "dupes", run.Dupes, "verified_official", run.Verified,
 		"third_party", run.ThirdParty, "errors", len(run.Errors), "took", run.duration().Round(time.Millisecond))
 	return run, errors.Join(append(a.collectSourceErrors(outcomes), deliverErr)...)
 }
@@ -361,11 +383,11 @@ func (a *App) collectSourceErrors(ocs []fetchOutcome) []error {
 	return errs
 }
 
-func alertTitle(deals []model.Deal) string {
+func urgentTitle(deals []model.Deal) string {
 	if len(deals) == 1 {
 		return notify.Headline(&deals[0])
 	}
-	return fmt.Sprintf("🧾 新羊毛 %d 条", len(deals))
+	return fmt.Sprintf("⚡ 值得立刻看 %d 条", len(deals))
 }
 
 // fetchAll runs every collector concurrently; each has its own timeout and
@@ -415,8 +437,8 @@ func (a *App) sourceBudget() time.Duration {
 }
 
 // judge scores one candidate. kept=false means it never enters history;
-// push=true marks it as alert-worthy.
-func (a *App) judge(d *model.Deal, sc config.Source) (kept, push bool) {
+// urgent=true means it is strong enough to interrupt the day's briefing.
+func (a *App) judge(d *model.Deal, sc config.Source) (kept, urgent bool) {
 	f := a.cfg.Filter
 	d.EnsureFingerprint()
 	if a.st.Seen(d.Fingerprint) {
@@ -489,7 +511,7 @@ func (a *App) judge(d *model.Deal, sc config.Source) (kept, push bool) {
 	if len(f.AllowKeywords) > 0 && !anyContains(lower, f.AllowKeywords) {
 		return false, false
 	}
-	return true, d.Score >= a.cfg.Notify.Feishu.MinScore
+	return true, a.cfg.Notify.Urgent.Enabled && d.Score >= a.cfg.Notify.Urgent.MinScore
 }
 
 func anyContains(hay string, needles []string) bool {
@@ -538,8 +560,23 @@ func (a *App) RecentRuns(n int) []*Run {
 // RecentDeals returns the newest stored findings.
 func (a *App) RecentDeals(n int) []model.Deal { return a.st.Recent(n) }
 
-const digestCursor = "digest:last_sent"
 const dailyCursor = "daily:last_sent"
+
+// dailyWatched marks when this process began honouring the briefing schedule.
+// Without it an install that has never sent a briefing has nothing to compare
+// the slot against, so it can never become due — only SendDaily writes
+// dailyCursor, and only DailyDue lets us reach SendDaily.
+const dailyWatched = "daily:watched_since"
+
+// urgentCursor records what the current local day has spent of its breakthrough
+// budget. Counting per day in one key needs no cleanup and rolls over by itself,
+// which a list of timestamps would.
+const urgentCursor = "urgent:sent"
+
+type urgentBudget struct {
+	Date string `json:"date"` // local calendar day, as seen in the configured zone
+	N    int    `json:"n"`    // breakthrough messages already sent that day
+}
 
 // loc resolves the configured timezone. The service often runs in UTC, so a
 // "09:00" briefing must be computed in the user's zone, not the host's.
@@ -554,7 +591,7 @@ func (a *App) loc() *time.Location {
 
 // slotAt returns today's occurrence of "HH:MM" in the configured zone.
 func (a *App) slotAt(now time.Time, at string) (time.Time, error) {
-	hh, mm, err := parseHHMM(at)
+	hh, mm, err := config.ParseHHMM(at)
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -569,22 +606,22 @@ func (a *App) DailyDue(now time.Time) bool {
 	if !d.Enabled {
 		return false
 	}
-	at := d.At
-	if at == "" {
-		at = "09:00"
-	}
-	sched, err := a.slotAt(now, at)
+	sched, err := a.slotAt(now, d.At)
 	if err != nil {
-		a.log.Warn("daily.at is not HH:MM; the briefing is skipped", "value", at, "err", err)
+		a.log.Warn("daily.at is not HH:MM; the briefing is skipped", "value", d.At, "err", err)
 		return false
 	}
-	last, ok := a.stateTime(dailyCursor)
+	gate, ok := a.stateTime(dailyCursor)
 	if !ok {
-		// Never sent: wait for the next slot. Firing on first start would turn a
-		// "09:00 briefing" into a random message at deploy time.
-		return false
+		if gate, ok = a.stateTime(dailyWatched); !ok {
+			return false
+		}
 	}
-	return !now.In(a.loc()).Before(sched) && last.Before(sched)
+	// The briefing is due once its slot has arrived and the gate is behind it.
+	// For an install that has never sent one the gate is when this process
+	// started watching, so a slot that had already passed at startup is not
+	// backfilled while the next one still fires.
+	return !now.In(a.loc()).Before(sched) && gate.Before(sched)
 }
 
 // DailyPreview applies the briefing's own limits and returns the live offers.
@@ -600,17 +637,29 @@ func (a *App) DailyPreview(now time.Time) []model.Deal {
 	return a.st.Live(minScore, now.UTC(), maxItems)
 }
 
+// BriefingQuality reports how many rows the next briefing would carry, and of
+// those how many have a link we tied back to the vendor. The dashboard gets this
+// instead of reading deal metadata itself, because under the daily model the
+// briefing's rows are the only links the user is actually shown.
+func (a *App) BriefingQuality(now time.Time) (total, verified int) {
+	live := a.DailyPreview(now)
+	for i := range live {
+		if official.IsOfficialKind(live[i].Meta[official.MetaLinkKind]) {
+			verified++
+		}
+	}
+	return len(live), verified
+}
+
 // SendDaily reports every offer that is still live, each with how long we have
 // known it and when it ends. It never marks anything as pushed: this is a
-// snapshot, not a delivery queue.
+// snapshot, not a delivery queue. A day with nothing live still sends one
+// message — "nothing today" is the answer to "is the radar still running?", and
+// consuming the slot is what keeps the schedule from re-firing all day.
 func (a *App) SendDaily(ctx context.Context, now time.Time) error {
 	live := a.DailyPreview(now)
-	if len(live) == 0 {
-		a.log.Info("daily: nothing live to report")
-		return nil
-	}
-	msg := notify.NewMessage(notify.KindDaily,
-		fmt.Sprintf("🌅 羊毛日报 · %d 条仍在效", len(live)), live...)
+	a.verifyForBriefing(ctx, live)
+	msg := notify.NewMessage(notify.KindDaily, dailyTitle(len(live)), live...)
 	// The intro answers the question the reader actually has at 09:00: is there
 	// anything new, or is yesterday still on the table?
 	daily := notify.SplitByAge(live, now)
@@ -622,26 +671,65 @@ func (a *App) SendDaily(ctx context.Context, now time.Time) error {
 	return a.setStateTime(dailyCursor, now.UTC())
 }
 
+func dailyTitle(n int) string {
+	if n == 0 {
+		return "🌅 羊毛日报 · 今天没有在效的"
+	}
+	return fmt.Sprintf("🌅 羊毛日报 · %d 条仍在效", n)
+}
+
+// verifyForBriefing resolves the rows about to be reported. The briefing is what
+// the user acts on, so a link checked here is worth more than one checked for a
+// random round: verdicts cache for a week and the pass is budget-capped, which
+// keeps this a handful of requests once a day.
+func (a *App) verifyForBriefing(ctx context.Context, live []model.Deal) {
+	ptrs := make([]*model.Deal, 0, len(live))
+	for i := range live {
+		ptrs = append(ptrs, &live[i])
+	}
+	if len(ptrs) == 0 {
+		return
+	}
+	before := make(map[string]int, len(ptrs))
+	for _, d := range ptrs {
+		before[d.Fingerprint] = d.Score
+	}
+	a.off.Apply(ctx, ptrs)
+	for _, d := range ptrs {
+		if d.Score == before[d.Fingerprint] {
+			continue
+		}
+		if err := a.st.Save(d); err != nil {
+			a.log.Warn("persist briefing link", "err", err)
+		}
+	}
+	// Resolving a link can move the score, and the report reads best-first.
+	sort.SliceStable(live, func(i, j int) bool {
+		if live[i].Score != live[j].Score {
+			return live[i].Score > live[j].Score
+		}
+		return live[i].Title < live[j].Title
+	})
+}
+
 // DailyInfo describes the morning briefing for the status endpoint.
 type DailyInfo struct {
-	Enabled bool      `json:"enabled"`
-	At      string    `json:"at"`
-	Last    time.Time `json:"last_sent,omitempty"`
-	Next    time.Time `json:"next_due,omitempty"`
+	Enabled   bool      `json:"enabled"`
+	At        string    `json:"at"`
+	Last      time.Time `json:"last_sent,omitempty"`
+	Next      time.Time `json:"next_due,omitempty"`
+	SentToday bool      `json:"sent_today"`
 }
 
 // Daily reports the briefing schedule and where it stands.
 func (a *App) Daily(now time.Time) DailyInfo {
 	d := a.cfg.Notify.Daily
-	at := d.At
-	if at == "" {
-		at = "09:00"
-	}
-	info := DailyInfo{Enabled: d.Enabled, At: at}
+	info := DailyInfo{Enabled: d.Enabled, At: d.At}
 	if t, ok := a.stateTime(dailyCursor); ok {
 		info.Last = t
+		info.SentToday = a.sameLocalDay(t, now)
 	}
-	if sched, err := a.slotAt(now, at); err == nil {
+	if sched, err := a.slotAt(now, d.At); err == nil {
 		next := sched
 		if !now.In(a.loc()).Before(sched) {
 			next = sched.AddDate(0, 0, 1)
@@ -651,72 +739,89 @@ func (a *App) Daily(now time.Time) DailyInfo {
 	return info
 }
 
-// LiveDeals returns the offers still worth claiming, for the panel and CLI.
-func (a *App) LiveDeals(minScore int, now time.Time, limit int) []model.Deal {
-	return a.st.Live(minScore, now, limit)
+// UrgentInfo describes today's breakthrough budget for the status endpoint.
+type UrgentInfo struct {
+	Enabled   bool `json:"enabled"`
+	MinScore  int  `json:"min_score"`
+	MaxPerDay int  `json:"max_per_day"`
+	SentToday int  `json:"sent_today"`
 }
 
-// DigestDue reports whether a batched summary is due now.
-func (a *App) DigestDue(now time.Time) bool {
-	d := a.cfg.Notify.Digest
-	if !d.Enabled {
-		return false
+// Urgent reports how much of today's breakthrough budget is already spent, so
+// the panel can answer "will I hear from this thing again today?".
+func (a *App) Urgent(now time.Time) UrgentInfo {
+	u := a.cfg.Notify.Urgent
+	info := UrgentInfo{Enabled: u.Enabled, MinScore: u.MinScore, MaxPerDay: a.urgentMax()}
+	if day, n := a.urgentSpent(); day == a.localDay(now) {
+		info.SentToday = n
 	}
-	last, ok := a.digestCursor()
-	if !ok {
-		return true
-	}
-	if at := d.At; at != "" {
-		// A fixed daily slot is due once "now" has passed it and the cursor is
-		// still pointing at an earlier time.
-		if sched, err := a.slotAt(now, at); err == nil {
-			return !now.In(a.loc()).Before(sched) && last.Before(sched)
-		} else {
-			a.log.Warn("digest.at is not HH:MM, falling back to the interval", "value", at, "err", err)
-		}
-	}
-	every := d.Every.D()
-	if every <= 0 {
-		every = 6 * time.Hour
-	}
-	return now.Sub(last) >= every
+	return info
 }
 
-// SendDigest pushes the pending sub-threshold findings as one batched message.
-func (a *App) SendDigest(ctx context.Context) error {
-	d := a.cfg.Notify.Digest
-	minScore := d.MinScore
-	if minScore <= 0 {
-		minScore = 45
+// urgentMax is the configured per-day breakthrough ceiling, at least one.
+func (a *App) urgentMax() int {
+	if n := a.cfg.Notify.Urgent.MaxPerDay; n > 0 {
+		return n
 	}
-	maxItems := d.MaxItems
-	if maxItems <= 0 {
-		maxItems = 12
+	return 1
+}
+
+// urgentMaxItems caps how many rows one breakthrough card carries.
+func (a *App) urgentMaxItems() int {
+	if n := a.cfg.Notify.Urgent.MaxItems; n > 0 {
+		return n
 	}
-	last, ok := a.digestCursor()
+	return 5
+}
+
+// urgentLeft reports how many breakthrough messages may still go out today.
+func (a *App) urgentLeft(now time.Time) int {
+	if !a.cfg.Notify.Urgent.Enabled {
+		return 0
+	}
+	if day, n := a.urgentSpent(); day == a.localDay(now) {
+		if left := a.urgentMax() - n; left > 0 {
+			return left
+		}
+		return 0
+	}
+	return a.urgentMax()
+}
+
+// urgentSpent reads the {local day, messages sent} pair recorded for today.
+func (a *App) urgentSpent() (string, int) {
+	b, ok := a.st.GetState(urgentCursor)
 	if !ok {
-		last = time.Now().AddDate(0, 0, -3)
+		return "", 0
 	}
-	pending := a.st.Pending(minScore, last)
-	if len(pending) == 0 {
-		a.log.Debug("digest: nothing pending")
-		return nil
+	var u urgentBudget
+	if json.Unmarshal(b, &u) != nil {
+		return "", 0
 	}
-	sort.SliceStable(pending, func(i, j int) bool { return pending[i].Score > pending[j].Score })
-	if len(pending) > maxItems {
-		pending = pending[:maxItems]
-	}
-	msg := notify.NewMessage(notify.KindDigest,
-		fmt.Sprintf("🧺 羊毛盘点 · %d 条", len(pending)), pending...)
-	if err := a.nf.Send(ctx, msg); err != nil {
-		return err
-	}
-	for _, p := range pending {
-		if err := a.st.MarkPushed(p.Fingerprint); err != nil {
-			a.log.Warn("digest mark pushed", "err", err)
+	return u.Date, u.N
+}
+
+// spendUrgent charges one breakthrough against the local day it went out.
+func (a *App) spendUrgent(now time.Time) error {
+	day := a.localDay(now)
+	spent := 0
+	if b, ok := a.st.GetState(urgentCursor); ok {
+		var u urgentBudget
+		if json.Unmarshal(b, &u) == nil && u.Date == day {
+			spent = u.N
 		}
 	}
-	return a.setDigestCursor(time.Now().UTC())
+	return a.st.PutState(urgentCursor, urgentBudget{Date: day, N: spent + 1})
+}
+
+// localDay is the calendar day in the configured zone, which is what "once a
+// day" has to mean for a service that usually runs in UTC.
+func (a *App) localDay(now time.Time) string {
+	return now.In(a.loc()).Format("2006-01-02")
+}
+
+func (a *App) sameLocalDay(x, y time.Time) bool {
+	return a.localDay(x) == a.localDay(y)
 }
 
 // stateTime reads an RFC3339 timestamp stored under key.
@@ -738,37 +843,6 @@ func (a *App) stateTime(key string) (time.Time, bool) {
 
 func (a *App) setStateTime(key string, t time.Time) error {
 	return a.st.PutState(key, t.Format(time.RFC3339))
-}
-
-func (a *App) digestCursor() (time.Time, bool) {
-	b, ok := a.st.GetState(digestCursor)
-	if !ok {
-		return time.Time{}, false
-	}
-	var s string
-	if json.Unmarshal(b, &s) != nil {
-		return time.Time{}, false
-	}
-	t, err := time.Parse(time.RFC3339, s)
-	if err != nil {
-		return time.Time{}, false
-	}
-	return t, true
-}
-
-func (a *App) setDigestCursor(t time.Time) error {
-	return a.st.PutState(digestCursor, t.Format(time.RFC3339))
-}
-
-func parseHHMM(s string) (int, int, error) {
-	var hh, mm int
-	if _, err := fmt.Sscanf(s, "%d:%d", &hh, &mm); err != nil {
-		return 0, 0, fmt.Errorf("parse %q as HH:MM: %w", s, err)
-	}
-	if hh < 0 || hh > 23 || mm < 0 || mm > 59 {
-		return 0, 0, fmt.Errorf("time %q out of range", s)
-	}
-	return hh, mm, nil
 }
 
 // NotifyTest sends a self-check message through every configured backend.

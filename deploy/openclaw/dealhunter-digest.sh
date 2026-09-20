@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 羊毛盘点：直接取 Deal-Hunter 的 Markdown 摘要，可原样转发到群里。
+# 最近一份消息：取 Deal-Hunter 落盘的 Markdown 摘要（日报或插队），可原样转发到群里。
 # 只读本地 HTTP，不消耗模型 token，不接触任何凭据。
 set -euo pipefail
 BASE="${DEAL_HUNTER_BASE:-http://127.0.0.1:8765}"

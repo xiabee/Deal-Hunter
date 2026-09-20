@@ -137,14 +137,6 @@ func (s *Store) Seen(fp string) bool {
 	return ok
 }
 
-// Pushed reports whether this fingerprint already reached the user.
-func (s *Store) Pushed(fp string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, ok := s.high[fp]
-	return ok
-}
-
 // Save appends a deal to the log and records its fingerprint.
 func (s *Store) Save(d *model.Deal) error {
 	d.EnsureFingerprint()
@@ -345,27 +337,6 @@ func deadline(d model.Deal) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return t, true
-}
-
-// Pending returns deals that scored at or above min but were never pushed.
-func (s *Store) Pending(min int, since time.Time) []model.Deal {
-	var out []model.Deal
-	for _, d := range s.Recent(20000) {
-		if d.Meta["dup_of"] != "" {
-			continue // a repost of something already reported
-		}
-		if d.Score < min {
-			continue
-		}
-		if !since.IsZero() && d.DiscoveredAt.Before(since) {
-			continue
-		}
-		if s.Pushed(d.Fingerprint) {
-			continue
-		}
-		out = append(out, d)
-	}
-	return out
 }
 
 // GetState reads a source cursor.

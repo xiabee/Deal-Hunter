@@ -20,14 +20,16 @@ import (
 type Kind string
 
 const (
-	KindAlert  Kind = "alert"
-	KindDigest Kind = "digest"
+	// KindUrgent may interrupt the day's briefing; KindDaily is the one message
+	// a day that every other finding waits for.
+	KindUrgent Kind = "urgent"
 	KindDaily  Kind = "daily"
 	KindTest   Kind = "test"
 	KindError  Kind = "error"
 )
 
-// Message is one delivery: a single deal alert or a batched digest.
+// Message is one delivery: the daily briefing, or a finding urgent enough to
+// interrupt it.
 type Message struct {
 	Kind      Kind
 	Title     string
@@ -74,10 +76,12 @@ func (f *FanOut) Names() []string {
 // Len reports how many backends are wired up.
 func (f *FanOut) Len() int { return len(f.items) }
 
-// Send delivers m to all backends. Failure semantics matter: a finding counts
-// as delivered if ANY backend accepted it, so a broken secondary channel (for
-// example a relay awaiting credentials) cannot make alerts re-fire every round
-// or pile up in the digest. Only an all-backend failure is reported.
+// Send delivers m to all backends. A finding counts as delivered if ANY backend
+// accepted it, so a broken secondary channel cannot make the same message go out
+// twice — with one briefing a day, a duplicate is a worse failure than a plain
+// one. An all-backend failure is reported so the schedule can retry; a partial
+// one is only logged, which means the day's slot stays spent even if one channel
+// missed the message.
 func (f *FanOut) Send(ctx context.Context, m Message) error {
 	if len(f.items) == 0 {
 		return errors.New("notify: no backends configured")
@@ -264,7 +268,7 @@ func LinkMark(kind string) string {
 	return ""
 }
 
-// Icon maps a category to an emoji used in cards and digests.
+// Icon maps a category to an emoji used in cards and the briefing.
 func Icon(d *model.Deal) string {
 	if d.IsFree {
 		return "🆓"
@@ -280,7 +284,7 @@ func Icon(d *model.Deal) string {
 	return "🔎"
 }
 
-// Headline builds the card/digest title for a single-deal alert.
+// Headline builds the card title for a single finding.
 func Headline(d *model.Deal) string {
 	if d.IsFree {
 		return "🆓 免费 · " + truncateRunes(d.Title, 48)

@@ -92,7 +92,7 @@ func renderMarkdown(m Message) string {
 	// Same one-line shape as the card: everything else is in latest.json.
 	for i := range m.Deals {
 		d := &m.Deals[i]
-		fmt.Fprintf(&b, "- %s · `%s`\n", alertLine(d), d.Source)
+		fmt.Fprintf(&b, "- %s · `%s`\n", dealLine(d), d.Source)
 		if site := VendorSite(d); site != "" {
 			fmt.Fprintf(&b, "  官网：%s\n", site)
 		}

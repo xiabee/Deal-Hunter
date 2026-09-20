@@ -31,20 +31,19 @@ import (
 	"github.com/xiabee/deal-hunter/internal/version"
 )
 
-const usage = `Deal-Hunter — 全网羊毛雷达（Go 单二进制）
+const usage = `Deal-Hunter — 全网羊毛雷达（每天一份日报）
 
 用法：
   dealhunter [全局参数] <命令> [命令参数]
 
 命令：
-  run           常驻运行：定时采集 + 推送 + 只读状态服务
+  run           常驻运行：定时采集 + 每天一份日报 + 只读状态服务
   once          立刻跑一轮后退出（-serve 可同时拉起 API）
   serve         只提供只读状态 API，不采集
   probe         采集单个信息源并打印结果（不写库、不推送）
   sources       列出全部信息源
   deals         打印最近入库的发现
-  digest        立刻发送/落盘一次盘点摘要（待推送队列）
-  daily         立刻发送早报（当前仍在效的免费/优惠）；-dry 只列出不发送
+  daily         立刻发送今天的日报（占用当天那一份）；-dry 只列出不发送
   notify-test   向所有已配置通道发送自检消息
   doctor        配置、密钥、目录、外连可达性体检
   secretscan    扫描仓库中的凭证与内网拓扑信息（开源发布门禁）
@@ -97,7 +96,6 @@ func cli(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		"probe":       func(c context.Context, a []string) int { return cmdProbe(c, cfg, log, stdout, a) },
 		"sources":     func(_ context.Context, _ []string) int { return cmdSources(cfg, stdout) },
 		"deals":       func(_ context.Context, a []string) int { return cmdDeals(cfg, stdout, a) },
-		"digest":      func(c context.Context, _ []string) int { return cmdDigest(c, cfg, log, stdout) },
 		"daily":       func(c context.Context, a []string) int { return cmdDaily(c, cfg, log, stdout, a) },
 		"notify-test": func(c context.Context, _ []string) int { return cmdNotifyTest(c, cfg, log, stdout) },
 		"doctor":      func(c context.Context, a []string) int { return cmdDoctor(c, cfg, log, stdout, a) },
@@ -432,7 +430,9 @@ func cmdDeals(cfg *config.Config, stdout io.Writer, args []string) int {
 	return 0
 }
 
-// cmdDaily sends the morning briefing, or lists it with -dry.
+// cmdDaily sends the day's briefing, or lists it with -dry. Sending one here
+// consumes today's slot: the schedule will not send a second one until the next
+// one arrives.
 func cmdDaily(ctx context.Context, cfg *config.Config, log *slog.Logger, stdout io.Writer, args []string) int {
 	fs := flag.NewFlagSet("daily", flag.ContinueOnError)
 	fs.SetOutput(stdout)
@@ -450,10 +450,14 @@ func cmdDaily(ctx context.Context, cfg *config.Config, log *slog.Logger, stdout 
 	if *dry {
 		live := app.DailyPreview(now)
 		info := app.Daily(now)
-		fmt.Fprintf(stdout, "当前在效 %d 条 · 日报时间 %s（%s）\n", len(live), info.At, cfg.Timezone)
+		fmt.Fprintf(stdout, "当前在效 %d 条 · 日报时间 %s（%s）· 今日%s\n",
+			len(live), info.At, cfg.Timezone, map[bool]string{true: "已发过", false: "还没发"}[info.SentToday])
 		for _, d := range live {
 			dl := d
 			fmt.Fprintf(stdout, "  %s\n", notify.DailyLine(&dl, now))
+		}
+		if len(live) == 0 {
+			fmt.Fprintln(stdout, "  （今天没有在效的羊毛，日报仍会发这一条空报）")
 		}
 		return 0
 	}
@@ -461,22 +465,7 @@ func cmdDaily(ctx context.Context, cfg *config.Config, log *slog.Logger, stdout 
 		fmt.Fprintf(stdout, "日报发送失败：%v\n", err)
 		return 1
 	}
-	fmt.Fprintln(stdout, "✓ 日报已发送（或当前无在效内容）")
-	return 0
-}
-
-func cmdDigest(ctx context.Context, cfg *config.Config, log *slog.Logger, stdout io.Writer) int {
-	app, err := pipeline.New(cfg, log)
-	if err != nil {
-		fmt.Fprintf(stdout, "启动失败：%v\n", err)
-		return 1
-	}
-	defer app.Close()
-	if err := app.SendDigest(ctx); err != nil {
-		fmt.Fprintf(stdout, "摘要发送失败：%v\n", err)
-		return 1
-	}
-	fmt.Fprintln(stdout, "✓ 摘要已发送（或无待推送内容）")
+	fmt.Fprintln(stdout, "✓ 日报已发送，今天的这一份用掉了")
 	return 0
 }
 
@@ -513,7 +502,12 @@ func cmdDoctor(ctx context.Context, cfg *config.Config, log *slog.Logger, stdout
 		checks = append(checks, check{Name: name, Status: status, Detail: detail})
 	}
 
-	add("config", "ok", fmt.Sprintf("interval=%s alert_min=%d store_min=%d", cfg.Interval, cfg.Notify.Feishu.MinScore, cfg.Filter.MinScore))
+	urgent := "关"
+	if cfg.Notify.Urgent.Enabled {
+		urgent = fmt.Sprintf("≥%d，每天最多 %d 条", cfg.Notify.Urgent.MinScore, cfg.Notify.Urgent.MaxPerDay)
+	}
+	add("config", "ok", fmt.Sprintf("interval=%s 日报=%s（%s，地板 %d 分）突破=%s",
+		cfg.Interval, cfg.Notify.Daily.At, cfg.Timezone, cfg.Notify.Daily.MinScore, urgent))
 	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
 		add("data_dir", "fail", err.Error())
 	} else if probe := filepath.Join(cfg.DataDir, ".write-test"); os.WriteFile(probe, []byte("x"), 0o600) != nil {
@@ -671,8 +665,8 @@ func printRun(w io.Writer, run *pipeline.Run) {
 		fmt.Fprintln(w, "本轮未执行")
 		return
 	}
-	fmt.Fprintf(w, "\n本轮 %s：新增 %d · 入库 %d · 推送 %d · 静默保留 %d · 用时 %s\n",
-		run.Trigger, run.NewDeals, run.Stored, run.Pushed, run.HeldQuiet,
+	fmt.Fprintf(w, "\n本轮 %s：新增 %d · 入库 %d · 突破推送 %d · 转入日报 %d · 用时 %s\n",
+		run.Trigger, run.NewDeals, run.Stored, run.Pushed, run.UrgentHeld,
 		run.FinishedAt.Sub(run.StartedAt).Round(time.Millisecond))
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(tw, "  信息源\t命中\t入库\t耗时\t状态")

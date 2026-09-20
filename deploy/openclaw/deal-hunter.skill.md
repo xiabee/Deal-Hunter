@@ -3,7 +3,8 @@
 让 OpenClaw 助手（已连接飞书）随时读取本机 **Deal-Hunter** 采集到的折扣与免费额度情报。
 
 **强约束：**只读本机 HTTP 接口，不调用模型、不读写 OpenClaw 凭据、不修改 Deal-Hunter 配置。
-主动播报由 Deal-Hunter 自己通过飞书群机器人完成，本技能只负责「被问到时答得准」。
+主动播报由 Deal-Hunter 自己完成：**每天一份日报**，只有高分发现会当场插队一条；
+本技能只负责「被问到时答得准」。
 
 ## 前置条件
 
@@ -14,17 +15,17 @@
 
 | 脚本 | 作用 |
 |---|---|
-| `dealhunter-digest.sh` | 最近一轮盘点（Markdown，适合直接转发到群） |
+| `dealhunter-digest.sh` | 最近发出的那一份消息（Markdown，适合直接转发到群） |
 | `dealhunter-deals.sh [min] [limit]` | 高分羊毛清单，默认 min=60 limit=10 |
-| `dealhunter-status.sh` | 服务健康度：采集轮次、入库量、推送通道 |
+| `dealhunter-status.sh` | 服务健康度：采集轮次、入库量、今日日报是否已发、通道就绪情况 |
 
 ## 底层接口（全部 GET，只读）
 
 | 接口 | 说明 |
 |---|---|
-| `/api/v1/digest` | Markdown 摘要，可直接朗读/转发 |
+| `/api/v1/digest` | 最近一份消息的 Markdown（日报或插队），可直接朗读/转发 |
 | `/api/v1/deals?min=&limit=&category=&q=` | 结构化结果：`{count, deals:[{title,url,score,source,vendors,is_free,...}]}` |
-| `/api/v1/status` | 运行状态、阈值、信息源统计、待推送数量 |
+| `/api/v1/status` | 运行状态、日报排程与今日是否已发、突破预算余量、信息源统计、日报将收录的条数 |
 | `/api/v1/sources` | 各信息源最近一轮命中/耗时/错误 |
 | `/healthz` | 存活探针 |
 

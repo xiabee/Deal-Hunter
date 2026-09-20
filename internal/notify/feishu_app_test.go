@@ -107,7 +107,7 @@ func TestAppDeliverySendsCard(t *testing.T) {
 	if got := f.ReceiveIDType(); got != "open_id" {
 		t.Errorf("default receive_id_type = %s", got)
 	}
-	msg := NewMessage(KindAlert, Headline(&[]model.Deal{appDeal()}[0]), appDeal())
+	msg := NewMessage(KindUrgent, Headline(&[]model.Deal{appDeal()}[0]), appDeal())
 	if err := f.Send(context.Background(), msg); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestAppTokenIsCachedThenRefreshed(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 0; i < 3; i++ {
-		if err := f.Send(ctx, NewMessage(KindAlert, "t", appDeal())); err != nil {
+		if err := f.Send(ctx, NewMessage(KindUrgent, "t", appDeal())); err != nil {
 			t.Fatalf("send %d: %v", i, err)
 		}
 	}
@@ -132,7 +132,7 @@ func TestAppTokenIsCachedThenRefreshed(t *testing.T) {
 		t.Errorf("token must be cached across sends, mints=%d", got)
 	}
 	f.tokenTo = time.Now().Add(-time.Second)
-	if err := f.Send(ctx, NewMessage(KindAlert, "t", appDeal())); err != nil {
+	if err := f.Send(ctx, NewMessage(KindUrgent, "t", appDeal())); err != nil {
 		t.Fatal(err)
 	}
 	if got := atomic.LoadInt32(&calls); got != 2 {
@@ -163,7 +163,7 @@ func TestAppFallsBackToTextWhenCardRejected(t *testing.T) {
 	defer srv.Close()
 
 	f, _ := NewFeishu(appCfg(srv.URL))
-	if err := f.Send(context.Background(), NewMessage(KindAlert, "标题", appDeal())); err != nil {
+	if err := f.Send(context.Background(), NewMessage(KindUrgent, "标题", appDeal())); err != nil {
 		t.Fatalf("a rejected card should fall back instead of dropping the finding: %v", err)
 	}
 	if len(seen) != 2 || seen[0] != "interactive" || seen[1] != "text" {
@@ -177,7 +177,7 @@ func TestAppReportsUpstreamRejectionWithoutLeakingSecrets(t *testing.T) {
 	defer srv.Close()
 	f, _ := NewFeishu(appCfg(srv.URL))
 
-	err := f.Send(context.Background(), NewMessage(KindAlert, "标题", appDeal()))
+	err := f.Send(context.Background(), NewMessage(KindUrgent, "标题", appDeal()))
 	if err == nil {
 		t.Fatal("expected an error")
 	}
@@ -199,7 +199,7 @@ func TestAppBadSecretIsReported(t *testing.T) {
 	cfg.AppSecret = "wrong-value"
 	f, _ := NewFeishu(cfg)
 
-	err := f.Send(context.Background(), NewMessage(KindAlert, "t", appDeal()))
+	err := f.Send(context.Background(), NewMessage(KindUrgent, "t", appDeal()))
 	if err == nil || !strings.Contains(err.Error(), "token code=") {
 		t.Fatalf("expected a token mint failure, got %v", err)
 	}
@@ -221,7 +221,7 @@ func TestAppRequiresMessageID(t *testing.T) {
 	}))
 	defer srv.Close()
 	f, _ := NewFeishu(appCfg(srv.URL))
-	if err := f.Send(context.Background(), NewMessage(KindAlert, "t", appDeal())); err == nil {
+	if err := f.Send(context.Background(), NewMessage(KindUrgent, "t", appDeal())); err == nil {
 		t.Fatal("a response without a message id must be an error")
 	}
 }
@@ -238,7 +238,7 @@ func TestModePreferenceAndUnconfigured(t *testing.T) {
 	if none.Mode() != "" || none.Ready() {
 		t.Error("without credentials there is no mode")
 	}
-	err := none.Send(context.Background(), NewMessage(KindAlert, "t"))
+	err := none.Send(context.Background(), NewMessage(KindUrgent, "t"))
 	if err == nil || !strings.Contains(err.Error(), config.EnvFeishuAppID) {
 		t.Errorf("the error should list the app env vars as an alternative: %v", err)
 	}

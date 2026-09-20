@@ -54,15 +54,15 @@ func TestOpenRoundTripAndDedup(t *testing.T) {
 	}
 }
 
-func TestTitleIndexFoldsRepostsAndKeepsThemOutOfTheDigest(t *testing.T) {
+func TestTitleIndexFoldsRepostsOutOfTheBriefing(t *testing.T) {
 	st, err := Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer st.Close()
 
-	first := &model.Deal{URL: "https://linux.do/t/1", Title: "[分享创造] 做了一个家用 WMS", Score: 71, DiscoveredAt: time.Now().UTC()}
-	repost := &model.Deal{URL: "https://www.v2ex.com/t/2", Title: "做了一个家用 WMS", Score: 68, DiscoveredAt: time.Now().UTC()}
+	first := &model.Deal{URL: "https://linux.do/t/1", Title: "[分享创造] 做了一个家用 WMS", Score: 71, IsFree: true, DiscoveredAt: time.Now().UTC()}
+	repost := &model.Deal{URL: "https://www.v2ex.com/t/2", Title: "做了一个家用 WMS", Score: 68, IsFree: true, DiscoveredAt: time.Now().UTC()}
 	if err := st.Save(first); err != nil {
 		t.Fatal(err)
 	}
@@ -74,15 +74,14 @@ func TestTitleIndexFoldsRepostsAndKeepsThemOutOfTheDigest(t *testing.T) {
 		t.Fatalf("repost should clash with the first finding, got %q,%v", fp, ok)
 	}
 
-	// A repeat is still recorded, but tagged, and never resurfaces in a digest.
+	// A repeat is still recorded, but tagged, and never reaches the briefing.
 	repost.Meta = map[string]string{"dup_of": first.Fingerprint}
 	if err := st.Save(repost); err != nil {
 		t.Fatal(err)
 	}
-	for _, d := range st.Pending(50, time.Time{}) {
-		if d.Fingerprint == repost.Fingerprint {
-			t.Error("a repost must not be queued for the digest")
-		}
+	live := st.Live(50, time.Now().UTC(), 0)
+	if len(live) != 1 || live[0].Fingerprint != first.Fingerprint {
+		t.Errorf("only the first finding should be reported, got %+v", live)
 	}
 	if got := st.Stats().Duplicates; got != 1 {
 		t.Errorf("Duplicates = %d, want 1", got)
@@ -110,8 +109,8 @@ func TestTitleIndexFoldsRepostsAndKeepsThemOutOfTheDigest(t *testing.T) {
 func TestRepostsWithoutTagsAreFoldedWhenLoaded(t *testing.T) {
 	dir := t.TempDir()
 	rows := []string{
-		`{"fingerprint":"a1","url":"https://linux.do/t/1","title":"智谱 GLM-5.3-flash 限时免费开放","source":"a","score":80,"discovered_at":"2026-09-19T01:00:00Z"}`,
-		`{"fingerprint":"b2","url":"https://www.v2ex.com/t/2","title":"【公告】智谱 GLM-5.3-flash 限时免费开放！","source":"b","score":74,"discovered_at":"2026-09-19T02:00:00Z"}`,
+		`{"fingerprint":"a1","url":"https://linux.do/t/1","title":"智谱 GLM-5.3-flash 限时免费开放","source":"a","score":80,"is_free":true,"discovered_at":"2026-09-19T01:00:00Z"}`,
+		`{"fingerprint":"b2","url":"https://www.v2ex.com/t/2","title":"【公告】智谱 GLM-5.3-flash 限时免费开放！","source":"b","score":74,"is_free":true,"discovered_at":"2026-09-19T02:00:00Z"}`,
 	}
 	if err := os.WriteFile(filepath.Join(dir, "deals.jsonl"), []byte(strings.Join(rows, "\n")+"\n"), 0o640); err != nil {
 		t.Fatal(err)
@@ -138,9 +137,9 @@ func TestRepostsWithoutTagsAreFoldedWhenLoaded(t *testing.T) {
 	if st := s.Stats(); st.Duplicates != 1 {
 		t.Errorf("Duplicates = %d, want 1", st.Duplicates)
 	}
-	for _, d := range s.Pending(50, time.Time{}) {
+	for _, d := range s.Live(50, time.Now().UTC(), 0) {
 		if d.Fingerprint == "b2" {
-			t.Error("a folded legacy repost must not reach the digest")
+			t.Error("a folded legacy repost must not reach the briefing")
 		}
 	}
 }
@@ -240,12 +239,15 @@ func TestStateCursorRoundTrip(t *testing.T) {
 	}
 }
 
-func TestMarkPushedDrivesPending(t *testing.T) {
-	s, err := Open(t.TempDir())
+// The breakthrough channel is the only thing that marks a finding delivered, and
+// a day's budget is cheap next to reporting the same offer twice. So the flag has
+// to survive a restart, not just live in memory.
+func TestMarkPushedSurvivesReopen(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
 	high := deal("高价值羊毛", "https://example.com/high", 90)
 	low := deal("小羊毛", "https://example.com/low", 50)
 	for _, d := range []*model.Deal{high, low} {
@@ -253,31 +255,36 @@ func TestMarkPushedDrivesPending(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got := s.Pending(60, time.Time{}); len(got) != 1 || got[0].Title != "高价值羊毛" {
-		t.Fatalf("Pending(60) = %+v", got)
-	}
 	if err := s.MarkPushed(high.Fingerprint); err != nil {
 		t.Fatalf("MarkPushed: %v", err)
 	}
-	if !s.Pushed(high.Fingerprint) {
-		t.Fatal("should be marked pushed")
+	if got := s.Stats().PushedSeen; got != 1 {
+		t.Fatalf("PushedSeen = %d, want 1", got)
 	}
-	if got := s.Pending(60, time.Time{}); len(got) != 0 {
-		t.Fatalf("pushed item must leave the pending queue: %+v", got)
+	s.Close()
+
+	again, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
 	}
-	// The pushed flag must be visible on the collapsed record.
-	all := s.Recent(10)
-	if len(all) != 2 {
-		t.Fatalf("expected 2 collapsed records, got %d", len(all))
-	}
-	var found bool
-	for _, d := range all {
-		if d.Fingerprint == high.Fingerprint && d.Meta["pushed"] == "true" {
-			found = true
+	defer again.Close()
+	var pushed, plain int
+	for _, d := range again.Recent(10) {
+		switch d.Meta["pushed"] {
+		case "true":
+			pushed++
+			if d.Fingerprint != high.Fingerprint {
+				t.Errorf("the wrong record carries the pushed flag: %+v", d)
+			}
+		default:
+			plain++
 		}
 	}
-	if !found {
-		t.Error("pushed flag should be persisted on the deal record")
+	if pushed != 1 || plain != 1 {
+		t.Errorf("after reopen pushed=%d plain=%d, want 1 and 1", pushed, plain)
+	}
+	if got := again.Stats().PushedSeen; got != 1 {
+		t.Errorf("PushedSeen after reopen = %d, want 1", got)
 	}
 }
 
@@ -303,7 +310,13 @@ func TestCompactCollapsesAndKeepsLatest(t *testing.T) {
 	if err := s.Save(deal("three", "https://example.com/3", 80)); err != nil {
 		t.Fatalf("Save after compact must still work: %v", err)
 	}
-	if !s.Pushed(d1.Fingerprint) {
+	var kept bool
+	for _, d := range s.Recent(10) {
+		if d.Fingerprint == d1.Fingerprint && d.Meta["pushed"] == "true" {
+			kept = true
+		}
+	}
+	if !kept {
 		t.Error("compact must preserve the pushed marker")
 	}
 	if got := len(s.Recent(10)); got != 3 {

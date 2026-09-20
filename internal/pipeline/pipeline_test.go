@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -59,6 +60,16 @@ func (c *cannedFetcher) count(u string) int {
 	return c.calls[u]
 }
 
+// set replaces one canned body, so a test can make the next round see news.
+func (c *cannedFetcher) set(u string, body []byte) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.byURL == nil {
+		c.byURL = map[string][]byte{}
+	}
+	c.byURL[u] = body
+}
+
 type spyNotifier struct {
 	mu   sync.Mutex
 	msgs []notify.Message
@@ -107,6 +118,14 @@ func feedBody(t *testing.T) []byte {
 	return b
 }
 
+func titlesOf(deals []model.Deal) []string {
+	out := make([]string, 0, len(deals))
+	for _, d := range deals {
+		out = append(out, d.Title)
+	}
+	return out
+}
+
 func testApp(t *testing.T, f sources.Fetcher, spy *spyNotifier, mutate func(*config.Config)) *App {
 	t.Helper()
 	cfg := config.Default()
@@ -115,9 +134,10 @@ func testApp(t *testing.T, f sources.Fetcher, spy *spyNotifier, mutate func(*con
 	cfg.Notify.Console = false
 	cfg.Notify.OpenClaw.Enabled = false
 	cfg.Notify.Feishu.Enabled = false
-	cfg.Notify.Feishu.MinScore = 60
-	cfg.Notify.Feishu.MaxPerRun = 6
-	cfg.Notify.Digest.Enabled = false
+	// A round interrupts nothing at this gate. Tests that want a breakthrough
+	// lower it, so "the briefing is the only scheduled message" stays the
+	// default every other case runs under.
+	cfg.Notify.Urgent.MinScore = 101
 	cfg.Sources = []config.Source{{Name: "rss", Kind: config.KindRSS, URL: feedURL, Trust: 8}}
 	if mutate != nil {
 		mutate(cfg)
@@ -130,7 +150,18 @@ func testApp(t *testing.T, f sources.Fetcher, spy *spyNotifier, mutate func(*con
 	return app
 }
 
-func TestRunOnceStoresScoresAndAlertsOnce(t *testing.T) {
+// nextFreeModelFeed is the same source one round later with one extra event: a
+// different link and a different model name, so the collector sees a new finding
+// rather than a repost of one it already has.
+func nextFreeModelFeed(t *testing.T) []byte {
+	b := feedBody(t)
+	b = bytes.ReplaceAll(b, []byte("GLM-5.3-flash"), []byte("GLM-5.4-flash"))
+	return bytes.Replace(b, []byte("news/glm-free"), []byte("news/glm-5-4-free"), 1)
+}
+
+// The daily model's core promise: a round that finds something good still sends
+// nothing. Findings wait for the briefing unless they clear the urgent gate.
+func TestRunOnceStoresFindingsWithoutSending(t *testing.T) {
 	f := &cannedFetcher{byURL: map[string][]byte{feedURL: feedBody(t)}}
 	spy := &spyNotifier{}
 	app := testApp(t, f, spy, nil)
@@ -142,32 +173,25 @@ func TestRunOnceStoresScoresAndAlertsOnce(t *testing.T) {
 	if run.Stored == 0 {
 		t.Fatalf("nothing stored: %+v", run)
 	}
-	if run.Pushed == 0 || spy.count() != 1 {
-		t.Fatalf("expected one alert message, pushed=%d spy=%d", run.Pushed, spy.count())
+	if spy.count() != 0 || run.Pushed != 0 {
+		t.Fatalf("a round must not send below the urgent gate: messages=%d pushed=%d", spy.count(), run.Pushed)
 	}
-	msg := spy.all()[0]
-	if msg.Kind != notify.KindAlert {
-		t.Errorf("kind = %s", msg.Kind)
-	}
-	var bestScore int
+
 	var sawGLM bool
-	for i := range msg.Deals {
-		d := &msg.Deals[i]
-		if d.Score > bestScore {
-			bestScore = d.Score
+	for _, d := range app.RecentDeals(50) {
+		if !strings.Contains(d.Title, "GLM-5.3-flash") {
+			continue
 		}
-		if strings.Contains(d.Title, "GLM-5.3-flash") {
-			sawGLM = true
-			if !d.IsFree || len(d.Offers) == 0 || len(d.ScoreWhy) == 0 {
-				t.Errorf("deal not annotated: %+v", d)
-			}
+		sawGLM = true
+		if !d.IsFree || len(d.Offers) == 0 || len(d.ScoreWhy) == 0 {
+			t.Errorf("deal stored without annotation: %+v", d)
+		}
+		if d.Score < 60 {
+			t.Errorf("a free named model should score high, got %d", d.Score)
 		}
 	}
 	if !sawGLM {
-		t.Errorf("the free GLM item should be alerted: %+v", msg.Deals)
-	}
-	if bestScore < 60 {
-		t.Errorf("alert score %d below the configured threshold", bestScore)
+		t.Error("the free GLM item should be in the store")
 	}
 	if len(run.Sources) != 1 || run.Sources[0].Found != 5 || run.Sources[0].Err != "" {
 		t.Errorf("source report wrong: %+v", run.Sources)
@@ -176,17 +200,69 @@ func TestRunOnceStoresScoresAndAlertsOnce(t *testing.T) {
 		t.Errorf("run metadata wrong: %+v", run)
 	}
 
-	// A second round must not re-alert the same findings.
-	spy.reset(nil)
+	// A second round must not re-store the same findings.
 	run2, err := app.RunOnce(context.Background(), "unit2")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if run2.NewDeals != 0 || run2.Pushed != 0 || spy.count() != 0 {
+	if run2.NewDeals != 0 || spy.count() != 0 {
 		t.Fatalf("dedup failed: %+v spy=%d", run2, spy.count())
 	}
 	if f.count(feedURL) != 2 {
 		t.Errorf("expected 2 fetches, got %d", f.count(feedURL))
+	}
+}
+
+// A finding above the urgent gate interrupts at once, and the day's single
+// interrupt is then spent: the next big thing waits for the briefing rather than
+// turning the breakthrough channel back into the old firehose. Nothing is lost
+// by waiting, because the briefing re-reads the whole store.
+func TestUrgentFindingInterruptsOncePerDay(t *testing.T) {
+	f := &cannedFetcher{byURL: map[string][]byte{feedURL: feedBody(t)}}
+	spy := &spyNotifier{}
+	app := testApp(t, f, spy, func(c *config.Config) { c.Notify.Urgent.MinScore = 60 })
+	now := time.Now()
+
+	if _, err := app.RunOnce(context.Background(), "unit"); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if spy.count() != 1 {
+		t.Fatalf("one breakthrough expected, got %d messages", spy.count())
+	}
+	msg := spy.all()[0]
+	if msg.Kind != notify.KindUrgent {
+		t.Errorf("kind = %s", msg.Kind)
+	}
+	if !strings.Contains(strings.Join(titlesOf(msg.Deals), "|"), "GLM-5.3-flash") {
+		t.Errorf("the free model should be the interrupt: %+v", msg.Deals)
+	}
+	if got := app.Urgent(now).SentToday; got != 1 {
+		t.Fatalf("today's budget should read 1 sent, got %d", got)
+	}
+
+	spy.reset(nil)
+	f.set(feedURL, nextFreeModelFeed(t))
+	run2, err := app.RunOnce(context.Background(), "unit2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run2.NewDeals == 0 {
+		t.Fatal("the second feed should bring a new finding")
+	}
+	if run2.Pushed != 0 || spy.count() != 0 {
+		t.Fatalf("the day already spent its interrupt: pushed=%d messages=%d", run2.Pushed, spy.count())
+	}
+	if run2.UrgentHeld == 0 {
+		t.Error("the waiting finding must be reported as held, not quietly dropped")
+	}
+	var waits bool
+	for _, d := range app.DailyPreview(now) {
+		if strings.Contains(d.Title, "GLM-5.4-flash") {
+			waits = true
+		}
+	}
+	if !waits {
+		t.Error("a held finding must show up in the next briefing")
 	}
 }
 
@@ -214,7 +290,10 @@ func TestRunOnceRewritesLinksToOfficialPages(t *testing.T) {
 		byPrefix: map[string][]byte{"https://lite.duckduckgo.com/lite/": searchBody},
 	}
 	spy := &spyNotifier{}
-	app := testApp(t, f, spy, nil)
+	// The gate is lowered so this round interrupts: link resolution over a batch
+	// happens for the findings about to be reported, which is now the briefing's
+	// own rows or an urgent interrupt.
+	app := testApp(t, f, spy, func(c *config.Config) { c.Notify.Urgent.MinScore = 60 })
 	run, err := app.RunOnce(context.Background(), "unit")
 	if err != nil {
 		t.Fatalf("RunOnce: %v", err)
@@ -276,7 +355,7 @@ func TestRunOnceRewritesLinksToOfficialPages(t *testing.T) {
 		t.Error("the plain-text form must carry the same link as the card")
 	}
 
-	// The dashboard and the digest read from the store, so the resolved link has
+	// The dashboard and the briefing read from the store, so the resolved link has
 	// to be persisted, not just sent.
 	var stored *model.Deal
 	deals := app.RecentDeals(50)
@@ -294,12 +373,12 @@ func TestRunOnceRewritesLinksToOfficialPages(t *testing.T) {
 }
 
 // Verdicts that cost nothing apply to every stored deal, not just the handful
-// that reach the alert queue, so a badge in the panel means the same thing as
-// one in the card.
-func TestCheapLabelsApplyBelowThreshold(t *testing.T) {
+// that interrupt, so a badge in the panel means the same thing as one in the
+// briefing.
+func TestCheapLabelsCoverRowsThatNeverInterrupt(t *testing.T) {
 	f := &cannedFetcher{byURL: map[string][]byte{feedURL: feedBody(t)}}
 	spy := &spyNotifier{}
-	app := testApp(t, f, spy, func(c *config.Config) { c.Notify.Feishu.MinScore = 101 })
+	app := testApp(t, f, spy, nil)
 	run, err := app.RunOnce(context.Background(), "unit")
 	if err != nil {
 		t.Fatal(err)
@@ -337,6 +416,7 @@ func TestRepostOfTheSameAnnouncementIsFolded(t *testing.T) {
 	}}
 	spy := &spyNotifier{}
 	app := testApp(t, f, spy, func(c *config.Config) {
+		c.Notify.Urgent.MinScore = 60
 		c.Sources = []config.Source{
 			{Name: "a", Kind: config.KindRSS, URL: aURL, Trust: 8},
 			{Name: "b", Kind: config.KindRSS, URL: bURL, Trust: 5},
@@ -394,7 +474,7 @@ func TestDailyBriefingFollowsTheConfiguredZoneAndSendsOnce(t *testing.T) {
 
 	before := at.Add(-time.Minute) // 08:59 Beijing
 	if app.DailyDue(before) || app.DailyDue(at) {
-		t.Error("a briefing that was never sent must wait for its slot, not fire on first start")
+		t.Error("a slot that passed before this process started watching is not backfilled")
 	}
 	// Pretend yesterday's briefing happened, so today's slot is genuinely due.
 	if err := app.SendDaily(context.Background(), at.AddDate(0, 0, -1)); err != nil {
@@ -428,9 +508,12 @@ func TestDailyBriefingFollowsTheConfiguredZoneAndSendsOnce(t *testing.T) {
 	if !strings.Contains(notify.DailyLine(&m.Deals[0], at), "已收录 3 天") {
 		t.Error("the briefing must say how long the offer has been known")
 	}
-	// A snapshot does not consume the alert queue.
-	if got := app.Store().Pending(45, time.Time{}); len(got) != 2 {
-		t.Errorf("daily must not mark deals pushed, pending = %d", len(got))
+	// A snapshot is not a delivery: listing an offer in the briefing must not
+	// mark it delivered, or a later breakthrough would skip it as already sent.
+	for _, d := range app.RecentDeals(10) {
+		if d.Meta["pushed"] == "true" {
+			t.Errorf("briefing must not mark deals pushed: %+v", d)
+		}
 	}
 	if app.DailyDue(at.Add(time.Hour)) {
 		t.Error("must not fire twice on the same day")
@@ -440,104 +523,57 @@ func TestDailyBriefingFollowsTheConfiguredZoneAndSendsOnce(t *testing.T) {
 	}
 }
 
-func TestAlertThresholdIsHonoured(t *testing.T) {
-	f := &cannedFetcher{byURL: map[string][]byte{feedURL: feedBody(t)}}
-	spy := &spyNotifier{}
-	app := testApp(t, f, spy, func(c *config.Config) { c.Notify.Feishu.MinScore = 101 })
-	run, err := app.RunOnce(context.Background(), "unit")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if run.Stored == 0 {
-		t.Error("findings should still be recorded")
-	}
-	if run.Pushed != 0 || spy.count() != 0 {
-		t.Errorf("nothing should be alerted above 101, pushed=%d", run.Pushed)
-	}
-}
-
-func TestMaxPerRunCapsOneMessage(t *testing.T) {
+func TestBreakthroughCardIsCappedAtMaxItems(t *testing.T) {
 	f := &cannedFetcher{byURL: map[string][]byte{feedURL: feedBody(t)}}
 	spy := &spyNotifier{}
 	app := testApp(t, f, spy, func(c *config.Config) {
-		c.Notify.Feishu.MinScore = 55
-		c.Notify.Feishu.MaxPerRun = 1
+		c.Notify.Urgent.MinScore = 55
+		c.Notify.Urgent.MaxItems = 1
 	})
 	if _, err := app.RunOnce(context.Background(), "unit"); err != nil {
 		t.Fatal(err)
 	}
 	if spy.count() != 1 {
-		t.Fatalf("expected a single batched message, got %d", spy.count())
+		t.Fatalf("one breakthrough message expected, got %d", spy.count())
 	}
 	if n := len(spy.all()[0].Deals); n != 1 {
-		t.Errorf("MaxPerRun not applied, %d deals in the message", n)
+		t.Errorf("max_items not applied, %d deals in the message", n)
 	}
 }
 
-func TestQuietHoursHoldAlertsAndDigestRecovers(t *testing.T) {
-	quietHour := time.Now().UTC().Hour()
-	f := &cannedFetcher{byURL: map[string][]byte{feedURL: feedBody(t)}}
-	spy := &spyNotifier{}
-	app := testApp(t, f, spy, func(c *config.Config) {
-		c.Notify.Feishu.Enabled = true
-		c.Notify.Feishu.Timezone = "UTC"
-		c.Notify.Feishu.SilentHours = []int{quietHour}
-		c.Notify.Digest.Enabled = true
-		c.Notify.Digest.MinScore = 45
-	})
-	run, err := app.RunOnce(context.Background(), "unit")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if run.HeldQuiet == 0 || run.Pushed != 0 {
-		t.Fatalf("quiet hours must hold alerts: %+v", run)
-	}
-	if spy.count() != 0 {
-		t.Error("nothing may be delivered while quiet")
-	}
-	if err := app.SendDigest(context.Background()); err != nil {
-		t.Fatalf("SendDigest: %v", err)
-	}
-	if spy.count() != 1 {
-		t.Fatalf("digest should recover the held findings, got %d messages", spy.count())
-	}
-	msg := spy.all()[0]
-	if msg.Kind != notify.KindDigest || len(msg.Deals) == 0 {
-		t.Errorf("digest payload wrong: %s %d", msg.Kind, len(msg.Deals))
-	}
-	// After a digest the same items must not be batched twice.
-	spy.reset(nil)
-	if err := app.SendDigest(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if spy.count() != 0 {
-		t.Error("digest must not repeat delivered findings")
-	}
-}
-
-func TestDeliveryFailureLeavesFindingsPending(t *testing.T) {
+// A breakthrough that fails to deliver must not spend the day's budget, and the
+// findings must not vanish with it: they are still live, so the briefing reports
+// them. That fallback is what makes "wait for the daily" a safe default.
+func TestFailedBreakthroughIsNotChargedAndTheBriefingCarriesIt(t *testing.T) {
 	f := &cannedFetcher{byURL: map[string][]byte{feedURL: feedBody(t)}}
 	spy := &spyNotifier{err: errors.New("webhook refused")}
-	app := testApp(t, f, spy, func(c *config.Config) {
-		c.Notify.Digest.Enabled = true
-		c.Notify.Digest.MinScore = 45
-	})
+	app := testApp(t, f, spy, func(c *config.Config) { c.Notify.Urgent.MinScore = 60 })
+	now := time.Now()
+
 	run, err := app.RunOnce(context.Background(), "unit")
 	if err == nil || !strings.Contains(err.Error(), "webhook refused") {
 		t.Fatalf("the delivery error must surface: %v", err)
 	}
 	if run.Pushed != 0 {
-		t.Errorf("failed delivery must not count as pushed: %+v", run)
+		t.Errorf("a failed delivery must not count as sent: %+v", run)
 	}
-	if pending := app.Store().Pending(60, time.Time{}); len(pending) == 0 {
-		t.Error("failed findings should remain pending for the digest")
+	if got := app.Urgent(now).SentToday; got != 0 {
+		t.Errorf("a failed breakthrough must not spend the budget, sent_today=%d", got)
 	}
+
 	spy.reset(nil)
-	if err := app.SendDigest(context.Background()); err != nil {
-		t.Fatal(err)
+	if err := app.SendDaily(context.Background(), now); err != nil {
+		t.Fatalf("SendDaily: %v", err)
 	}
-	if spy.count() != 1 {
-		t.Fatal("the retry path should deliver them in the next digest")
+	msgs := spy.all()
+	if len(msgs) != 1 {
+		t.Fatalf("the briefing should deliver once, got %d", len(msgs))
+	}
+	if msgs[0].Kind != notify.KindDaily {
+		t.Errorf("kind = %s", msgs[0].Kind)
+	}
+	if !strings.Contains(strings.Join(titlesOf(msgs[0].Deals), "|"), "GLM-5.3-flash") {
+		t.Errorf("the finding the breakthrough could not deliver must reach the briefing: %+v", msgs[0].Deals)
 	}
 }
 
@@ -671,42 +707,129 @@ func TestRunHistoryIsBounded(t *testing.T) {
 	}
 }
 
-func TestDigestDueFollowsCursor(t *testing.T) {
-	app := testApp(t, &cannedFetcher{}, &spyNotifier{}, func(c *config.Config) {
-		c.Notify.Digest.Enabled = true
-		c.Notify.Digest.Every = config.Duration(6 * time.Hour)
+// What an operator actually gets after install.sh: a brand-new data directory,
+// nothing poked into its state by the test. A briefing that only ever becomes
+// due once something has already sent it is a feature that does not exist, and
+// the earlier "wait for the next slot" fix left it exactly that way.
+func TestFreshInstallSendsItsFirstBriefing(t *testing.T) {
+	spy := &spyNotifier{}
+	// Two minutes out, truncated to the minute, so the slot always lands after
+	// the moment this process armed itself.
+	slot := time.Now().UTC().Add(2 * time.Minute)
+	app := testApp(t, &cannedFetcher{}, spy, func(c *config.Config) {
+		c.Timezone = "UTC"
+		c.Notify.Daily.At = slot.Format("15:04")
 	})
-	if !app.DigestDue(time.Now()) {
-		t.Error("a never-run digest is due")
-	}
-	if err := app.setDigestCursor(time.Now().UTC()); err != nil {
+	seed := &model.Deal{URL: "https://a.test/free", Title: "智谱 GLM-5.3-flash 限时免费",
+		Source: "rss", Score: 88, IsFree: true, DiscoveredAt: time.Now().UTC().Add(-time.Hour)}
+	seed.EnsureFingerprint()
+	if err := app.Store().Save(seed); err != nil {
 		t.Fatal(err)
 	}
-	if app.DigestDue(time.Now()) {
-		t.Error("digest should not be due immediately after sending")
+
+	if app.DailyDue(time.Now().UTC()) {
+		t.Error("the briefing must not be due before its slot")
 	}
-	if !app.DigestDue(time.Now().Add(7 * time.Hour)) {
-		t.Error("digest should be due after the interval")
+	due := slot.Add(time.Minute)
+	if !app.DailyDue(due) {
+		t.Fatal("a fresh install must become due at its first slot")
 	}
-	off := testApp(t, &cannedFetcher{}, &spyNotifier{}, func(c *config.Config) { c.Notify.Digest.Enabled = false })
-	if off.DigestDue(time.Now().AddDate(5, 0, 0)) {
-		t.Error("a disabled digest is never due")
+	if err := app.SendDaily(context.Background(), due); err != nil {
+		t.Fatalf("SendDaily: %v", err)
+	}
+	if spy.count() != 1 {
+		t.Fatalf("exactly one briefing expected, got %d", spy.count())
+	}
+	if got := spy.all()[0].Deals; len(got) != 1 || got[0].Title != seed.Title {
+		t.Errorf("briefing payload wrong: %+v", got)
+	}
+	if app.DailyDue(due.Add(time.Hour)) {
+		t.Error("must not fire twice on the same day")
+	}
+	if !app.DailyDue(due.Add(24 * time.Hour)) {
+		t.Error("must be due again the next day")
+	}
+
+	off := testApp(t, &cannedFetcher{}, &spyNotifier{}, func(c *config.Config) { c.Notify.Daily.Enabled = false })
+	if off.DailyDue(time.Now().AddDate(0, 0, 5)) {
+		t.Error("a disabled briefing is never due")
 	}
 }
 
-func TestDigestAtTimeSchedule(t *testing.T) {
-	app := testApp(t, &cannedFetcher{}, &spyNotifier{}, func(c *config.Config) {
-		c.Notify.Digest.Enabled = true
-		c.Notify.Digest.At = "08:30"
-	})
-	if err := app.setDigestCursor(time.Date(2026, 9, 18, 8, 0, 0, 0, time.Local)); err != nil {
-		t.Fatal(err)
+// A day with nothing live still sends one message and still consumes the slot:
+// "nothing today" answers whether the radar is running, and re-firing the empty
+// report every round for the rest of the day is exactly the noise the daily
+// model exists to avoid.
+func TestBriefingSendsEvenWhenNothingIsLive(t *testing.T) {
+	spy := &spyNotifier{}
+	app := testApp(t, &cannedFetcher{}, spy, nil)
+	now := time.Now()
+
+	if err := app.SendDaily(context.Background(), now); err != nil {
+		t.Fatalf("SendDaily: %v", err)
 	}
-	if app.DigestDue(time.Date(2026, 9, 18, 8, 0, 30, 0, time.Local)) {
-		t.Error("must not fire before the scheduled time")
+	if spy.count() != 1 {
+		t.Fatalf("an empty day must still produce one briefing, got %d", spy.count())
 	}
-	if !app.DigestDue(time.Date(2026, 9, 18, 8, 31, 0, 0, time.Local)) {
-		t.Error("must fire after the scheduled time")
+	msg := spy.all()[0]
+	if len(msg.Deals) != 0 {
+		t.Errorf("nothing is live, so nothing should be listed: %+v", msg.Deals)
+	}
+	if !strings.Contains(msg.Title, "没有在效") {
+		t.Errorf("the title should say the day is empty, got %q", msg.Title)
+	}
+	if !app.Daily(now).SentToday {
+		t.Error("an empty briefing must still consume today's slot")
+	}
+}
+
+// The briefing is what the user acts on, so its links are checked when it is
+// built. A round that interrupted nothing must still send verified pages.
+func TestBriefingVerifiesItsOwnLinks(t *testing.T) {
+	const found = "https://open.bigmodel.cn/pricing/glm-free"
+	searchBody := []byte("<html><body><a href=\"" + found +
+		"\" class='result-link'>GLM-5.3-flash 免费额度 - 智谱开放平台</a></body></html>")
+	f := &cannedFetcher{
+		byURL: map[string][]byte{
+			feedURL: feedBody(t),
+			found:   []byte("<html>GLM 免费额度</html>"),
+		},
+		byPrefix: map[string][]byte{"https://lite.duckduckgo.com/lite/": searchBody},
+	}
+	spy := &spyNotifier{}
+	app := testApp(t, f, spy, nil)
+	if _, err := app.RunOnce(context.Background(), "unit"); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if spy.count() != 0 {
+		t.Fatalf("the round should have sent nothing, got %d", spy.count())
+	}
+	if err := app.SendDaily(context.Background(), time.Now()); err != nil {
+		t.Fatalf("SendDaily: %v", err)
+	}
+
+	msgs := spy.all()
+	if len(msgs) != 1 {
+		t.Fatalf("one briefing expected, got %d", len(msgs))
+	}
+	var inCard bool
+	for _, d := range msgs[0].Deals {
+		if strings.Contains(d.Title, "GLM-5.3-flash") && d.Meta[official.MetaOfficialURL] == found {
+			inCard = true
+		}
+	}
+	if !inCard {
+		t.Fatalf("the briefing row should carry the verified vendor page: %+v", msgs[0].Deals)
+	}
+	// The panel reads the store, so the verdict has to be persisted too.
+	var inStore bool
+	for _, d := range app.RecentDeals(50) {
+		if strings.Contains(d.Title, "GLM-5.3-flash") && d.Meta[official.MetaOfficialURL] == found {
+			inStore = true
+		}
+	}
+	if !inStore {
+		t.Error("the resolved link must be written back, not just sent")
 	}
 }
 

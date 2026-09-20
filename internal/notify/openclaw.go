@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/xiabee/deal-hunter/internal/config"
+	"github.com/xiabee/deal-hunter/internal/model"
 	"github.com/xiabee/deal-hunter/internal/redact"
 )
 
@@ -88,17 +89,32 @@ func (o *OpenClawRelay) text(m Message) string {
 	if m.Intro != "" {
 		b.WriteString("\n" + m.Intro)
 	}
+	if m.Kind == KindDaily {
+		// Separating what is new from what is merely still open is the whole
+		// point of the briefing, so the relay must not flatten it back into one
+		// list the reader has to re-scan every morning.
+		for _, sec := range SplitByAge(m.Deals, m.CreatedAt).Sections() {
+			b.WriteString("\n\n" + sec.Title)
+			for i := range sec.Deals {
+				writeRelayDeal(&b, &sec.Deals[i])
+			}
+		}
+		return b.String()
+	}
 	for i := range m.Deals {
-		d := &m.Deals[i]
-		b.WriteString("\n\n" + Icon(d) + " " + d.Title + "  [" + fmt.Sprint(d.Score) + "]")
-		if d.Summary != "" {
-			b.WriteString("\n" + truncateRunes(strings.ReplaceAll(d.Summary, "\n", " "), 200))
-		}
-		if d.URL != "" {
-			b.WriteString("\n" + d.URL)
-		}
+		writeRelayDeal(&b, &m.Deals[i])
 	}
 	return b.String()
+}
+
+func writeRelayDeal(b *strings.Builder, d *model.Deal) {
+	b.WriteString("\n\n" + Icon(d) + " " + d.Title + "  [" + fmt.Sprint(d.Score) + "]")
+	if d.Summary != "" {
+		b.WriteString("\n" + truncateRunes(strings.ReplaceAll(d.Summary, "\n", " "), 200))
+	}
+	if d.URL != "" {
+		b.WriteString("\n" + d.URL)
+	}
 }
 
 func clipOutput(s string) string {

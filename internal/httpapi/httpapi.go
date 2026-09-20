@@ -149,6 +149,8 @@ func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 	st := s.app.Store().Stats()
+	now := time.Now().UTC()
+	live, liveVerified := s.app.BriefingQuality(now)
 	interval := s.cfg.Interval.D()
 	next := s.app.LastRun()
 	var nextAt time.Time
@@ -167,9 +169,8 @@ func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 			"enabled":    len(s.cfg.EnabledSources()),
 		},
 		"filters": map[string]any{
-			"min_score":       s.cfg.Filter.MinScore,
-			"alert_min_score": s.cfg.Notify.Feishu.MinScore,
-			"require_offer":   s.cfg.Filter.RequireOffer,
+			"require_offer": s.cfg.Filter.RequireOffer,
+			"max_age_hours": s.cfg.Filter.MaxAgeHours,
 		},
 		"notify": map[string]any{
 			"backends":     s.app.Backends(),
@@ -180,17 +181,22 @@ func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 			"outreach_dir": s.app.OutreachDir(),
 		},
 		"store": map[string]any{
-			"deals_seen":     st.DealsSeen,
-			"duplicates":     st.Duplicates,
-			"pushed":         st.PushedSeen,
-			"cursors":        st.StateKeys,
-			"size_kb":        st.DirSizeKB,
-			"oldest":         st.OldestEntry,
-			"newest":         st.NewestEntry,
-			"pending_alerts": len(s.app.Store().Pending(s.cfg.Notify.Feishu.MinScore, time.Time{})),
+			"deals_seen": st.DealsSeen,
+			"duplicates": st.Duplicates,
+			"pushed":     st.PushedSeen,
+			"cursors":    st.StateKeys,
+			"size_kb":    st.DirSizeKB,
+			"oldest":     st.OldestEntry,
+			"newest":     st.NewestEntry,
+			// What the next briefing would carry, and how much of it we tied back
+			// to the vendor: under the daily model this is the only link quality
+			// the user is ever shown.
+			"live_in_briefing": live,
+			"live_verified":    liveVerified,
 		},
 		"last_run": s.app.LastRun(),
-		"daily":    s.app.Daily(time.Now().UTC()),
+		"daily":    s.app.Daily(now),
+		"urgent":   s.app.Urgent(now),
 	})
 }
 

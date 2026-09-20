@@ -122,24 +122,10 @@ func (f *Feishu) WebhookHost() string {
 	return f.cfg.WebhookURL
 }
 
-// QuietNow reports whether alerts should be held back at this hour.
-func (f *Feishu) QuietNow(now time.Time) bool {
-	if len(f.cfg.SilentHours) == 0 {
-		return false
-	}
-	h := now.In(f.tz).Hour()
-	for _, s := range f.cfg.SilentHours {
-		if s == h {
-			return true
-		}
-	}
-	return false
-}
-
 // CardTemplate picks the header colour from the deal's shape.
 func CardTemplate(m Message) string {
 	switch m.Kind {
-	case KindDigest, KindDaily:
+	case KindDaily:
 		return "blue"
 	case KindTest, KindError:
 		return "grey"
@@ -239,10 +225,6 @@ func (f *Feishu) card(m Message) map[string]any {
 				elements = append(elements, md(dailyCardLine(&sec.Deals[i], m.CreatedAt)))
 			}
 		}
-	case KindDigest:
-		for i := range m.Deals {
-			elements = append(elements, md(alertLine(&m.Deals[i])))
-		}
 	case KindTest:
 		elements = append(elements, md("链路自检成功：Deal-Hunter 已能写入该群。"))
 	default:
@@ -253,7 +235,7 @@ func (f *Feishu) card(m Message) map[string]any {
 			break
 		}
 		for i := range m.Deals {
-			elements = append(elements, md(alertLine(&m.Deals[i])))
+			elements = append(elements, md(dealLine(&m.Deals[i])))
 		}
 	}
 	elements = append(elements, map[string]any{
@@ -273,9 +255,9 @@ func (f *Feishu) card(m Message) map[string]any {
 	}
 }
 
-// alertLine renders one deal as a single tappable line. The verdict is a mark,
+// dealLine renders one deal as a single tappable line. The verdict is a mark,
 // not a sentence: the full reasoning lives in the panel and the API.
-func alertLine(d *model.Deal) string {
+func dealLine(d *model.Deal) string {
 	link, _, kind := LinkFor(d)
 	title := truncateRunes(strings.ReplaceAll(d.Title, "\n", " "), 42)
 	if !strings.HasPrefix(link, "https://") {
@@ -288,7 +270,7 @@ func alertLine(d *model.Deal) string {
 // dailyCardLine is the briefing row: the same tappable line as an alert, plus
 // how long the offer has been known and when it ends.
 func dailyCardLine(d *model.Deal, now time.Time) string {
-	line := alertLine(d)
+	line := dealLine(d)
 	if life := Lifespan(d, now); life != "" {
 		line += " · " + life
 	}
@@ -321,9 +303,6 @@ func singleDealBody(d *model.Deal) []map[string]any {
 func (f *Feishu) title(m Message) string {
 	if m.Title != "" {
 		return m.Title
-	}
-	if m.Kind == KindDigest {
-		return fmt.Sprintf("🧺 羊毛盘点 · %d 条", len(m.Deals))
 	}
 	if m.Kind == KindDaily {
 		return fmt.Sprintf("🌅 羊毛日报 · %d 条仍在效", len(m.Deals))
