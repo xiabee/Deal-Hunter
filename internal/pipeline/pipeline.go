@@ -89,6 +89,9 @@ type App struct {
 	drop  string
 	off   *official.Resolver
 
+	// roundMu serialises collection rounds, which can take minutes; mu guards
+	// the run history only, so the read-only panel never waits on a round.
+	roundMu sync.Mutex
 	mu      sync.Mutex
 	runs    []*Run
 	lastRun *Run
@@ -248,8 +251,8 @@ type fetchOutcome struct {
 
 // RunOnce performs one full round and returns its report.
 func (a *App) RunOnce(ctx context.Context, trigger string) (*Run, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.roundMu.Lock()
+	defer a.roundMu.Unlock()
 
 	if trigger == "" {
 		trigger = "manual"
@@ -371,11 +374,7 @@ func (a *App) RunOnce(ctx context.Context, trigger string) (*Run, error) {
 	}
 
 	run.FinishedAt = time.Now().UTC()
-	a.lastRun = run
-	a.runs = append(a.runs, run)
-	if n := 24; len(a.runs) > n {
-		a.runs = a.runs[len(a.runs)-n:]
-	}
+	a.publish(run)
 	a.log.Info("round complete", "trigger", trigger, "sources", len(run.Sources),
 		"new", run.NewDeals, "stored", run.Stored, "urgent_sent", run.Pushed,
 		"urgent_held", run.UrgentHeld, "event_sent", run.EventSent, "event_held", run.EventHeld, "dupes", run.Dupes, "verified_official", run.Verified,
@@ -1013,4 +1012,17 @@ func truncateRunes(s string, n int) string {
 		return s
 	}
 	return strings.TrimSpace(string(r[:n])) + "…"
+}
+
+// publish records a finished round where readers can see it. The Run is fully
+// populated before this point and never mutated afterwards, so the history lock is
+// held for a pointer swap rather than across a collection round.
+func (a *App) publish(run *Run) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.lastRun = run
+	a.runs = append(a.runs, run)
+	if n := 24; len(a.runs) > n {
+		a.runs = a.runs[len(a.runs)-n:]
+	}
 }

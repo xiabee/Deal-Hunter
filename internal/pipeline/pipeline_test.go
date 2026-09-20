@@ -1039,3 +1039,48 @@ func TestEventReminderCarriesEachMoment(t *testing.T) {
 		t.Errorf("each row should state its own moment, found %d in:\n%s", n, msgs[0].Plain())
 	}
 }
+
+// blockingFetcher parks a round mid-fetch until the test releases it, standing in
+// for a slow upstream.
+type blockingFetcher struct {
+	release chan struct{}
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (b *blockingFetcher) Get(context.Context, string, map[string]string) (*httpx.Response, error) {
+	b.once.Do(func() { close(b.entered) })
+	<-b.release
+	return &httpx.Response{Status: 200, Body: []byte("<rss><channel></channel></rss>")}, nil
+}
+
+// A round may legitimately take a while: fifteen sources over a flaky link, up to
+// the interval budget. The read-only panel must not be hostage to it — /api/v1/status
+// answers with LastRun(), and a lock held across the round makes the dashboard hang.
+func TestRoundHistoryReadersDoNotWaitForAnInFlightRound(t *testing.T) {
+	f := &blockingFetcher{release: make(chan struct{}), entered: make(chan struct{})}
+	app := testApp(t, f, &spyNotifier{}, nil)
+
+	done := make(chan struct{})
+	go func() {
+		_, _ = app.RunOnce(context.Background(), "unit")
+		close(done)
+	}()
+	<-f.entered // the round is now parked inside a fetch
+
+	replies := make(chan int, 2)
+	go func() { app.LastRun(); replies <- 1 }()
+	go func() { replies <- len(app.RecentRuns(8)) }()
+
+	for i := 0; i < 2; i++ {
+		select {
+		case <-replies:
+		case <-time.After(3 * time.Second):
+			close(f.release)
+			<-done
+			t.Fatal("a reader waited on the in-flight round; the panel would hang")
+		}
+	}
+	close(f.release)
+	<-done
+}
