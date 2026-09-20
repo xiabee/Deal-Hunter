@@ -1084,3 +1084,29 @@ func TestRoundHistoryReadersDoNotWaitForAnInFlightRound(t *testing.T) {
 	close(f.release)
 	<-done
 }
+
+// 提醒靠"到时候再看"，可运维的一方需要能问：现在在跟踪哪几场、几点开抢、提醒过没有。
+// 只看 state.json 不叫可观察。
+func TestUpcomingEventsReportsTheReminderState(t *testing.T) {
+	opens := time.Now().Add(10 * time.Hour)
+	f := &cannedFetcher{byURL: map[string][]byte{feedURL: voucherFeed(opens)}}
+	spy := &spyNotifier{}
+	app := voucherApp(t, f, spy, opens)
+	if _, err := app.RunOnce(context.Background(), "unit"); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	tracked := app.UpcomingEvents(time.Now())
+	if len(tracked) != 1 {
+		t.Fatalf("the announced event should be tracked, got %+v", tracked)
+	}
+	got := tracked[0]
+	if got.Reminded || got.InWindow {
+		t.Errorf("10 hours out is outside the window and un-reminded: %+v", got)
+	}
+	if got.StartsAt.IsZero() {
+		t.Error("the start moment should be reported")
+	}
+	if !strings.Contains(got.Title, "洪城消费券") {
+		t.Errorf("title = %q", got.Title)
+	}
+}

@@ -97,6 +97,7 @@ func cli(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		"sources":     func(_ context.Context, _ []string) int { return cmdSources(cfg, stdout) },
 		"deals":       func(_ context.Context, a []string) int { return cmdDeals(cfg, stdout, a) },
 		"daily":       func(c context.Context, a []string) int { return cmdDaily(c, cfg, log, stdout, a) },
+		"events":      func(_ context.Context, _ []string) int { return cmdEvents(cfg, log, stdout) },
 		"notify-test": func(c context.Context, _ []string) int { return cmdNotifyTest(c, cfg, log, stdout) },
 		"doctor":      func(c context.Context, a []string) int { return cmdDoctor(c, cfg, log, stdout, a) },
 		"secretscan":  func(_ context.Context, a []string) int { return cmdSecretScan(stdout, stderr, a) },
@@ -704,4 +705,71 @@ func truncate(s string, n int) string {
 		return ""
 	}
 	return string(r[:n-1]) + "…"
+}
+
+// cmdEvents lists the dated events the reminder channel is tracking, so "在等哪几场、
+// 提醒过没有" is answerable without reading state.json.
+func cmdEvents(cfg *config.Config, log *slog.Logger, stdout io.Writer) int {
+	app, err := pipeline.New(cfg, log)
+	if err != nil {
+		fmt.Fprintf(stdout, "启动失败：%v\n", err)
+		return 1
+	}
+	defer app.Close()
+
+	now := time.Now()
+	rows := app.UpcomingEvents(now)
+	if len(rows) == 0 {
+		fmt.Fprintln(stdout, "没有在跟踪的限时事件：只有公告里写了明确日期与时刻的券/活动才会被跟踪，解析不出来就不提醒。")
+		return 0
+	}
+	e := cfg.Notify.Event
+	fmt.Fprintf(stdout, "跟踪 %d 项限时事件（提醒窗口：开抢前 %v 至开抢后 %v，每天最多 %d 条，门槛 %d 分）\n",
+		len(rows), e.Lead, e.LateGrace, e.MaxPerDay, e.MinScore)
+	tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "  开抢时刻\t距今\t状态\t分数\t标题")
+	for _, it := range rows {
+		fmt.Fprintf(tw, "  %s\t%s\t%s\t%d\t%s\n",
+			it.StartsAt.In(locOf(cfg)).Format("01-02 15:04"),
+			humanDelta(it.StartsAt.Sub(now)), eventMark(it, e), it.Score, truncate(it.Title, 40))
+	}
+	_ = tw.Flush()
+	return 0
+}
+
+func eventMark(it pipeline.EventItem, e config.Event) string {
+	switch {
+	case it.Reminded:
+		return "已提醒"
+	case it.InWindow:
+		return "窗口内待提醒"
+	case it.Score < e.MinScore:
+		return "低于门槛"
+	case it.StartsAt.Before(time.Now()):
+		return "已过窗口"
+	default:
+		return "等待窗口"
+	}
+}
+
+// locOf resolves the display zone for the same clock the briefing uses.
+func locOf(cfg *config.Config) *time.Location {
+	if l, err := time.LoadLocation(cfg.Timezone); err == nil {
+		return l
+	}
+	return time.Local
+}
+
+// humanDelta renders a lead time like "3小时30分" without pretending precision.
+func humanDelta(d time.Duration) string {
+	switch {
+	case d < 0:
+		return fmt.Sprintf("%.0f小时前", (-d).Hours())
+	case d < time.Hour:
+		return fmt.Sprintf("%d分钟", int(d.Minutes()))
+	case d < 48*time.Hour:
+		return fmt.Sprintf("%.1f小时", d.Hours())
+	default:
+		return fmt.Sprintf("%d天", int(d.Hours())/24)
+	}
 }

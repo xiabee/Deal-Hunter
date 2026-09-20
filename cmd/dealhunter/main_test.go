@@ -183,3 +183,10 @@ func TestDoctorReportsAllThreeMessageTypes(t *testing.T) {
 		}
 	}
 }
+
+// 没有跟踪任何事件时也要给出明确答案，而不是空输出或报错 —— 运维看的是"雷达在不在盯"。
+func TestEventsCommandRunsOnAnEmptyStore(t *testing.T) {
+	if code, out := run(t, "-data", t.TempDir(), "events"); code != 0 || !strings.Contains(out, "没有") {
+		t.Fatalf("code=%d out=%s", code, out)
+	}
+}

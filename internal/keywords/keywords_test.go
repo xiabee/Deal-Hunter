@@ -248,3 +248,29 @@ func TestExpiresAtReadsVoucherRedemptionDeadline(t *testing.T) {
 		}
 	}
 }
+
+// 这些句子是从当期真实公告里抄下来的写法（含 24:00 这种当小时用的截止表达），
+// 不是我们臆造的语法。真实文本才是解析器的考题。
+func TestStartsAtHandlesRealAnnouncementPhrasing(t *testing.T) {
+	anchor := time.Date(2026, 9, 18, 8, 0, 0, 0, time.UTC)
+	want := time.Date(2026, 9, 19, 9, 0, 0, 0, time.UTC)
+	for _, text := range []string{
+		"南昌赣超消费券领券时间为9月19日9:00至9月26日24:00，使用有效期至10月26日，逾期失效不予补发。",
+		"领券窗口为9月19日上午9:00开放，至9月26日24:00关闭，领取后使用有效期至10月26日24:00。",
+		"本次赣超体育消费券领券时间为2026年9月19日9:00起，至9月26日24:00截止，共计8天。",
+	} {
+		got := Default().StartsAt(text, anchor)
+		if got == nil {
+			t.Errorf("no start parsed from real wording: %q", text)
+			continue
+		}
+		if !got.Equal(want) {
+			t.Errorf("%q -> %v, want %v", text, got.UTC(), want)
+		}
+	}
+
+	// 「24:00」是截止表达，不是开抢时刻：这里必须拒绝而不是给出次日的 00:00。
+	if got := Default().StartsAt("使用有效期至2026年10月26日24:00", anchor); got != nil {
+		t.Errorf("a 24:00 deadline must not become a start, got %v", got)
+	}
+}

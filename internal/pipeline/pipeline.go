@@ -1026,3 +1026,37 @@ func (a *App) publish(run *Run) {
 		a.runs = a.runs[len(a.runs)-n:]
 	}
 }
+
+// EventItem is one tracked dated event, for the CLI and the status endpoint.
+type EventItem struct {
+	Title    string    `json:"title"`
+	URL      string    `json:"url"`
+	Source   string    `json:"source"`
+	Score    int       `json:"score"`
+	StartsAt time.Time `json:"starts_at"`
+	Reminded bool      `json:"reminded"`
+	InWindow bool      `json:"in_window"`
+}
+
+// UpcomingEvents lists tracked dated events from three days ago to a month out,
+// soonest first, each with whether it has been reminded about yet. Events below
+// the reminder gate are included deliberately: "why is nothing firing?" is the
+// question an operator asks, and a silent omission cannot answer it.
+func (a *App) UpcomingEvents(now time.Time) []EventItem {
+	e := a.cfg.Notify.Event
+	rows := a.st.Upcoming(now.Add(-72*time.Hour), now.AddDate(0, 0, 30), 0)
+	out := make([]EventItem, 0, len(rows))
+	for _, d := range rows {
+		when, ok := metaInstant(d)
+		if !ok {
+			continue
+		}
+		_, reminded := a.stateTime(eventRemindedPrefix + d.Fingerprint)
+		out = append(out, EventItem{
+			Title: d.Title, URL: d.URL, Source: d.Source, Score: d.Score, StartsAt: when,
+			Reminded: reminded,
+			InWindow: e.Enabled && !when.Before(now.Add(-e.LateGrace.D())) && !when.After(now.Add(e.Lead.D())),
+		})
+	}
+	return out
+}
