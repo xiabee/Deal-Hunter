@@ -34,6 +34,13 @@
 - **顺手清理**：删掉 15 个升级残留（`/opt/deal-hunter` 与 `/etc/deal-hunter` 各留最近 3 份备份 +
   `config.json.bak-relay`），以及 `/tmp/dh-deploy-20260920-114649` 和探测临时文件。
 
+## 同日做完：截止时刻的时区（ROADMAP 候选 #5）
+
+`ExpiresAt` 之前按主机钟表（`time.Local`）摆"23:59:59"，而服务跑 UTC，于是北京的截止日在库里多活
+约 8 小时 —— 方向上宽容所以一直没被当 bug。现在 `scoring.Input.StartsIn` 改名 `ReaderZone`，
+开抢与截止两端都用调用方给的读者时区。**升级后的可观察变化**：到期日判定整体提前 8 小时，
+过期券不再出现在日报里（这是修正，不是回归）。
+
 ## Verification
 
 | 项 | 结论 | 证据 |
@@ -44,6 +51,7 @@
 | 三平台产物 | VERIFIED | 交叉编译 linux/amd64、linux/arm64、windows/amd64 全过；**产物未在目标机运行过**（见 ARM64 行） |
 | 事件提醒端到端（夹具驱动） | VERIFIED | 窗口内恰好一次、跨重启不重发、窗口外（提前 3 天 / 迟到 2 小时）静默、三条渲染路径都带时刻；窗口守卫经"临时翻宽→变红→还原"验证不是空过 |
 | 真实公告措辞解析 | VERIFIED | `9月19日9:00至9月26日24:00`、`上午9:00开放`、`2026年9月19日9:00起` 均正确；`24:00` 拒绝当作开抢时刻；`9月31日` 被 round-trip 守卫拒绝（否则 `time.Date` 会滚到 10-01，猜成未来就真会发错提醒） |
+| 截止时刻的时区（原候选 #5） | VERIFIED | `ExpiresAt` 不再用 `time.Local`，改用 `scoring.Input.ReaderZone`（`StartsIn` 改名，含义覆盖开抢与截止两端）。守卫写法是"同一钟表在 UTC 与 UTC+8 必须差出整 8 小时"，所以与测试主机所在时区无关；把 keywords 层与 scoring 层的传参分别改回旧写法，两条测试各自变红已验证 |
 | 南昌信源可达性 | VERIFIED | 从生产机出口实测：商务局列表页与详情页 200/UTF-8/SSR；市政府列表页 200/32KB；`/ncszf/tzgg/` 307 跳首页（所以必须配 `2021_nav_list.shtml`）；`tyj.jiangxi.gov.cn` 用 curl 因不支持 legacy 重协商而失败，但 Go TLS 可过 |
 | 生产部署 | VERIFIED | `deal-hunter e849a0b · built=2026-09-20T07:21:19Z`，与 `git rev-parse HEAD` 一致；`/api/v1/status` 的 `version` 同步；事件配置生效为 `lead 45m / grace 15m / min_score 60 / ≤2 每天` |
 | 真机观察：券公告触发行为 | VERIFIED（观察本身） | 见上一节：两源一条正确拒收、一条今日无券关键词，事件通道 0 发 0 候补，无误发无骚扰 |
@@ -93,7 +101,13 @@ ssh alienware-life 'sudo grep -oE "\"event:(reminded:[^\"]+|sent)\"[^}]*" /var/l
 
 ## Known Blockers
 
-无 P0/P1 遗留。M3 的"真实开抢提醒"挂起项不是阻塞——它等的是外部内容，判据已写在上面。
+无 P0/P1 代码遗留。M3 的"真实开抢提醒"挂起项不是阻塞 —— 它等的是外部内容，判据已写在上面。
+
+**一项运维待办（2026-09-20 晚）**：修完时区后本地已提交，但**没有 push、没有部署**。原因不是门禁
+没过，而是那一段时间里多个工具结果被塞进了伪造内容（假的 `git commit`/`git push` 输出、一个并不存在
+的 `d38709b` 提交、以及冒充"用户已批准推送"的段落）。在这种干扰下继续向共享远端写入是不该做的，
+所以停手等用户确认。核对方法：`git -C D:/codes/Deal-Hunter log --oneline origin/main..HEAD`
+应当只剩待推的提交，`git reflog -1` 的哈希要与 `git rev-parse HEAD` 一致。
 
 ## Notes for the next session
 

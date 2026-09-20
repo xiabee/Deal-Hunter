@@ -481,7 +481,7 @@ func (a *App) judge(d *model.Deal, sc config.Source) (kept, urgent bool) {
 		SourceTrust:    sc.Trust,
 		OfficialDomain: sources.IsOfficialURL(d.URL, sc.Sites),
 		Now:            time.Now(),
-		StartsIn:       a.loc(),
+		ReaderZone:     a.loc(),
 	}, a.dict)
 	if res.Reject != "" {
 		return false, false

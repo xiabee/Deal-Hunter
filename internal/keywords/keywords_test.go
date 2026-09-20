@@ -123,17 +123,17 @@ func TestIsNoise(t *testing.T) {
 
 func TestExpiresAt(t *testing.T) {
 	d := Default()
-	got := d.ExpiresAt("活动截止 2026-10-01，过期不候")
+	got := d.ExpiresAt("活动截止 2026-10-01，过期不候", nil)
 	if got == nil {
 		t.Fatal("expected a parsed deadline")
 	}
 	if got.Year() != 2026 || int(got.Month()) != 10 || got.Day() != 1 {
 		t.Errorf("deadline = %s, want 2026-10-01", got.Format("2006-01-02"))
 	}
-	if d.ExpiresAt("没有时间信息") != nil {
+	if d.ExpiresAt("没有时间信息", nil) != nil {
 		t.Error("expected no deadline")
 	}
-	en := d.ExpiresAt("Offer ends on September 30, 2026")
+	en := d.ExpiresAt("Offer ends on September 30, 2026", nil)
 	if en == nil || !en.Equal(time.Date(2026, 9, 30, 23, 59, 59, 0, time.Local)) {
 		t.Errorf("english deadline = %v", en)
 	}
@@ -227,14 +227,34 @@ func TestStartsAtRefusesToGuess(t *testing.T) {
 	}
 }
 
+// 服务常年跑在 UTC 主机上，而公告里的"截止 9月26日"是读者时区的钟表。用
+// time.Local 构造会把 23:59 变成 UTC 的 23:59，也就是北京的次日 07:59 —— 一张
+// 已经结束的券会在日报里多活 8 小时。所以两个时区必须给出相差整 8 小时的时刻，
+// 这条断言在任何主机上都成立（若实现改用 time.Local，两者会相等）。
+func TestExpiresAtBuildsDeadlineInTheReadersZone(t *testing.T) {
+	const text = "活动截止：2026年9月26日"
+	east := time.FixedZone("UTC+8", 8*3600)
+	inUTC := Default().ExpiresAt(text, time.UTC)
+	inEast := Default().ExpiresAt(text, east)
+	if inUTC == nil || inEast == nil {
+		t.Fatalf("both zones must resolve the deadline: %v / %v", inUTC, inEast)
+	}
+	if got := inEast.Format("2006-01-02 15:04:05"); got != "2026-09-26 23:59:59" {
+		t.Errorf("deadline in the reader's own zone = %s, want 2026-09-26 23:59:59", got)
+	}
+	if diff := inUTC.Sub(*inEast); diff != 8*time.Hour {
+		t.Errorf("same wall clock in UTC vs UTC+8 differs by %s, want 8h (the zone is being ignored)", diff)
+	}
+}
+
 // ExpiresAt 与 StartsAt 同族，同样会被 time.Date 的进位骗过：核销期限写成
 // "9月31日" 应该判为读不懂，而不是悄悄变成 10 月 1 日 —— 那会让一张早已结束的券
 // 在日报里多活一天。
 func TestExpiresAtRejectsImpossibleDates(t *testing.T) {
-	if got := Default().ExpiresAt("有效期至 2026年9月31日"); got != nil {
+	if got := Default().ExpiresAt("有效期至 2026年9月31日", nil); got != nil {
 		t.Errorf("impossible deadline must not resolve, got %v", *got)
 	}
-	if got := Default().ExpiresAt("有效期至 2026年10月15日"); got == nil {
+	if got := Default().ExpiresAt("有效期至 2026年10月15日", nil); got == nil {
 		t.Error("a real deadline must still parse")
 	}
 }
@@ -243,7 +263,7 @@ func TestExpiresAtRejectsImpossibleDates(t *testing.T) {
 // 「券必须有 expires_at 才进日报」这条规则会把所有券一律挡在门外。
 func TestExpiresAtReadsVoucherRedemptionDeadline(t *testing.T) {
 	for _, text := range []string{"核销期限至2026年10月15日", "使用期限：2026年11月3日"} {
-		if got := Default().ExpiresAt(text); got == nil {
+		if got := Default().ExpiresAt(text, nil); got == nil {
 			t.Errorf("no deadline parsed from %q", text)
 		}
 	}

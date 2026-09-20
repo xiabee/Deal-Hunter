@@ -142,7 +142,7 @@ func TestEvaluateParsesStartOnlyWhenToldWhichZone(t *testing.T) {
 		Now: time.Date(2026, 9, 11, 9, 0, 0, 0, shanghai)}
 
 	withZone := base
-	withZone.StartsIn = shanghai
+	withZone.ReaderZone = shanghai
 	res := Evaluate(withZone, dict)
 	if res.Starts == nil {
 		t.Fatal("the start moment in the body was not parsed")
@@ -155,5 +155,30 @@ func TestEvaluateParsesStartOnlyWhenToldWhichZone(t *testing.T) {
 	// 没有时区就没有可靠的解释方式，宁可不给。
 	if got := Evaluate(base, dict).Starts; got != nil {
 		t.Errorf("must not guess a zone, got %v", got)
+	}
+}
+
+// 截止日也必须按读者的钟表来摆：服务跑 UTC 时，"核销期限至 10月15日" 若按主机时区
+// 解释，等于让一张结束两天的券继续进日报。两个时区必须差出整 8 小时——这条断言不依赖
+// 测试主机自己是哪个时区，所以实现退回 time.Local 时一定变红。
+func TestEvaluateBuildsDeadlineInTheReadersZone(t *testing.T) {
+	utc := time.UTC
+	east := time.FixedZone("CST", 8*3600)
+	d := dealOf("关于开展2026年洪城消费券发放的公告",
+		"核销期限至2026年10月15日。第一轮9月21日上午10:00开始发放，领完即止。")
+	now := time.Date(2026, 9, 20, 9, 0, 0, 0, east)
+
+	inEast := Input{Deal: d, Offers: dict.Scan(d.TextBlob()), Now: now, ReaderZone: east}
+	inUTC := inEast
+	inUTC.ReaderZone = utc
+	resEast, resUTC := Evaluate(inEast, dict), Evaluate(inUTC, dict)
+	if resEast.Expires == nil || resUTC.Expires == nil {
+		t.Fatalf("both zones must yield a deadline: %v / %v", resEast.Expires, resUTC.Expires)
+	}
+	if got := resEast.Expires.Format("2006-01-02 15:04:05"); got != "2026-10-15 23:59:59" {
+		t.Errorf("deadline read in the reader's zone = %s, want 2026-10-15 23:59:59", got)
+	}
+	if diff := resUTC.Expires.Sub(*resEast.Expires); diff != 8*time.Hour {
+		t.Errorf("UTC vs UTC+8 differ by %s, want 8h — Evaluate is not passing the zone down", diff)
 	}
 }

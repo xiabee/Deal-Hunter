@@ -291,7 +291,7 @@ var startsAtRe = regexp.MustCompile(
 	`(?:(\d{4})年)?(\d{1,2})月(\d{1,2})日?[^0-9]{0,8}?(上午|中午|下午|晚上|凌晨)?[^0-9]{0,4}?(\d{1,2})\s*(?:时|点|:)\s*(\d{1,2})?`)
 
 // ExpiresAt parses a deadline mentioned in the text, if one is present.
-func (d *Dict) ExpiresAt(text string) *time.Time {
+func (d *Dict) ExpiresAt(text string, loc *time.Location) *time.Time {
 	for _, rule := range d.expiry {
 		m := rule.re.FindStringSubmatch(text)
 		if m == nil {
@@ -319,7 +319,13 @@ func (d *Dict) ExpiresAt(text string) *time.Time {
 		if year < 2000 || year > 2100 || mon < 1 || mon > 12 || day < 1 || day > 31 {
 			continue
 		}
-		t := time.Date(year, time.Month(mon), day, 23, 59, 59, 0, time.Local)
+		// The deadline is a wall clock the reader reads, and the service usually
+		// runs in UTC; nil means "whatever this host's clock is" for callers that
+		// have no configured zone.
+		if loc == nil {
+			loc = time.Local
+		}
+		t := time.Date(year, time.Month(mon), day, 23, 59, 59, 0, loc)
 		// time.Date rolls 9月31日 into October. An unreadable deadline must not
 		// become a later one, or a finished offer keeps a day of airtime in the
 		// briefing.
