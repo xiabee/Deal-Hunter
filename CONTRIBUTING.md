@@ -48,7 +48,8 @@ scripts/               ci-local.{sh,ps1} 与 ci-office.sh
 ## 新增一个投递后端
 
 实现 `notify.Notifier`（`Name()` + `Send()`），在 `pipeline.New` 里按配置装配，
-并保证：任一后端失败不影响其它后端、失败条目仍能进入日报补投。
+并保证：任一后端成功即视为这份消息已送达（一天只有几份消息，重复投递比朴素更烦人），
+全部失败才算没发出去；没插队成功的条目仍留在库里，由第二天的日报兜住。
 外部命令一律用固定 argv 的 `exec.CommandContext`，**不要**经过 shell。
 
 ## 提交与 PR

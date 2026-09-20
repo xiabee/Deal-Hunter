@@ -26,7 +26,7 @@ Deal-Hunter 是一个会**主动访问外部站点**并把结果**推送到你�
 | 摘要接口路径穿越 | 固定文件名 + `filepath.Abs` 前缀校验，越界返回 403 | `TestDigestServesMarkdownForOpenClaw` |
 | 采集面把消息文本变成命令 | OpenClaw 中转使用**固定 argv**（`exec.Command`，无 shell）；argv 单元素承载正文 | `TestRelayNeutralisesShellMetacharacters` |
 | 写接口 / CSRF 面 | 全部路由只允许 `GET`；其余 405；`X-Frame-Options: DENY`、CSP `default-src 'self'`、`no-store` | `TestSecurityHeadersAndReadOnlySurface` |
-| 单源故障拖垮整体 | 每源独立超时 + panic  recover；投递失败只影响该后端 | `TestSourceFailureIsIsolated`, `TestFanOutToleratesOneFailingBackend` |
+| 单源故障拖垮整体 | 每源独立超时 + panic  recover；投递失败只影响该后端 | `TestSourceFailureIsIsolated`, `TestFanOutTreatsPartialSuccessAsDelivered`, `TestFanOutErrorsOnlyWhenEveryBackendFails` |
 | systemd 权限过大 | `NoNewPrivileges`、`ProtectSystem=strict`、`PrivateTmp`、`RestrictAddressFamilies`、空 `CapabilityBoundingSet` | 部署时 `systemd-analyze security deal-hunter` |
 | 误推无关/已过期内容 | 噪音词与过期截止时间直接丢弃 | `TestNoiseAndExpiryAreNeverStored` |
 | 把仿冒/钓鱼域名当成官方链接 | `internal/official` 只认人工精选的厂商域名表，子域必须落在白名单域内；`moonshot.cn.evil.test`、`evil-bigmodel.cn` 一律拒绝；改写前必须实测 2xx/3xx，**且跳转后的域名仍属该厂商** | `TestVendorForDomainPrefersLongestMatch`, `TestSearchOnlyAcceptsVendorOwnedHosts`, `TestRedirectOffAllowlistIsRejected`, `TestCanonicalForFollowsOfferKind`（校验每个精选页确属该厂商） |
