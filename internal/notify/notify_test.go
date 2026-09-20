@@ -599,3 +599,40 @@ func TestEventMessageCarriesTheMomentOnEveryPath(t *testing.T) {
 		t.Errorf("relay text lost the moment: %s", body)
 	}
 }
+
+// 一张卡里混排"要开抢的"和"要作废的"时，每条的时刻写在 Intro 的多行里。任何一条
+// 渲染路径把 Intro 吞掉，读者就只知道"有两条要提醒"而不知道哪条今晚到期。
+func TestClosingCardKeepsItsPerRowMomentsOnEveryPath(t *testing.T) {
+	m := NewMessage(KindEvent, "⏰ 2 项临近截止", sampleDeal())
+	m.Intro = "· 09月26日 23:59 截止 · 洪城消费券第三批\n· 09月27日 10:00 开抢 · 滕王阁消费券"
+	f, _ := NewFeishu(config.Feishu{Timezone: "UTC"})
+	card, err := json.Marshal(f.card(m))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, _ := NewOpenClawRelay(config.OpenClaw{Command: "openclaw", Target: "chat:1", Channel: "feishu"})
+	for name, out := range map[string]string{
+		"card":  string(card),
+		"plain": m.Plain(),
+		"relay": r.Args(m)[len(r.Args(m))-1],
+	} {
+		if !strings.Contains(out, "截止") || !strings.Contains(out, "23:59") {
+			t.Errorf("%s lost the closing moment: %s", name, out)
+		}
+	}
+	dir := t.TempDir()
+	d, err := NewFileDrop(dir, "deal-hunter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Send(context.Background(), m); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(filepath.Join(dir, "deal-hunter-latest.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "截止") {
+		t.Errorf("drop file lost the closing moment: %s", body)
+	}
+}

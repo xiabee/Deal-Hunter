@@ -95,6 +95,18 @@ func (s *spyNotifier) count() int {
 	return len(s.msgs)
 }
 
+func (s *spyNotifier) byKind(k notify.Kind) []notify.Message {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []notify.Message
+	for _, m := range s.msgs {
+		if m.Kind == k {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
 func (s *spyNotifier) all() []notify.Message {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1108,5 +1120,156 @@ func TestUpcomingEventsReportsTheReminderState(t *testing.T) {
 	}
 	if !strings.Contains(got.Title, "洪城消费券") {
 		t.Errorf("title = %q", got.Title)
+	}
+}
+
+// expiryApp seeds one stored voucher whose deadline is `due` and collects nothing,
+// so whatever the round sends is the deadline's doing alone.
+func expiryApp(t *testing.T, due time.Time, lead time.Duration) (*App, *spyNotifier) {
+	t.Helper()
+	// The RSS collector refuses an empty channel, so serve one row that the
+	// offer gate drops: what the round sends is then only the deadline's doing.
+	empty := []byte(`<?xml version="1.0"?><rss version="2.0"><channel><title>t</title><item>
+<title>本周行业新闻汇总</title><link>https://nc.test/news/1</link>
+<description>技术动态与产品发布，不涉及价格。</description>
+<pubDate>` + time.Now().Add(-time.Hour).Format(time.RFC1123Z) + `</pubDate>
+</item></channel></rss>`)
+	f := &cannedFetcher{byURL: map[string][]byte{feedURL: empty}}
+	spy := &spyNotifier{}
+	app := testApp(t, f, spy, func(c *config.Config) {
+		c.Timezone = "Asia/Shanghai"
+		c.Notify.Event.MinScore = 50
+		c.Notify.Event.ExpiryLead = config.Duration(lead)
+	})
+	d := &model.Deal{
+		Title: "洪城消费券第三批", URL: "https://nc.test/tzgg/202609/d.shtml",
+		Score: 78, IsFree: true, Category: model.CatVoucher,
+		Offers:      []model.Offer{{Kind: model.KindFree}},
+		PublishedAt: time.Now().Add(-24 * time.Hour), DiscoveredAt: time.Now().Add(-24 * time.Hour),
+		Meta: map[string]string{"expires_at": due.Format(time.RFC3339)},
+	}
+	d.EnsureFingerprint()
+	if err := app.st.Save(d); err != nil {
+		t.Fatal(err)
+	}
+	return app, spy
+}
+
+// 日报是早上发的，"今天 23:59 作废"那句话在日报里读到时已经过了十几个小时。
+// 所以到期前 3 小时要再开口一次，而且只开口一次。
+func TestDeadlineInsideTheExpiryLeadRemindsOnce(t *testing.T) {
+	app, spy := expiryApp(t, time.Now().Add(2*time.Hour), 3*time.Hour)
+	for i := 0; i < 2; i++ {
+		if _, err := app.RunOnce(context.Background(), "unit"); err != nil {
+			t.Fatalf("RunOnce: %v", err)
+		}
+	}
+	msgs := spy.byKind(notify.KindEvent)
+	if len(msgs) != 1 {
+		t.Fatalf("one deadline reminder expected, got %d: %+v", len(msgs), msgs)
+	}
+	if len(msgs[0].Deals) != 1 || msgs[0].Deals[0].Title != "洪城消费券第三批" {
+		t.Errorf("the reminder must carry the row whose deadline is near: %+v", msgs[0].Deals)
+	}
+}
+
+// 窗口之外必须闭嘴：还有 5 天到期就提醒，等于把日报再发一遍。
+func TestDeadlineOutsideTheExpiryLeadStaysSilent(t *testing.T) {
+	for name, due := range map[string]time.Time{
+		"still far":    time.Now().Add(5 * 24 * time.Hour),
+		"already gone": time.Now().Add(-30 * time.Minute),
+	} {
+		t.Run(name, func(t *testing.T) {
+			app, spy := expiryApp(t, due, 3*time.Hour)
+			if _, err := app.RunOnce(context.Background(), "unit"); err != nil {
+				t.Fatalf("RunOnce: %v", err)
+			}
+			if n := len(spy.byKind(notify.KindEvent)); n != 0 {
+				t.Errorf("no deadline reminder expected, got %d", n)
+			}
+		})
+	}
+}
+
+// 提醒卡片的标题必须自己说清楚是"要开了"还是"要没了"：两种时刻要做的动作相反。
+func TestDeadlineReminderTitleSaysWhatIsEnding(t *testing.T) {
+	app, spy := expiryApp(t, time.Now().Add(2*time.Hour), 3*time.Hour)
+	if _, err := app.RunOnce(context.Background(), "unit"); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	msgs := spy.byKind(notify.KindEvent)
+	if len(msgs) != 1 {
+		t.Fatalf("one reminder expected, got %d", len(msgs))
+	}
+	if !strings.Contains(msgs[0].Title, "截止") {
+		t.Errorf("title should name the closing moment, got %q", msgs[0].Title)
+	}
+}
+
+// 两条都临近时按"还有多久发生"排序，而且一张卡最多 max_items 行；剩下的不是丢掉，
+// 是等下一轮 / 明天，因为标记只在真的发出去之后才写。
+func TestDueEventsOrderOpeningBeforeLaterDeadline(t *testing.T) {
+	empty := []byte(`<?xml version="1.0"?><rss version="2.0"><channel><title>t</title><item>
+<title>本周行业新闻汇总</title><link>https://nc.test/news/1</link>
+<description>技术动态与产品发布，不涉及价格。</description>
+<pubDate>` + time.Now().Add(-time.Hour).Format(time.RFC1123Z) + `</pubDate>
+</item></channel></rss>`)
+	f := &cannedFetcher{byURL: map[string][]byte{feedURL: empty}}
+	spy := &spyNotifier{}
+	app := testApp(t, f, spy, func(c *config.Config) {
+		c.Timezone = "Asia/Shanghai"
+		c.Notify.Event.MinScore = 50
+		c.Notify.Event.ExpiryLead = config.Duration(3 * time.Hour)
+		c.Notify.Event.MaxItems = 2
+	})
+	save := func(fp, title string, meta map[string]string) {
+		d := &model.Deal{Fingerprint: fp, Title: title, URL: "https://nc.test/" + fp, Score: 78,
+			IsFree: true, Category: model.CatVoucher, Offers: []model.Offer{{Kind: model.KindFree}},
+			PublishedAt: time.Now().Add(-time.Hour), DiscoveredAt: time.Now().Add(-time.Hour), Meta: meta}
+		if err := app.st.Save(d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	save("late", "傍晚截止的券", map[string]string{"expires_at": time.Now().Add(2 * time.Hour).Format(time.RFC3339)})
+	save("soon", "半小时后开抢的券", map[string]string{"starts_at": time.Now().Add(30 * time.Minute).Format(time.RFC3339)})
+	save("later", "两小时后才开抢的券", map[string]string{"starts_at": time.Now().Add(2 * time.Hour).Format(time.RFC3339)})
+
+	if _, err := app.RunOnce(context.Background(), "unit"); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	msgs := spy.byKind(notify.KindEvent)
+	if len(msgs) != 1 {
+		t.Fatalf("one card expected, got %d", len(msgs))
+	}
+	if len(msgs[0].Deals) != 2 {
+		t.Fatalf("max_items must cap the card at 2 rows, got %d", len(msgs[0].Deals))
+	}
+	if msgs[0].Deals[0].Fingerprint != "soon" {
+		t.Errorf("the nearest moment should lead the card, got %s then %s",
+			msgs[0].Deals[0].Fingerprint, msgs[0].Deals[1].Fingerprint)
+	}
+	if !strings.Contains(msgs[0].Intro, "开抢") || !strings.Contains(msgs[0].Intro, "截止") {
+		t.Errorf("mixed rows must each name their own moment: %q", msgs[0].Intro)
+	}
+	// 第三行等下一轮：没发出去就不该留下"已提醒"的标记。
+	if _, reminded := app.stateTime(eventRemindedPrefix + "later"); reminded {
+		t.Error("a row that never left must not be marked as reminded")
+	}
+}
+
+// 运维问"在跟踪哪些"时，只有截止时刻、从没写开抢时刻的行也算在跟踪 —— 否则
+// "为什么没有提醒"这个问题只能靠猜。
+func TestUpcomingEventsIncludesDeadlineOnlyRows(t *testing.T) {
+	app, _ := expiryApp(t, time.Now().Add(2*time.Hour), 3*time.Hour)
+	tracked := app.UpcomingEvents(time.Now())
+	if len(tracked) != 1 {
+		t.Fatalf("a row with only a deadline is still tracked, got %+v", tracked)
+	}
+	got := tracked[0]
+	if got.Due != "截止" || got.ClosesAt.IsZero() {
+		t.Errorf("the row must report its closing moment, got %+v", got)
+	}
+	if !got.InWindow {
+		t.Error("two hours out with a 3h lead is inside the window")
 	}
 }

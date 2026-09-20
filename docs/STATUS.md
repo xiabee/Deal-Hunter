@@ -3,17 +3,43 @@
 > 给下一次会话用的恢复点。只写有证据的结论：VERIFIED / NOT VERIFIED / BLOCKED / NOT APPLICABLE。
 > 长期方向看 [ROADMAP.md](ROADMAP.md)，用法看 [../README.md](../README.md)。
 
-最近更新：2026-09-20（M3 与"截止时刻时区"修复均已部署，生产 = `3db4152` = HEAD）
+最近更新：2026-09-20（M5 到期前提醒 + 面板日间模式做完；生产仍为 `3db4152`，待部署这一版）
 
 ## Current Milestone
 
-**M3 · 本地消费券与开抢前提醒**（设计见 [superpowers/specs/](superpowers/specs/)）。
+**M5 · 到期前提醒（复用 M3 的事件通道）** —— 用户批准的形态：不新增第四类消息，同一张 ⏰ 卡
+既报"要开抢"也报"要作废"，两个钟共用 `event:reminded:<fp>` 与 `event:sent` 预算。
+落点：`Store.Expiring`、`notify.event.expiry_lead`（默认 3h，`0s` 只关到期侧）、
+`status.event` 拆出 `due_opening` / `due_expiry`、`dealhunter events` 增"事由"列、
+doctor 报"到期前 3h0m0s"、面板 hint 分开显示两个数。顺带：面板加日间模式（默认跟随系统）。
+
+**M3 的挂起项没变，只是范围扩到两端**：真实"到时候收到且只收到一次"仍 NOT VERIFIED ——
+生产库至今 0 行带 `expires_at` / `starts_at`。判据见下面的「复核判据」。
+
+### 上一节：M3 · 本地消费券与开抢前提醒（设计见 [superpowers/specs/](superpowers/specs/)）
+
 代码与部署都已完成：`follow_detail` 与列表行日期、`starts_at` 解析、限时事件的日报在效口径分叉、
 事件提醒通道（配置 / 调度 / 三条渲染路径 / 状态字段 / 面板）、`dealhunter events` 复核命令、
-南昌两个官方信源经 `extra_sources` 上线。
+南昌两个官方信源经 `extra_sources` 上线。它的挂起项已由 M5 接上同一张卡。
 
-**M3 只剩一项**：真实"开抢前收到且只收到一次"。今天下午的观察结论是**当前没有可触发的公告**
-（见下表"真机观察"行），不是代码缺陷。这一项转成挂起的复核，判据和取数命令写在下面。
+## Last Completed：M5 到期前提醒 + 面板日间模式（2026-09-20）
+
+**到期侧**：`Store.Expiring(from, through, min)`（与 `Upcoming` 同形状，键换 `expires_at`）；
+`dueEvents` 合并两个锚点、按"还有多久发生"排序、**同一行取更近的那个钟**，仍受
+`event:reminded:<fp>` 一次性约束，预算仍是 `event:sent`。到期只提醒**还没过去**的截止时刻
+（`from = now`），过期即静默。`expiry_lead=0s` 只关到期侧、不动开抢侧。
+
+四条守卫都做了变异复查（改回旧写法必红）：到期窗口内提醒一次、`max_items` 截断且第三行不留
+"已提醒"标记、标题带上"截止"字样、只有截止时刻的行也进 `events` 清单与面板 due 计数。
+`dealhunter events` 之前会把只有截止的行显示成"开抢时刻 01-01 08:05 / -2562048小时前"，
+现在按 `Moment` + `事由` 显示 —— 这就是加那条 CLI 测试的理由。
+
+**日间模式**：`index.html` 的配色全部走 `:root` 变量，新增 `[data-theme=light]` 一组覆盖；
+原先 7 处 `rgba(255,255,255,.0x)` 覆盖层与 4 处浅紫/浅青文字收进 `--glass/--glass2/--edge/
+--sum/--tint-*`，否则在纸白底上直接看不见。切换按钮在顶栏，首屏顺序 `localStorage('dh-theme')`
+→ `prefers-color-scheme` → 暗色，判定写在 `<style>` 之前以免刷新闪白。
+门禁能测的是"浅色块重定义了 5 个核心变量 + 正文对底色对比度 ≥ WCAG AA 4.5:1 + 不留硬编码白覆盖层"；
+**好不好看没测也没有工具能测，需要人眼过一遍**。
 
 ## Last Completed：M3 部署 + 真机观察（2026-09-20）
 
@@ -57,21 +83,30 @@
 | 生产部署 | VERIFIED | `deal-hunter 3db4152 · built=2026-09-20T08:00:54Z`，与 `git rev-parse HEAD` 及 `origin/main` 三者一致；产物 sha256 `dc3787bb…` 在构建机、本机暂存、生产三处相同（传输未被篡改）；`install.sh` 装前跑了一次真 `version`，服务 `active`，首轮 `sources=17 errors=0` |
 | 时区修正的可观察效果 | NOT APPLICABLE（暂无对象） | 生产库 904 行带 `meta`，但 **`expires_at` / `starts_at` 均为 0 行** —— 至今没有任何一行真的解析出了时刻并落库（4 月那条在落库前就被拒）。所以这次修正在生产上暂无可比对的观测面，效果只由测试与两道变异守卫证明。第一条带时刻的行落库时要回头看一眼偏移是不是 `+08:00` |
 | 真机观察：券公告触发行为 | VERIFIED（观察本身） | 见上一节：两源一条正确拒收、一条今日无券关键词，事件通道 0 发 0 候补，无误发无骚扰 |
-| **真实开抢提醒实地复核** | **NOT VERIFIED** | 今天南昌没有"写了明确时刻且临近开抢"的市级公告；唯一在闸内的行是 4 月问答。省级在跑的（赣超 / 体育消费券 9-14 起、每人每周限领 2 张）用的是**周期性/无年份**措辞，M3 故意不猜。触发路径已由夹具与真实措辞两侧证明，等的只是一条现实公告 |
+| **真实"到时候提醒"实地复核（开抢与到期两端）** | **NOT VERIFIED** | 今天南昌没有"写了明确时刻且临近开抢或截止"的市级公告；唯一在闸内的行是 4 月问答。省级在跑的（赣超 / 体育消费券 9-14 起、每人每周限领 2 张）用的是**周期性/无年份**措辞，M3 故意不猜。触发路径已由夹具与真实措辞两侧证明，等的只是一条现实公告 |
+| 到期前提醒（M5，夹具驱动） | VERIFIED | 窗口内（2h / lead 3h）恰好一次且跨轮不重发；还有 5 天与已过期 30 分钟都静默；`max_items=2` 截断后第三行不留标记；标题带"截止"；只有截止时刻的行进 `events` 清单与 `due_expiry` 计数。四条守卫逐个变异复查过（把实现改回旧写法即红） |
+| 面板日间模式（M5） | VERIFIED（结构） / NOT VERIFIED（观感） | 结构守卫：浅色块必须重定义 `--bg/--panel/--txt/--dim/--line`，暗与亮两套 `--txt` 对 `--bg` 的对比度都 ≥4.5:1（测试里现算 WCAG），且不允许残留 `rgba(255,255,255` 硬编码。配色好不好看**没有工具能证明**，需读者在浏览器里看一眼 |
 | 面板在采集轮进行中应答（M4） | VERIFIED | 单元层：把信息源卡在请求里，读取方原本等满 3 秒，拆锁后立刻返回，`-race` 干净。生产层：重启后 40 次打 `/api/v1/status` 最大 168ms（1 次非 200 是重启缝隙，稳定态复测 25 次全 200、最大 105ms） |
 | ARM64 实跑 | NOT VERIFIED | 只做了交叉编译，未在 arm64 上 start/smoke |
 | GitHub Actions | NOT APPLICABLE | 项目故意不使用（额度），门禁是本地脚本 + 办公室构建机 |
 
 ## 复核判据（下一条南昌公告出现时执行）
 
-判据：开抢前 ≤45 分钟内收到**且只收到一次**⏰，两个通道各一条。
+判据（两端各一条，通道为飞书 + OpenClaw drop，故每条各 2 行日志）：
+
+- **开抢**：临近开抢 ≤45 分钟时收到 ⏰，标题带"开抢"，且同一行只收到一次。
+- **到期**：临近截止 ≤3 小时（`expiry_lead`）时收到 ⏰，标题带"截止"；已过期的一律不发。
+- 前提是**库里先得有带时刻的行**：`grep -c expires_at deals.jsonl` 目前为 0，若一直是 0，
+  说明公告措辞仍解析不出来（去看 `dealhunter probe -source nc-vouchers-swj` 的详情正文），
+  而不是提醒通道坏了。
 
 ```bash
 ssh alienware-life 'sudo /opt/deal-hunter/deal-hunter events -config /etc/deal-hunter/config.json'
 # 面板地址只写在 root 可读的 env 里，别把字面量搬进仓库
-ssh alienware-life 'B=$(sudo grep -m1 "^DH_SERVER_BIND=" /etc/deal-hunter/deal-hunter.env | cut -d= -f2-); sudo curl -s "http://$B/api/v1/status" | grep -A9 "\"event\""'  # due_now / sent_today
-ssh alienware-life 'sudo journalctl -u deal-hunter --since today | grep "kind=event"'               # 应恰好 2 行
+ssh alienware-life 'B=$(sudo grep -m1 "^DH_SERVER_BIND=" /etc/deal-hunter/deal-hunter.env | cut -d= -f2-); sudo curl -s "http://$B/api/v1/status" | grep -A11 "\"event\""'  # due_opening / due_expiry / sent_today
+ssh alienware-life 'sudo journalctl -u deal-hunter --since today | grep "kind=event"'               # 每个事件 2 行（两个通道）
 ssh alienware-life 'sudo grep -oE "\"event:(reminded:[^\"]+|sent)\"[^}]*" /var/lib/deal-hunter/state.json'  # 没提醒过时为空（今天即为空）
+ssh alienware-life 'echo -n "带时刻的行: "; sudo grep -c -e expires_at -e starts_at /var/lib/deal-hunter/deals.jsonl'
 ```
 
 ## M3 的结构性限制（真机确认，别反复尝试）
@@ -127,8 +162,11 @@ config/deploy/dist）与 `/tmp/dh-wire-feishu.sh`（9-19，把服务接到租户
   连不上不是故障，要用 env 里那个地址。
 - 交付相关的状态键：`daily:last_sent`、`daily:watched_since`（进程启动即刷新）、
   `urgent:sent` 与 `event:sent`（都是 `{"date":"2006-01-02","n":1}`，按 `timezone` 的本地日记账）、
-  `event:reminded:<fingerprint>`（每个事件一次，写过就不再提醒）。
+  `event:reminded:<fingerprint>`（每个事件一次；**开抢与到期共用这一个标记**，所以一张券不会说两遍）。
   `state.json` 里残留着已无人读取的 `digest:last_sent`，没有功能影响，故未动生产状态文件。
+- 事件通道现在有两个窗口：`notify.event.lead_time`（开抢前）与 `notify.event.expiry_lead`
+  （到期前，默认 3h，env `DH_EVENT_EXPIRY_LEAD`）。生产 `/etc/deal-hunter/config.json` 里
+  `event` 块**部署这一版时要补 `expiry_lead`**，否则走内置默认 3h（行为一致，只是配置不自明）。
 - 生产 `/etc/deal-hunter/config.json` 已清理：删掉 digest 与 feishu 的废弃键，显式写入
   `daily` / `urgent` / `event`，南昌两源放在 `extra_sources`；`openclaw.{command,args}`
   （sudo 包装脚本）原样保留。废弃的 `DH_MIN_SCORE` 之类已从生产配置移除；env 密钥未动。

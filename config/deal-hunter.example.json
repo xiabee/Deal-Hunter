@@ -53,6 +53,7 @@
       "enabled": true,
       "lead_time": "45m",
       "late_grace": "15m",
+      "expiry_lead": "3h",
       "max_per_day": 2,
       "min_score": 60,
       "max_items": 3

@@ -145,9 +145,13 @@ type Event struct {
 	// the discovery time is somewhere inside [start-lead, start+grace].
 	Lead      Duration `json:"lead_time,omitempty"`
 	LateGrace Duration `json:"late_grace,omitempty"`
-	MaxPerDay int      `json:"max_per_day,omitempty"`
-	MinScore  int      `json:"min_score,omitempty"`
-	MaxItems  int      `json:"max_items,omitempty"`
+	// ExpiryLead is how early before a deadline the same channel speaks up again.
+	// 0 keeps the channel to openings only — a reader who says "enough" gets a
+	// zero, not a silently refilled default.
+	ExpiryLead Duration `json:"expiry_lead,omitempty"`
+	MaxPerDay  int      `json:"max_per_day,omitempty"`
+	MinScore   int      `json:"min_score,omitempty"`
+	MaxItems   int      `json:"max_items,omitempty"`
 }
 
 // Notify groups all delivery backends.
@@ -220,21 +224,22 @@ const (
 	EnvFeishuSecret  = "DH_FEISHU_SECRET"
 	EnvFeishuEnabled = "DH_FEISHU_ENABLED"
 	// Application-identity delivery (no group bot required).
-	EnvFeishuAppID    = "DH_FEISHU_APP_ID"
-	EnvFeishuAppSect  = "DH_FEISHU_APP_SECRET"
-	EnvFeishuRecvID   = "DH_FEISHU_RECEIVE_ID"
-	EnvFeishuRecvType = "DH_FEISHU_RECEIVE_ID_TYPE"
-	EnvFeishuAPIBase  = "DH_FEISHU_API_BASE"
-	EnvServerBind     = "DH_SERVER_BIND"
-	EnvServerEnabled  = "DH_SERVER_ENABLED"
-	EnvAllowPublic    = "DH_ALLOW_PUBLIC_BIND"
-	EnvDailyEnabled   = "DH_DAILY_ENABLED"
-	EnvDailyAt        = "DH_DAILY_AT"
-	EnvUrgentEnabled  = "DH_URGENT_ENABLED"
-	EnvUrgentMinScore = "DH_URGENT_MIN_SCORE"
-	EnvEventEnabled   = "DH_EVENT_ENABLED"
-	EnvEventLeadTime  = "DH_EVENT_LEAD_TIME"
-	EnvEventMinScore  = "DH_EVENT_MIN_SCORE"
+	EnvFeishuAppID     = "DH_FEISHU_APP_ID"
+	EnvFeishuAppSect   = "DH_FEISHU_APP_SECRET"
+	EnvFeishuRecvID    = "DH_FEISHU_RECEIVE_ID"
+	EnvFeishuRecvType  = "DH_FEISHU_RECEIVE_ID_TYPE"
+	EnvFeishuAPIBase   = "DH_FEISHU_API_BASE"
+	EnvServerBind      = "DH_SERVER_BIND"
+	EnvServerEnabled   = "DH_SERVER_ENABLED"
+	EnvAllowPublic     = "DH_ALLOW_PUBLIC_BIND"
+	EnvDailyEnabled    = "DH_DAILY_ENABLED"
+	EnvDailyAt         = "DH_DAILY_AT"
+	EnvUrgentEnabled   = "DH_URGENT_ENABLED"
+	EnvUrgentMinScore  = "DH_URGENT_MIN_SCORE"
+	EnvEventEnabled    = "DH_EVENT_ENABLED"
+	EnvEventLeadTime   = "DH_EVENT_LEAD_TIME"
+	EnvEventExpiryLead = "DH_EVENT_EXPIRY_LEAD"
+	EnvEventMinScore   = "DH_EVENT_MIN_SCORE"
 	// OpenClaw relay: the destination chat id stays out of the config file.
 	EnvOpenClawTarget = "DH_OPENCLAW_TARGET"
 	EnvOpenClawCmd    = "DH_OPENCLAW_COMMAND"
@@ -273,7 +278,8 @@ func Default() *Config {
 			Daily:    Daily{Enabled: true, At: defaultDailyAt, MinScore: 45, MaxItems: 15},
 			Urgent:   Urgent{Enabled: true, MinScore: 90, MaxPerDay: 1, MaxItems: 5},
 			Event: Event{Enabled: true, Lead: Duration(45 * time.Minute),
-				LateGrace: Duration(15 * time.Minute), MaxPerDay: 2, MinScore: 60, MaxItems: 3},
+				LateGrace: Duration(15 * time.Minute), ExpiryLead: Duration(3 * time.Hour),
+				MaxPerDay: 2, MinScore: 60, MaxItems: 3},
 			Console: true,
 		},
 		Sources: DefaultSources(),
@@ -473,6 +479,11 @@ func (c *Config) applyEnv() {
 			c.Notify.Event.Lead = Duration(d)
 		}
 	}
+	if v := os.Getenv(EnvEventExpiryLead); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			c.Notify.Event.ExpiryLead = Duration(d)
+		}
+	}
 	if v := os.Getenv(EnvEventMinScore); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			c.Notify.Event.MinScore = n
@@ -560,6 +571,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Notify.Event.Lead.D() < 0 || c.Notify.Event.LateGrace.D() < 0 || c.Notify.Event.MaxPerDay < 0 {
 		return fmt.Errorf("config: notify.event lead/grace/max_per_day must not be negative")
+	}
+	if c.Notify.Event.ExpiryLead.D() < 0 {
+		return fmt.Errorf("config: notify.event.expiry_lead must be >= 0 (0 keeps the channel to openings only)")
 	}
 	if c.Notify.Urgent.MaxPerDay < 0 {
 		return fmt.Errorf("config: notify.urgent.max_per_day %d must be >= 0", c.Notify.Urgent.MaxPerDay)

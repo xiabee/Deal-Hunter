@@ -375,6 +375,32 @@ func (s *Store) Upcoming(from, through time.Time, min int) []model.Deal {
 	return out
 }
 
+// Expiring returns rows whose recorded deadline falls inside [from, through],
+// soonest first. It mirrors Upcoming but keys off expires_at, so the reminder can
+// say "three hours left" about an offer the morning report already listed.
+func (s *Store) Expiring(from, through time.Time, min int) []model.Deal {
+	var out []model.Deal
+	for _, d := range s.Recent(20000) {
+		if d.Meta["dup_of"] != "" || d.Score < min {
+			continue
+		}
+		exp, ok := metaTime(d, "expires_at")
+		if !ok || exp.Before(from) || exp.After(through) {
+			continue
+		}
+		out = append(out, d)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		a, _ := metaTime(out[i], "expires_at")
+		b, _ := metaTime(out[j], "expires_at")
+		if !a.Equal(b) {
+			return a.Before(b)
+		}
+		return out[i].Title < out[j].Title
+	})
+	return out
+}
+
 // GetState reads a source cursor.
 func (s *Store) GetState(key string) ([]byte, bool) {
 	s.mu.Lock()

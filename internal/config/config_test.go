@@ -366,3 +366,44 @@ func TestExtraSourcesExtendTheBuiltinSet(t *testing.T) {
 		t.Errorf("extra_sources must append to an explicit list: %+v", cfg2.Sources)
 	}
 }
+
+// 到期提醒复用事件通道，所以它的窗口必须是可关的：读者说"够了"的时候，把
+// expiry_lead 写成 0 就该只剩开抢提醒，而不是被默认值悄悄填满。
+func TestEventExpiryLeadDefaultsOverrideAndOff(t *testing.T) {
+	if got := Default().Notify.Event.ExpiryLead.D(); got != 3*time.Hour {
+		t.Errorf("default expiry_lead = %s, want 3h", got)
+	}
+
+	t.Setenv(EnvEventExpiryLead, "90m")
+	fromEnv, err := Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := fromEnv.Notify.Event.ExpiryLead.D(); got != 90*time.Minute {
+		t.Errorf("env expiry_lead = %s, want 90m", got)
+	}
+
+	t.Setenv(EnvEventExpiryLead, "")
+	path := filepath.Join(t.TempDir(), "c.json")
+	if err := os.WriteFile(path, []byte(`{"notify":{"event":{"expiry_lead":"0s"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	off, err := Load(path)
+	if err != nil {
+		t.Fatalf("an explicit 0 must be a valid config: %v", err)
+	}
+	if got := off.Notify.Event.ExpiryLead.D(); got != 0 {
+		t.Errorf("explicit 0 became %s; 0 means never remind about deadlines", got)
+	}
+	if off.Notify.Event.Lead.D() != 45*time.Minute {
+		t.Errorf("turning off the expiry side must not disturb the opening lead, got %s", off.Notify.Event.Lead)
+	}
+}
+
+func TestEventExpiryLeadRejectsNegative(t *testing.T) {
+	bad := Default()
+	bad.Notify.Event.ExpiryLead = Duration(-time.Hour)
+	if err := bad.Validate(); err == nil || !strings.Contains(err.Error(), "expiry_lead") {
+		t.Errorf("want expiry_lead rejection, got %v", err)
+	}
+}

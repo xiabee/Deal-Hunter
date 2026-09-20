@@ -3,10 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func run(t *testing.T, args ...string) (int, string) {
@@ -177,7 +179,7 @@ func TestDoctorReportsAllThreeMessageTypes(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("doctor should pass with defaults: code=%d out=%s", code, out)
 	}
-	for _, want := range []string{"日报=", "突破=", "提醒="} {
+	for _, want := range []string{"日报=", "突破=", "提醒=", "到期前"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("doctor config row missing %q:\n%s", want, out)
 		}
@@ -188,5 +190,30 @@ func TestDoctorReportsAllThreeMessageTypes(t *testing.T) {
 func TestEventsCommandRunsOnAnEmptyStore(t *testing.T) {
 	if code, out := run(t, "-data", t.TempDir(), "events"); code != 0 || !strings.Contains(out, "没有") {
 		t.Fatalf("code=%d out=%s", code, out)
+	}
+}
+
+// 只写了核销期限、没写开抢时刻的券同样是跟踪对象。表格若仍拿"开抢时刻"这一列去判断
+// 状态，这样的行会被标成"已过窗口"，运维就看不出提醒到底在等什么。
+func TestEventsCommandListsDeadlineOnlyRows(t *testing.T) {
+	due := time.Now().Add(2 * time.Hour).UTC().Format(time.RFC3339)
+	const tmpl = `{"fingerprint":"d1","url":"https://nc.test/d","title":"洪城消费券第三批",` +
+		`"source":"nc","category":"voucher","score":78,"is_free":true,"published_at":"%s",` +
+		`"discovered_at":"%s","meta":{"expires_at":"%s"}}` + "\n"
+	now := time.Now().Add(-24 * time.Hour).UTC().Format(time.RFC3339)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "deals.jsonl"),
+		[]byte(fmt.Sprintf(tmpl, now, now, due)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, out := run(t, "-data", dir, "events")
+	if code != 0 {
+		t.Fatalf("code=%d out=%s", code, out)
+	}
+	if !strings.Contains(out, "截止") || !strings.Contains(out, "窗口内待提醒") {
+		t.Errorf("the deadline row should be listed as waiting inside its window:\n%s", out)
+	}
+	if strings.Contains(out, "已过窗口") {
+		t.Errorf("a deadline-only row is not a missed opening:\n%s", out)
 	}
 }

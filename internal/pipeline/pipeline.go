@@ -894,47 +894,96 @@ type EventInfo struct {
 	Enabled   bool `json:"enabled"`
 	LeadM     int  `json:"lead_minutes"`
 	GraceM    int  `json:"late_grace_minutes"`
+	ExpiryM   int  `json:"expiry_lead_minutes"`
 	MinScore  int  `json:"min_score"`
 	MaxPerDay int  `json:"max_per_day"`
 	SentToday int  `json:"sent_today"`
 	Upcoming  int  `json:"due_now"`
+	// The two counts are split on purpose: one blended number cannot answer
+	// "is the next interruption an opening or a closing?".
+	DueOpening int `json:"due_opening"`
+	DueExpiry  int `json:"due_expiry"`
 }
 
 // Event reports the reminder schedule and how many tracked events are waiting.
 func (a *App) Event(now time.Time) EventInfo {
 	e := a.cfg.Notify.Event
 	info := EventInfo{Enabled: e.Enabled, LeadM: int(e.Lead.D() / time.Minute),
-		GraceM: int(e.LateGrace.D() / time.Minute), MinScore: e.MinScore, MaxPerDay: e.MaxPerDay}
+		GraceM: int(e.LateGrace.D() / time.Minute), ExpiryM: int(e.ExpiryLead.D() / time.Minute),
+		MinScore: e.MinScore, MaxPerDay: e.MaxPerDay}
 	if day, n := a.budgetSpent(eventCursor); day == a.localDay(now) {
 		info.SentToday = n
 	}
-	info.Upcoming = len(a.eventsDue(now))
+	due := a.dueEvents(now)
+	info.Upcoming = len(due)
+	for _, d := range due {
+		if d.word == "截止" {
+			info.DueExpiry++
+		} else {
+			info.DueOpening++
+		}
+	}
 	return info
 }
 
-// eventsDue returns the tracked events whose announced start is inside the
-// reminder window and which have not been reminded about yet.
-func (a *App) eventsDue(now time.Time) []model.Deal {
+// dueEvent is one stored row the reminder channel should speak up about, and
+// which of its two clocks made it due. A voucher announces both a start and an
+// end, and both are worth a message — the morning report mentions "closes Friday"
+// fourteen hours before it is actionable.
+type dueEvent struct {
+	deal model.Deal
+	when time.Time
+	word string // 开抢 or 截止
+}
+
+// eventsDue returns the un-reminded rows whose opening or closing moment is
+// inside its own window. Both anchors can match the same row; the nearer one
+// wins, because that is what the reader still has time to act on.
+func (a *App) dueEvents(now time.Time) []dueEvent {
 	e := a.cfg.Notify.Event
 	if !e.Enabled {
 		return nil
 	}
-	from, through := now.Add(-e.LateGrace.D()), now.Add(e.Lead.D())
-	var due []model.Deal
-	for _, d := range a.st.Upcoming(from, through, e.MinScore) {
-		if _, done := a.stateTime(eventRemindedPrefix + d.Fingerprint); done {
+	var candidates []dueEvent
+	if d := e.ExpiryLead.D(); d > 0 {
+		for _, row := range a.st.Expiring(now, now.Add(d), e.MinScore) {
+			if when, ok := closingInstant(row); ok {
+				candidates = append(candidates, dueEvent{deal: row, when: when, word: "截止"})
+			}
+		}
+	}
+	for _, row := range a.st.Upcoming(now.Add(-e.LateGrace.D()), now.Add(e.Lead.D()), e.MinScore) {
+		if when, ok := metaInstant(row); ok {
+			candidates = append(candidates, dueEvent{deal: row, when: when, word: "开抢"})
+		}
+	}
+	nearest := map[string]dueEvent{}
+	for _, c := range candidates {
+		if cur, seen := nearest[c.deal.Fingerprint]; !seen || c.when.Before(cur.when) {
+			nearest[c.deal.Fingerprint] = c
+		}
+	}
+	out := make([]dueEvent, 0, len(nearest))
+	for fp, c := range nearest {
+		if _, done := a.stateTime(eventRemindedPrefix + fp); done {
 			continue
 		}
-		due = append(due, d)
+		out = append(out, c)
 	}
-	return due
+	sort.SliceStable(out, func(i, j int) bool {
+		if !out[i].when.Equal(out[j].when) {
+			return out[i].when.Before(out[j].when)
+		}
+		return out[i].deal.Title < out[j].deal.Title
+	})
+	return out
 }
 
 // sendDueEvents reminds once per dated event. A row that cannot be delivered
 // stays unmarked, so the next round retries it; the budget is only charged for a
 // message that actually left.
 func (a *App) sendDueEvents(ctx context.Context, now time.Time) (sent, held int, err error) {
-	due := a.eventsDue(now)
+	due := a.dueEvents(now)
 	if len(due) == 0 {
 		return 0, 0, nil
 	}
@@ -947,12 +996,12 @@ func (a *App) sendDueEvents(ctx context.Context, now time.Time) (sent, held int,
 			"waiting", len(due), "max_per_day", a.cfg.Notify.Event.MaxPerDay)
 		return 0, len(due), nil
 	}
-	msg := notify.NewMessage(notify.KindEvent, a.eventTitle(due, now), due...)
+	msg := notify.NewMessage(notify.KindEvent, a.eventTitle(due, now), dealsOf(due)...)
 	if len(due) > 1 {
 		// A shared title can only carry one moment, so each row states its own.
 		lines := make([]string, 0, len(due))
 		for _, d := range due {
-			lines = append(lines, "· "+a.eventWhen(d)+" 开抢 · "+truncateRunes(d.Title, 30))
+			lines = append(lines, "· "+a.formatWhen(d.when)+" "+d.word+" · "+truncateRunes(d.deal.Title, 30))
 		}
 		msg.Intro = strings.Join(lines, "\n")
 	}
@@ -961,7 +1010,7 @@ func (a *App) sendDueEvents(ctx context.Context, now time.Time) (sent, held int,
 		return 0, len(due), err
 	}
 	for _, d := range due {
-		if err := a.setStateTime(eventRemindedPrefix+d.Fingerprint, now.UTC()); err != nil {
+		if err := a.setStateTime(eventRemindedPrefix+d.deal.Fingerprint, now.UTC()); err != nil {
 			a.log.Warn("record reminder", "err", err)
 		}
 	}
@@ -971,26 +1020,40 @@ func (a *App) sendDueEvents(ctx context.Context, now time.Time) (sent, held int,
 	return len(due), held, nil
 }
 
-// eventTitle leads with the moment, because that is the whole reason the reader
-// opened the message.
-func (a *App) eventTitle(deals []model.Deal, now time.Time) string {
-	if len(deals) > 1 {
-		return fmt.Sprintf("⏰ %d 项即将开抢", len(deals))
+func dealsOf(due []dueEvent) []model.Deal {
+	out := make([]model.Deal, 0, len(due))
+	for _, d := range due {
+		out = append(out, d.deal)
 	}
-	d := deals[0]
-	if _, ok := metaInstant(d); !ok {
-		return "⏰ 即将开始 · " + truncateRunes(d.Title, 40)
-	}
-	return "⏰ " + a.eventWhen(d) + " 开抢 · " + truncateRunes(d.Title, 40)
+	return out
 }
 
-// eventWhen renders an event's start in the reader's zone.
-func (a *App) eventWhen(d model.Deal) string {
-	when, ok := metaInstant(d)
-	if !ok {
-		return "时间待定"
+// eventTitle leads with the moment, because that is the whole reason the reader
+// opened the message.
+func (a *App) eventTitle(due []dueEvent, now time.Time) string {
+	if len(due) > 1 {
+		return fmt.Sprintf("⏰ %d 项临近%s", len(due), due[0].word)
 	}
+	d := due[0]
+	return "⏰ " + a.formatWhen(d.when) + " " + d.word + " · " + truncateRunes(d.deal.Title, 40)
+}
+
+// formatWhen renders a moment in the reader's zone.
+func (a *App) formatWhen(when time.Time) string {
 	return when.In(a.loc()).Format("01月02日 15:04")
+}
+
+// closingInstant reads the deadline the scorer recorded, if there was one.
+func closingInstant(d model.Deal) (time.Time, bool) {
+	v := d.Meta["expires_at"]
+	if v == "" {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339, v)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
 }
 
 // metaInstant reads the start moment the scorer recorded.
@@ -1034,6 +1097,11 @@ type EventItem struct {
 	Source   string    `json:"source"`
 	Score    int       `json:"score"`
 	StartsAt time.Time `json:"starts_at"`
+	ClosesAt time.Time `json:"closes_at,omitempty"`
+	// Due names the moment the reminder would speak about: 开抢, 截止, or empty
+	// while both are still outside their windows.
+	Due      string    `json:"due"`
+	Moment   time.Time `json:"moment,omitempty"`
 	Reminded bool      `json:"reminded"`
 	InWindow bool      `json:"in_window"`
 }
@@ -1041,22 +1109,77 @@ type EventItem struct {
 // UpcomingEvents lists tracked dated events from three days ago to a month out,
 // soonest first, each with whether it has been reminded about yet. Events below
 // the reminder gate are included deliberately: "why is nothing firing?" is the
-// question an operator asks, and a silent omission cannot answer it.
+// question an operator asks, and a silent omission cannot answer it. A row that
+// only ever announced a deadline is tracked too — that is the other half of the
+// channel.
 func (a *App) UpcomingEvents(now time.Time) []EventItem {
 	e := a.cfg.Notify.Event
-	rows := a.st.Upcoming(now.Add(-72*time.Hour), now.AddDate(0, 0, 30), 0)
-	out := make([]EventItem, 0, len(rows))
+	from, through := now.Add(-72*time.Hour), now.AddDate(0, 0, 30)
+	rows := a.st.Upcoming(from, through, 0)
+	if e.Enabled && e.ExpiryLead.D() > 0 {
+		rows = append(rows, a.st.Expiring(from, through, 0)...)
+	}
+	type moment struct {
+		item EventItem
+		when time.Time
+	}
+	picked := map[string]moment{}
 	for _, d := range rows {
-		when, ok := metaInstant(d)
+		start, hasStart := metaInstant(d)
+		end, hasEnd := closingInstant(d)
+		var (
+			best moment
+			ok   bool
+		)
+		if hasStart {
+			best = moment{item: EventItem{Title: d.Title, URL: d.URL, Source: d.Source,
+				Score: d.Score, StartsAt: start}, when: start}
+			ok = true
+		}
+		// The nearer clock is the one worth reporting; a row can announce both.
+		if hasEnd && (!ok || best.when.After(end)) {
+			best = moment{item: EventItem{Title: d.Title, URL: d.URL, Source: d.Source,
+				Score: d.Score, StartsAt: start, ClosesAt: end}, when: end}
+			ok = true
+		}
 		if !ok {
 			continue
 		}
-		_, reminded := a.stateTime(eventRemindedPrefix + d.Fingerprint)
-		out = append(out, EventItem{
-			Title: d.Title, URL: d.URL, Source: d.Source, Score: d.Score, StartsAt: when,
-			Reminded: reminded,
-			InWindow: e.Enabled && !when.Before(now.Add(-e.LateGrace.D())) && !when.After(now.Add(e.Lead.D())),
-		})
+		best.item.Due = "开抢"
+		if !best.item.ClosesAt.IsZero() && best.when.Equal(end) {
+			best.item.Due = "截止"
+		}
+		if cur, seen := picked[d.Fingerprint]; !seen || best.when.Before(cur.when) {
+			picked[d.Fingerprint] = best
+		}
 	}
+	out := make([]EventItem, 0, len(picked))
+	for fp, m := range picked {
+		_, reminded := a.stateTime(eventRemindedPrefix + fp)
+		m.item.Moment = m.when
+		m.item.Reminded = reminded
+		m.item.InWindow = a.inWindow(e, m.when, m.item.Due, now)
+		out = append(out, m.item)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if !out[i].Moment.Equal(out[j].Moment) {
+			return out[i].Moment.Before(out[j].Moment)
+		}
+		return out[i].Title < out[j].Title
+	})
 	return out
+}
+
+// inWindow reports whether a moment is inside the reminder window for its own
+// kind: an opening may still be forgiven a little lateness, a deadline that has
+// passed is not a reminder.
+func (a *App) inWindow(e config.Event, when time.Time, word string, now time.Time) bool {
+	if !e.Enabled {
+		return false
+	}
+	if word == "截止" {
+		d := e.ExpiryLead.D()
+		return d > 0 && !when.Before(now) && !when.After(now.Add(d))
+	}
+	return !when.Before(now.Add(-e.LateGrace.D())) && !when.After(now.Add(e.Lead.D()))
 }

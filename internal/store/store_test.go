@@ -374,3 +374,52 @@ func TestLiveRequiresADeadlineForDatedEvents(t *testing.T) {
 		t.Error("standing free tiers must keep the old rule")
 	}
 }
+
+// 到期侧的取数与开抢侧同形状：只看还在窗口内的截止时刻，最近的排前面。它必须
+// 独立于 Live —— 日报里"今天截止"的那一行，和提醒"三小时后截止"的那一行，读的是
+// 同一个库但不同的条件。
+func TestExpiringReturnsRowsInsideTheWindowSoonestFirst(t *testing.T) {
+	st, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	now := time.Now().UTC()
+
+	mk := func(fp string, score int, at time.Time, meta map[string]string) *model.Deal {
+		d := &model.Deal{Fingerprint: fp, URL: "https://a.test/" + fp, Title: fp + " 消费券",
+			Score: score, IsFree: true, Category: model.CatVoucher,
+			PublishedAt: now.Add(-48 * time.Hour), DiscoveredAt: now.Add(-48 * time.Hour), Meta: meta}
+		if !at.IsZero() {
+			d.Meta["expires_at"] = at.Format(time.RFC3339)
+		}
+		return d
+	}
+	soon := mk("s1", 70, now.Add(2*time.Hour), map[string]string{})
+	sooner := mk("s2", 70, now.Add(40*time.Minute), map[string]string{})
+	outOfWindow := mk("o1", 90, now.Add(20*time.Hour), map[string]string{})
+	alreadyGone := mk("g1", 95, now.Add(-1*time.Hour), map[string]string{})
+	noDeadline := mk("n1", 95, time.Time{}, map[string]string{})
+	repeat := mk("r1", 95, now.Add(30*time.Minute), map[string]string{"dup_of": "s1"})
+	low := mk("l1", 10, now.Add(30*time.Minute), map[string]string{})
+
+	for _, d := range []*model.Deal{soon, sooner, outOfWindow, alreadyGone, noDeadline, repeat, low} {
+		if err := st.Save(d); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var got []string
+	for _, d := range st.Expiring(now, now.Add(3*time.Hour), 45) {
+		got = append(got, d.Fingerprint)
+	}
+	want := []string{"s2", "s1"}
+	if len(got) != len(want) {
+		t.Fatalf("Expiring() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("Expiring()[%d] = %s, want %s", i, got[i], want[i])
+		}
+	}
+}

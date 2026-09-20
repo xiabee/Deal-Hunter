@@ -509,7 +509,8 @@ func cmdDoctor(ctx context.Context, cfg *config.Config, log *slog.Logger, stdout
 	}
 	remind := "关"
 	if cfg.Notify.Event.Enabled {
-		remind = fmt.Sprintf("开抢前 %v，每天最多 %d 条", cfg.Notify.Event.Lead, cfg.Notify.Event.MaxPerDay)
+		remind = fmt.Sprintf("开抢前 %v，到期前 %v，每天最多 %d 条",
+			cfg.Notify.Event.Lead, cfg.Notify.Event.ExpiryLead, cfg.Notify.Event.MaxPerDay)
 	}
 	add("config", "ok", fmt.Sprintf("interval=%s 日报=%s（%s，地板 %d 分）突破=%s 提醒=%s",
 		cfg.Interval, cfg.Notify.Daily.At, cfg.Timezone, cfg.Notify.Daily.MinScore, urgent, remind))
@@ -724,14 +725,14 @@ func cmdEvents(cfg *config.Config, log *slog.Logger, stdout io.Writer) int {
 		return 0
 	}
 	e := cfg.Notify.Event
-	fmt.Fprintf(stdout, "跟踪 %d 项限时事件（提醒窗口：开抢前 %v 至开抢后 %v，每天最多 %d 条，门槛 %d 分）\n",
-		len(rows), e.Lead, e.LateGrace, e.MaxPerDay, e.MinScore)
+	fmt.Fprintf(stdout, "跟踪 %d 项限时事件（提醒窗口：开抢前 %v 至开抢后 %v，到期前 %v，每天最多 %d 条，门槛 %d 分）\n",
+		len(rows), e.Lead, e.LateGrace, e.ExpiryLead, e.MaxPerDay, e.MinScore)
 	tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "  开抢时刻\t距今\t状态\t分数\t标题")
+	fmt.Fprintln(tw, "  时刻\t事由\t距今\t状态\t分数\t标题")
 	for _, it := range rows {
-		fmt.Fprintf(tw, "  %s\t%s\t%s\t%d\t%s\n",
-			it.StartsAt.In(locOf(cfg)).Format("01-02 15:04"),
-			humanDelta(it.StartsAt.Sub(now)), eventMark(it, e), it.Score, truncate(it.Title, 40))
+		fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%d\t%s\n",
+			it.Moment.In(locOf(cfg)).Format("01-02 15:04"), it.Due,
+			humanDelta(it.Moment.Sub(now)), eventMark(it, e), it.Score, truncate(it.Title, 40))
 	}
 	_ = tw.Flush()
 	return 0
@@ -745,7 +746,7 @@ func eventMark(it pipeline.EventItem, e config.Event) string {
 		return "窗口内待提醒"
 	case it.Score < e.MinScore:
 		return "低于门槛"
-	case it.StartsAt.Before(time.Now()):
+	case it.Moment.Before(time.Now()):
 		return "已过窗口"
 	default:
 		return "等待窗口"
