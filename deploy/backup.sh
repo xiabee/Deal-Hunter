@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# Back up Deal-Hunter's state and config, then prove the archive restores.
+#
+#   sudo ./deploy/backup.sh                          # -> /var/backups/deal-hunter
+#   DH_BACKUP_DIR=/mnt/nas/dh sudo ./deploy/backup.sh
+#   DH_BACKUP_PUSH=other-host:/backups/dh sudo ./deploy/backup.sh   # copy off this disk
+#   DH_BACKUP_KEEP=14 sudo ./deploy/backup.sh
+#
+# The archive is a plain tar of /var/lib/deal-hunter and /etc/deal-hunter, so
+# restoring needs no tooling:
+#
+#   sudo systemctl stop deal-hunter
+#   sudo tar xzf deal-hunter-<stamp>.tar.gz -C /
+#   sudo chown -R dealhunter:dealhunter /var/lib/deal-hunter
+#   sudo systemctl start deal-hunter
+#
+# A backup that was never opened is a wish, so the script extracts it into a
+# throwaway directory and compares row counts against the live files before it
+# reports success.
+set -euo pipefail
+
+STATE=/var/lib/deal-hunter
+ETC=/etc/deal-hunter
+DIR="${DH_BACKUP_DIR:-/var/backups/deal-hunter}"
+KEEP="${DH_BACKUP_KEEP:-14}"
+PUSH="${DH_BACKUP_PUSH:-}"
+STAMP="$(date -u +%Y%m%d-%H%M%S)"
+NAME="deal-hunter-$STAMP"
+
+log() { printf '\033[1;36m▸\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m!\033[0m %s\n' "$*"; }
+die() { printf '\033[1;31m✗\033[0m %s\n' "$*" >&2; exit 1; }
+
+[[ $EUID -eq 0 ]] || die "需要 root（状态目录是 0750 dealhunter）：sudo $0"
+[[ -d $STATE ]] || die "找不到 $STATE"
+
+# The archive contains /etc/deal-hunter/deal-hunter.env, i.e. the webhook and its
+# signing secret. Default permissions on those files are 0600/0640 and a tarball
+# must not be the one place that widens them.
+umask 077
+install -d -m 0750 -o root -g root "$DIR"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+# Upgrade backups are excluded: they are byte-for-byte copies of a config that
+# changed, and keeping them makes every archive grow without adding recovery
+# value beyond the last one.
+tar --create --gzip --file "$DIR/$NAME.tar.gz" \
+	--exclude='*.bak-*' --directory=/ var/lib/deal-hunter etc/deal-hunter \
+	2> >(grep -v 'file changed as we read it' >&2 || true)
+# A collection round may write while we read; tar warns rather than fails, and
+# the restore check below is what decides whether the archive is usable.
+
+( cd "$DIR" && sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256" )
+# The list file holds a bare name, so the check has to run from that directory.
+( cd "$DIR" && sha256sum --quiet --check "$NAME.tar.gz.sha256" ) || die "校验和不对，归档已损坏"
+
+tar -xzf "$DIR/$NAME.tar.gz" -C "$TMP"
+live_deals=$(wc -l < "$STATE/deals.jsonl" 2>/dev/null || echo 0)
+back_deals=$(wc -l < "$TMP/var/lib/deal-hunter/deals.jsonl" 2>/dev/null || echo -1)
+[[ -f "$TMP/etc/deal-hunter/config.json" ]] || die "归档里没有 config.json"
+if (( back_deals > live_deals )); then
+	die "归档比在线文件还新（$back_deals > $live_deals），本轮不采信"
+fi
+log "归档可解开：$back_deals/$live_deals 行情位，config.json 在位"
+if (( back_deals < live_deals )); then
+	warn "少 $((live_deals - back_deals)) 行：采集轮正好在写入，下一次备份会更全"
+fi
+
+if [[ -n $PUSH ]]; then
+	scp -q "$DIR/$NAME.tar.gz" "$DIR/$NAME.tar.gz.sha256" "$PUSH/" \
+		&& log "已另存一份到 $PUSH" \
+		|| die "推送到 $PUSH 失败（本机这份仍在）"
+fi
+
+# Prune by name stamp, oldest first, keeping the newest $KEEP pairs.
+mapfile -t old < <(cd "$DIR" && ls -1 deal-hunter-*.tar.gz 2>/dev/null | sort | head -n -"$KEEP")
+for f in "${old[@]:-}"; do
+	[[ -n $f ]] || continue
+	rm -f "$DIR/$f" "$DIR/$f.sha256"
+	log "轮换掉 $f"
+done
+
+log "备份完成：$DIR/$NAME.tar.gz ($(du -h "$DIR/$NAME.tar.gz" | cut -f1))，保留最近 $KEEP 份"

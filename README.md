@@ -552,6 +552,32 @@ sudo ./deploy/openclaw/install-openclaw-relay.sh --target <feishu 用户或群 i
 > 此时用路径 A（拉取）或路径 一（群机器人 webhook）即可，脚本会在预检阶段把这条结论打印出来，
 > 并在失败时不把通道标记为可用，避免每轮空转刷日志。
 
+### 备份与恢复
+
+状态目录 `0750 dealhunter` 且只有本机一份，所以它需要自己的备份：
+
+```bash
+sudo ./deploy/backup.sh                          # 写到 /var/backups/deal-hunter，默认留 14 份
+DH_BACKUP_PUSH=other-host:/backups/dh sudo ./deploy/backup.sh   # 顺手另存一份到别的磁盘
+sudo systemctl enable --now deal-hunter-backup.timer            # 每晚 04:30，错过开机就补跑
+```
+
+脚本不只会打包，还会**把刚写出来的归档解到临时目录再对比一遍**：`deals.jsonl` 行数、
+`config.json` 是否在位、校验和是否对得上，任一不过就不报成功——没被打开过的备份只是个愿望。
+归档里含 `deal-hunter.env`（webhook 与签名密钥），所以整个脚本以 `umask 077` 运行，
+落盘 0600、目录 0750。
+
+恢复不需要任何工具，也不需要装回原机器：
+
+```bash
+sudo systemctl stop deal-hunter
+sudo tar xzf deal-hunter-<stamp>.tar.gz -C /
+sudo chown -R dealhunter:dealhunter /var/lib/deal-hunter
+sudo systemctl start deal-hunter && sudo -u dealhunter /opt/deal-hunter/deal-hunter doctor -net=false
+```
+
+`doctor` 那一行的「已见 / 已推送 / 游标 / KB」四个数与备份前一致，才算恢复成功。
+
 ---
 
 ## 🤝 参与

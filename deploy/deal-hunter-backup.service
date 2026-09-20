@@ -1,0 +1,33 @@
+# One-shot backup of /var/lib/deal-hunter and /etc/deal-hunter, driven by
+# deal-hunter-backup.timer. It runs as root because the state directory is 0750
+# dealhunter; the script itself refuses to run unprivileged.
+#
+#   sudo install -m 0644 deploy/deal-hunter-backup.{service,timer} /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now deal-hunter-backup.timer
+#
+# Point it off this disk with DH_BACKUP_PUSH in /etc/deal-hunter/backup.env
+# (mode 0600), e.g. DH_BACKUP_PUSH=other-host:/backups/dh
+
+[Unit]
+Description=Deal-Hunter 状态与配置备份
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/deal-hunter/backup.env
+ExecStart=/opt/deal-hunter/backup.sh
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+# The archive and the state it reads both need to be reachable, so /var is
+# writable here rather than strict; nothing else on the box is.
+ReadWritePaths=/var/backups /var/lib/deal-hunter

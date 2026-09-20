@@ -44,6 +44,7 @@
 | M4 | 采集轮进行中不再锁住只读面板：roundMu 串行化轮次，mu 只保护运行历史 | `396543f` |
 | M5 | 到期前提醒复用同一张 ⏰ 卡（`expires_at` 侧）：`Store.Expiring`、`notify.event.expiry_lead`、两个 due 计数、只提醒未过期的截止；面板日间/夜间配色切换 | 本次提交 |
 | M6（门禁加固） | `secretlint` 新增 `consumer_mailbox`：个人邮箱写进**文档正文**也会被拦（`check-identity` 只管提交作者），豁免沿用同行 `secretlint:ignore` + 理由 | 本次提交 |
+| M7（备份与恢复） | `deploy/backup.sh`：打包状态与配置后**自解一次做对比**（行数 / config 在位 / sha256），`umask 077` 因为归档里含 env 密钥；`deal-hunter-backup.{service,timer}` 每晚 04:30 且 `Persistent`；恢复路径写进 README 并在生产演练过 | 本次提交 |
 
 ## Next Candidates（按价值排序，未开工）
 
@@ -53,6 +54,8 @@
 
 - **投递扇出任一成功即算送达**：一天只有一份消息，所以某个通道坏了当天这份就只存在于日志里。
   目前靠 `notify: partially delivered` 警告与 `/api/v1/status` 暴露，不做重试。真需要更强保证时要先定策略（去重 vs 漏投）。
+- **备份目前与生产同盘**：`/var/backups/deal-hunter` 在 `alienware-life` 自己的磁盘上，能救误删与
+  状态损坏，救不了整机故障。跨机那份要设 `DH_BACKUP_PUSH`，目标机器由用户定（见 STATUS Notes）。
 - **日报只在采集轮结束后检查**：`daily.at` 到点后最多再等一个 `interval`（默认 30m）才发；发送失败下一轮重试。
 - **插队门槛 90 分是估值**：「模型刚刚转免费」这类事件实测是否稳定 ≥90 未在真实采集里验证过（评分是加法的，理论 87–97）。
 - **`state.json` 里会残留 `digest:last_sent`**：盘点通道已删，旧键没人读也没人清理；`Compact` 只重写 `deals.jsonl`。

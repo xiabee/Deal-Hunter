@@ -29,6 +29,8 @@ command -v systemctl >/dev/null || die "需要 systemd"
 # The binary must run on this machine; a wrong-arch or non-executable artifact
 # fails here with the real reason rather than a guess.
 chmod +x "$BIN_SRC" 2>/dev/null || true
+# "./x" and "x" are the same file to a human and different things to bash.
+[[ $BIN_SRC == */* ]] || BIN_SRC="./$BIN_SRC"
 if ! ver_out="$("$BIN_SRC" version 2>&1)"; then
 	echo "$ver_out" >&2
 	die "$BIN_SRC 无法在本机执行（上面是系统给出的原因；如是架构问题，用 GOARCH=arm64 重新编译）"
@@ -47,6 +49,12 @@ if [[ -f "$PREFIX/deal-hunter" ]]; then
 	log "旧版本已备份为 deal-hunter.bak-$STAMP"
 fi
 install -m 0755 "$BIN_SRC" "$PREFIX/deal-hunter"
+install -m 0755 "$REPO_ROOT/deploy/backup.sh" "$PREFIX/backup.sh"
+install -m 0644 "$REPO_ROOT/deploy/deal-hunter-backup.service" "/etc/systemd/system/deal-hunter-backup.service"
+install -m 0644 "$REPO_ROOT/deploy/deal-hunter-backup.timer" "/etc/systemd/system/deal-hunter-backup.timer"
+# Deliberately not enabled: turning on a recurring job that writes outside the
+# project's own directory should be a decision, not a side effect of upgrading.
+log "备份脚本已就位（$PREFIX/backup.sh）；要每晚自动备份：sudo systemctl enable --now deal-hunter-backup.timer"
 
 if [[ ! -f "$ETC/config.json" ]]; then
 	# The starter config omits "sources" on purpose so the built-in collector set

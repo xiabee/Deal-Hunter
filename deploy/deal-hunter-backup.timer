@@ -1,0 +1,16 @@
+# Nightly, and again if the box was asleep when it was due.
+#
+#   sudo systemctl enable --now deal-hunter-backup.timer
+#   systemctl list-timers deal-hunter-backup.timer
+
+[Unit]
+Description=每晚备份 Deal-Hunter 状态与配置
+
+[Timer]
+OnCalendar=*-*-* 04:30:00
+RandomizedDelaySec=15m
+Persistent=true
+Unit=deal-hunter-backup.service
+
+[Install]
+WantedBy=timers.target
