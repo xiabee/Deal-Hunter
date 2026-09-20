@@ -76,7 +76,7 @@ doctor 报"到期前 3h0m0s"、面板 hint 分开显示两个数。顺带：面�
 | 单元 + 集成测试 | VERIFIED | 208 个测试函数，`go test -race ./...` 本地与 linux-ci 均全绿 |
 | 快速门禁 | VERIFIED | `bash scripts/ci-local.sh --quick` → `✓ CI PASSED e849a0b`（fmt/vet/build/secretscan/身份/离线冒烟） |
 | 全量门禁 + 干净环境 | VERIFIED | `DH_CI_HOST=linux-ci bash scripts/ci-office.sh` → `✓ office CI passed (linux-ci, 83 files)`，解包到 `/tmp/deal-hunter-ci-*` 全新目录 |
-| 三平台产物 | VERIFIED | 交叉编译 linux/amd64、linux/arm64、windows/amd64 全过；**产物未在目标机运行过**（见 ARM64 行） |
+| 三平台产物 | VERIFIED | 交叉编译 linux/amd64、linux/arm64、windows/amd64 全过；arm64 产物已在真机跑过（见下一行），amd64 产物跑在生产机 |
 | 事件提醒端到端（夹具驱动） | VERIFIED | 窗口内恰好一次、跨重启不重发、窗口外（提前 3 天 / 迟到 2 小时）静默、三条渲染路径都带时刻；窗口守卫经"临时翻宽→变红→还原"验证不是空过 |
 | 真实公告措辞解析 | VERIFIED | `9月19日9:00至9月26日24:00`、`上午9:00开放`、`2026年9月19日9:00起` 均正确；`24:00` 拒绝当作开抢时刻；`9月31日` 被 round-trip 守卫拒绝（否则 `time.Date` 会滚到 10-01，猜成未来就真会发错提醒） |
 | 截止时刻的时区（原候选 #5） | VERIFIED | `ExpiresAt` 不再用 `time.Local`，改用 `scoring.Input.ReaderZone`（`StartsIn` 改名，含义覆盖开抢与截止两端）。守卫写法是"同一钟表在 UTC 与 UTC+8 必须差出整 8 小时"，所以与测试主机所在时区无关；把 keywords 层与 scoring 层的传参分别改回旧写法，两条测试各自变红已验证 |
@@ -91,7 +91,8 @@ doctor 报"到期前 3h0m0s"、面板 hint 分开显示两个数。顺带：面�
 | 起止区间写法的截止（生产真丢过一条） | VERIFIED | 部署 `378fd8d` 后 `dealhunter events` 打出生产第一条带时刻的行：`09-18 10:00 开抢 … 89 分 Qwen3.8-Flash`，而 `expires_at` 为空 —— 原文是「新加坡时间：2026年9月18日10:00至2026年9月30日23:59」，区间没有"截止"前置词，于是按 M3 口径整条掉出日报。加 `rangeEnd`（两个小正则：区间前后各须一个完整日期）后修复。端到端守卫 `TestBriefingKeepsADatedEventWrittenAsARange` 与单元守卫都做过变异复查：短路 `rangeEnd` 即"got 0 rows" |
 | 面板日间模式（M5） | VERIFIED（结构） / NOT VERIFIED（观感） | 结构守卫：浅色块必须重定义 `--bg/--panel/--txt/--dim/--line`，暗与亮两套 `--txt` 对 `--bg` 的对比度都 ≥4.5:1（测试里现算 WCAG），且不允许残留 `rgba(255,255,255` 硬编码。配色好不好看**没有工具能证明**，需读者在浏览器里看一眼 |
 | 面板在采集轮进行中应答（M4） | VERIFIED | 单元层：把信息源卡在请求里，读取方原本等满 3 秒，拆锁后立刻返回，`-race` 干净。生产层：重启后 40 次打 `/api/v1/status` 最大 168ms（1 次非 200 是重启缝隙，稳定态复测 25 次全 200、最大 105ms） |
-| ARM64 实跑 | NOT VERIFIED | 只做了交叉编译，未在 arm64 上 start/smoke |
+| ARM64 实跑 | VERIFIED | 2026-09-21 在 `kylin-pc`（Kylin V10 SP1，`Linux aarch64`）跑 `25afd4c` 交叉编译产物：`file` 确认 ELF aarch64 静态；sha256 `ede936fd…` 两端一致；`version` 报 `go1.26.4/linux-arm64`；`doctor -net=false` 体检通过；`run` 真实起了一轮（`sources=15 new=67 stored=67 errors=0 took=4.4s`）；面板在 127.0.0.1 上 `healthz=200`、`/` 里 `data-theme` 命中 6 次。**注意**：这是临时冒烟测试，没有装 systemd 单元，kylin-pc 也不是本项目的部署目标（部署仍在 `alienware-life`） |
+| 校验和与传输完整性 | VERIFIED | 今晚四次产物传输（amd64 × 3、arm64 × 1）都在源端与目的端各算一次 sha256 并比对一致；`install.sh` 装前还会实跑一次 `version`，架构不对就直接拒绝 |
 | GitHub Actions | NOT APPLICABLE | 项目故意不使用（额度），门禁是本地脚本 + 办公室构建机 |
 
 ## 复核判据（下一条南昌公告出现时执行）
@@ -163,6 +164,15 @@ config/deploy/dist）与 `/tmp/dh-wire-feishu.sh`（9-19，把服务接到租户
 - **不要把 `install.sh` 的输出接进 `| head`**：远端脚本被 SIGPIPE 打断后会在"备份完、没重启完"
   的地方停下，看起来装好了其实服务还跑着旧版（今晚 `9daa3d3` 就是这样落后了一次）。要截断就先
   `> /tmp/x.log 2>&1` 再 `tail`，并确认 `installer rc=0`。
+- **`pkill -f <名字>` 会连自己一起杀**：在远端用 `ssh host '… pkill -f dealhunter-linux-arm64 …; rm -rf …'`
+  做冒烟测试时，模式出现在自己那条 `bash -c` 的命令行里，pkill 先把这个 shell 打死，后面的清理就没跑
+  （kylin-pc 上一次留了 5 个临时文件，第二次手工清的）。要么用 pid 文件，要么把 pkill 放到最后一条独立
+  ssh 里，并且用 `pgrep -fa '<确切命令>' | grep -v pgrep` 判断，别信 `pgrep -c`（它把自己的 shell 也数进去）。
+- **`interval` 有下限校验**：`3s` 会被 `config: interval 3s is too aggressive; use >= 1m` 直接拒。
+  想做快速冒烟，用 `1m` + 启动即跑的那一轮（`trigger=startup`），别改这个下限。
+- **arm64 冒烟的做法**（`kylin-pc`，Kylin V10 SP1）：本地 `GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build`
+  → scp → `chmod +x`（Windows 侧传过去的模式可能是 0644，直接跑是"权限不够"）→ `doctor -net=false` +
+  `run` + `curl /healthz`。全程在 `/tmp` 里，跑完删干净；**这台机器不是部署目标**。
 - **解析器的修正不会追溯已经入库的行**：RSS/搜索类源靠游标只播新条目，所以 `rangeEnd` 修好之后，
   今晚那条已经存下来的 `Qwen3.8-Flash`（有 `starts_at`、缺 `expires_at`）仍不进日报，除非它再次
   被采集到。想要一次性回填，得先设计"重解析全库"的命令，别手改 `deals.jsonl`。

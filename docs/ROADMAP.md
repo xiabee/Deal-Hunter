@@ -48,7 +48,6 @@
 ## Next Candidates（按价值排序，未开工）
 
 1. **更多官方目录差分**：推理云平台 / 向量库 / GPU 云，复用 `openrouter` 的游标差分套路。
-2. **ARM64 与真实部署验证**：交叉编译已过，但从未在 linux/arm64 与 systemd 下实跑过（见 Known Risks）。
 
 ## Known Risks
 
