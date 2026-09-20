@@ -204,6 +204,23 @@ open http://127.0.0.1:8765/          # 内置状态面板
 配置 = **JSON 文件（可提交）** + **DH_\* 环境变量（密钥只走这里）**。文件不存在时用内置默认值，
 部分覆盖即可：`config/deal-hunter.example.json` 是完整注释版模板。
 
+要加自己城市的源，用 `extra_sources`——它**追加**在生效的源集合后面（内置 15 源照常随版本升级），
+而不是像 `sources` 那样整盘替换：
+
+```jsonc
+{ "extra_sources": [
+  { "name": "nc-vouchers", "kind": "html", "category": "voucher", "trust": 10,
+    "url": "https://swj.nc.gov.cn/ncsswj/tzgg/index.shtml",
+    "keywords": ["消费券", "惠民券", "抢券", "核销", "领取"],
+    "deny": ["以旧换新", "招标", "中标", "遴选", "服务机构"],
+    "params": { "follow_detail": "1" } }
+] }
+```
+
+`follow_detail` 只对**过了关键词门**的那几条再抓一次正文（开抢时刻写在正文里，不在列表行上），
+所以一页 20 条通常只多 0–2 次外连。正文短于 200 字（政务站的"频繁访问"页就是这样）会被当作
+没抓到，保留列表行文本；入库存取时正文截到 2000 字。
+
 ```jsonc
 {
   "interval": "30m",

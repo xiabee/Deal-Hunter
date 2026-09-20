@@ -329,3 +329,40 @@ func TestEventReminderDefaultsAndEnv(t *testing.T) {
 		t.Errorf("want event.min_score rejection, got %v", err)
 	}
 }
+
+// 想加自己城市的源，不该被迫把内置 15 个抄进配置再维护一份副本 —— extra_sources
+// 是追加语义：内置集合照常跟随版本升级，个人源叠在后面。
+func TestExtraSourcesExtendTheBuiltinSet(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.json")
+	body := `{"extra_sources":[{"name":"nc-vouchers","kind":"html","url":"https://swj.nc.test/tzgg/index.shtml"}]}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Sources) != len(DefaultSources())+1 {
+		t.Fatalf("want built-ins plus one, got %d", len(cfg.Sources))
+	}
+	last := cfg.Sources[len(cfg.Sources)-1]
+	if last.Name != "nc-vouchers" || last.Kind != KindHTML {
+		t.Errorf("the added source is wrong: %+v", last)
+	}
+
+	// 显式给出 sources 时，extra_sources 仍然叠在最终集合后面。
+	body2 := `{"sources":[{"name":"only","kind":"rss","url":"https://a.test/x.rss"}],` +
+		`"extra_sources":[{"name":"also","kind":"rss","url":"https://b.test/y.rss"}]}`
+	path2 := filepath.Join(dir, "c2.json")
+	if err := os.WriteFile(path2, []byte(body2), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg2, err := Load(path2)
+	if err != nil {
+		t.Fatalf("Load2: %v", err)
+	}
+	if len(cfg2.Sources) != 2 || cfg2.Sources[1].Name != "also" {
+		t.Errorf("extra_sources must append to an explicit list: %+v", cfg2.Sources)
+	}
+}

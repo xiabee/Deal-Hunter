@@ -204,6 +204,9 @@ type Config struct {
 	Server   Server   `json:"server"`
 	Notify   Notify   `json:"notify"`
 	Sources  []Source `json:"sources"`
+	// ExtraSources stack on top of whichever set is in effect, so adding one city's
+	// notices never freezes the built-in catalogue.
+	ExtraSources []Source `json:"extra_sources,omitempty"`
 }
 
 // Env is the set of environment variables honoured by the loader.
@@ -407,6 +410,10 @@ func Load(path string) (*Config, error) {
 			}
 			if len(cfg.Sources) == 0 {
 				cfg.Sources = DefaultSources()
+			}
+			if len(cfg.ExtraSources) > 0 {
+				cfg.Sources = append(cfg.Sources, cfg.ExtraSources...)
+				cfg.ExtraSources = nil
 			}
 		}
 	}
