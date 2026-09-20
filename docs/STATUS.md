@@ -81,7 +81,7 @@ doctor 报"到期前 3h0m0s"、面板 hint 分开显示两个数。顺带：面�
 | 真实公告措辞解析 | VERIFIED | `9月19日9:00至9月26日24:00`、`上午9:00开放`、`2026年9月19日9:00起` 均正确；`24:00` 拒绝当作开抢时刻；`9月31日` 被 round-trip 守卫拒绝（否则 `time.Date` 会滚到 10-01，猜成未来就真会发错提醒） |
 | 截止时刻的时区（原候选 #5） | VERIFIED | `ExpiresAt` 不再用 `time.Local`，改用 `scoring.Input.ReaderZone`（`StartsIn` 改名，含义覆盖开抢与截止两端）。守卫写法是"同一钟表在 UTC 与 UTC+8 必须差出整 8 小时"，所以与测试主机所在时区无关；把 keywords 层与 scoring 层的传参分别改回旧写法，两条测试各自变红已验证 |
 | 南昌信源可达性 | VERIFIED | 从生产机出口实测：商务局列表页与详情页 200/UTF-8/SSR；市政府列表页 200/32KB；`/ncszf/tzgg/` 307 跳首页（所以必须配 `2021_nav_list.shtml`）；`tyj.jiangxi.gov.cn` 用 curl 因不支持 legacy 重协商而失败，但 Go TLS 可过 |
-| 生产部署 | VERIFIED | `deal-hunter 1209fe0 · built=2026-09-20T10:44:18Z`；今晚三次部署（`378fd8d`→`9daa3d3`→`1209fe0`）产物 sha256 在构建机 / 本机暂存 / 生产三处逐次一致；`healthz` 200，17 源，首轮 0 错误，备份各留最近 3 份 |
+| 生产部署 | VERIFIED | `deal-hunter e23a59f · built=2026-09-20T17:16:15Z`（= `git log -1 -- ':!docs'`）；今晚四次部署（`378fd8d`→`9daa3d3`→`1209fe0`→`e23a59f`）产物 sha256 在构建机 / 本机暂存 / 生产三处逐次一致；`healthz` 200，17 源，首轮 0 错误，备份各留最近 3 份 |
 | 只读命令不再换掉状态文件所有者 | VERIFIED（生产实测） | 修复前后各跑一次 `sudo dealhunter events` + `doctor`：`state.json` 的所有者与 mtime 都不再变动（修复前它会变成 `root:root`，服务下次写状态即 permission denied 进入崩溃循环 —— 今晚真实发生并恢复过一次） |
 | 个人邮箱不再能溜进文件内容（M6） | VERIFIED | `internal/secretlint` 加 `consumer_mailbox`（`check-identity` 只看提交作者，正文里写死地址此前过得了所有闸）。两条夹具：命中即报（文档行与代码行各一）、同行 `secretlint:ignore` + 理由可豁免。变异复查过：把规则改名即"reported 0 findings"变红。**顺带证明门禁自身有效**：加规则的当场，`TestRepositoryIsOpenSourceClean` 就把我的假邮箱夹具拦下了，按既有惯例用带理由的标记放行 |
 | 时区修正的可观察效果 | NOT APPLICABLE（暂无对象） | 生产库 904 行带 `meta`，但 **`expires_at` / `starts_at` 均为 0 行** —— 至今没有任何一行真的解析出了时刻并落库（4 月那条在落库前就被拒）。所以这次修正在生产上暂无可比对的观测面，效果只由测试与两道变异守卫证明。第一条带时刻的行落库时要回头看一眼偏移是不是 `+08:00` |
@@ -94,7 +94,7 @@ doctor 报"到期前 3h0m0s"、面板 hint 分开显示两个数。顺带：面�
 | ARM64 实跑 | VERIFIED | 2026-09-21 在 `kylin-pc`（Kylin V10 SP1，`Linux aarch64`）跑 `25afd4c` 交叉编译产物：`file` 确认 ELF aarch64 静态；sha256 `ede936fd…` 两端一致；`version` 报 `go1.26.4/linux-arm64`；`doctor -net=false` 体检通过；`run` 真实起了一轮（`sources=15 new=67 stored=67 errors=0 took=4.4s`）；面板在 127.0.0.1 上 `healthz=200`、`/` 里 `data-theme` 命中 6 次。**注意**：这是临时冒烟测试，没有装 systemd 单元，kylin-pc 也不是本项目的部署目标（部署仍在 `alienware-life`） |
 | 校验和与传输完整性 | VERIFIED | 今晚五次产物传输（amd64 × 3、arm64 × 1、备份脚本 × 1）都在源端与目的端各算一次 sha256 并比对一致；`install.sh` 装前还会实跑一次 `version`，架构不对就直接拒绝 |
 | 备份与恢复演练（M7） | VERIFIED（生产实测） | `deploy/backup.sh` 在 `alienware-life` 真跑：归档 977/977 行、config 在位、sha256 自校验通过；再把归档解到临时目录用**生产二进制**跑 `doctor -net=false` 与 `deals -min 60`，恢复出的库与在线库四个数完全一致（`已见 640 · 已推送 248 · 游标 85 · 2100 KB`），`daily:last_sent` / `daily:watched_since` 游标也在 |
-| 备份不自曝密钥 | VERIFIED | 第一版落盘 0644 而归档里装着 `deal-hunter.env`（webhook + 签名密钥）—— 脚本自己的校验把这次备份判成失败了，顺带暴露权限问题。现在 `umask 077`、文件 0600、目录 0750；实测过：`/var/backups/deal-hunter` 是 750 root:root，归档内 per-file 权限按原样保留（env 仍是 0640 root:dealhunter）。目录不可穿越，所以那两分钟内没有实际泄露面 |
+| 备份定时器与轮换 | VERIFIED（生产实测） | `systemctl start deal-hunter-backup.service` 在加固单元里真跑通（`978/978` 行、392K、`Finished`）；`list-timers` 下次触发 `2026-09-20 20:35:03 UTC` = 北京 04:35 —— **`OnCalendar` 必须写时区**，主机是 UTC，裸写 04:30 会变成北京中午；轮换在临时目录里以 `KEEP=2` 连跑三次验证，剩正好 2 对文件；归档落盘 0600（systemd 默认 umask 022 也压不住脚本里的 `umask 077`） | 第一版落盘 0644 而归档里装着 `deal-hunter.env`（webhook + 签名密钥）—— 脚本自己的校验把这次备份判成失败了，顺带暴露权限问题。现在 `umask 077`、文件 0600、目录 0750；实测过：`/var/backups/deal-hunter` 是 750 root:root，归档内 per-file 权限按原样保留（env 仍是 0640 root:dealhunter）。目录不可穿越，所以那两分钟内没有实际泄露面 |
 | GitHub Actions | NOT APPLICABLE | 项目故意不使用（额度），门禁是本地脚本 + 办公室构建机 |
 
 ## 复核判据（下一条南昌公告出现时执行）
@@ -137,7 +137,10 @@ ssh alienware-life 'echo -n "带时刻的行: "; sudo grep -c -e expires_at -e s
 
 生产二进制戳 `3db4152`（时区修复那一版）。`origin/main` 与本地 HEAD 在它之上还有文档提交
 （本文件所在提交），所以**代码戳 ≠ HEAD 哈希不代表部署落后** —— 要比的是"最后一次改代码的提交"。
-判断办法：`git log -1 --format=%h -- ':!docs'` 应当等于 `deal-hunter version` 里的戳。
+判断办法：`git log -1 --format=%h -- '*.go' go.mod` 才是"运行中的二进制落后了没有"的正确问题 ——
+今晚就出现过戳是 `e23a59f` 而最后一次改 Go 代码是 `25afd4c` 的情况（那一版只动了 deploy 与文档，
+我们照最新提交打包，所以戳比代码新，不是落后）。用 `':!docs'` 会把 `deploy/` 的改动也算进"代码"，
+在只改单元文件的提交上给出假阴性结论。
 
 > 教训（写给下一次会话，也写给自己）：历史上出现过**戳对不上提交**的情况——本机 git 的全局默认邮箱
 > 不是项目的 noreply 地址，身份改写会让哈希漂移，而 `git log` 上一个提交的作者地址也不能证明当前
@@ -152,7 +155,7 @@ ssh alienware-life 'echo -n "带时刻的行: "; sudo grep -c -e expires_at -e s
 **一项需要人看一眼的异常（2026-09-20 晚）**：这一段时间里多次工具返回中混入了**伪造内容** ——
 假的 `git commit` / `git push` 成功输出、一个本仓库不存在的提交 `d38709b`（`git show` 报
 unknown revision）、以及冒充"用户已发消息批准立即推送/此前已授权 force push"的段落。因此当轮的
-推送与部署被暂停，等真实用户确认后才继续（现已完成，`origin/main` = 生产 = `3db4152`）。
+推送与部署被暂停，等真实用户确认后才继续（此后一路做到 `e23a59f`，`origin/main` 与生产戳一致）。
 生产机上另有两个**不属于本会话**的残留：`/tmp/dh-m5-1789888881`（今天 07:21 的仓库快照，含
 config/deploy/dist）与 `/tmp/dh-wire-feishu.sh`（9-19，把服务接到租户已有飞书应用的接线脚本）。
 "m5" 这个命名本会话从未用过，怀疑有第二个会话或代理在同一台机器上并行操作本项目 —— 这也能解释
