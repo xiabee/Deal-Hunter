@@ -733,3 +733,34 @@ func TestHTMLFollowDetailCapsBodySize(t *testing.T) {
 		t.Error("the cap must keep the beginning, where the start time is stated")
 	}
 }
+
+// DuckDuckGo 认定出口 IP 像机器人时，回的是 HTTP 200 + 一张人机验证页：既没有结果也
+// 没有错误。采集器原本把它归进"今天没搜到"，于是面板上看起来像羊毛断了 —— 2026-09-21
+// 从生产机实测到就是这个状态（同一时刻另一台机器搜得到）。验证页必须单独报出来。
+func TestSearchReportsTheHumanCheckPageInsteadOfZeroHits(t *testing.T) {
+	cfg := config.Source{
+		Name: "search-cn", Kind: config.KindSearch, URL: "https://lite.duckduckgo.com/lite/",
+		Params: map[string]string{"queries": "免费额度"}, Trust: 9, Limit: 10,
+	}
+	src := mustSource(t, Deps{Cfg: cfg, HTTP: &stubFetcher{body: fixture(t, "ddg_anomaly.html")}, State: newFakeState()})
+	_, err := src.Fetch(context.Background())
+	if err == nil {
+		t.Fatal("a challenge page must not look like a successful empty round")
+	}
+	if !strings.Contains(err.Error(), "human") && !strings.Contains(err.Error(), "challenge") {
+		t.Errorf("the error must name what happened, got %v", err)
+	}
+	if strings.Contains(err.Error(), "duckduckgo.com/anomaly.js") {
+		t.Errorf("the error must not echo the challenge URL with its tokens: %v", err)
+	}
+
+	// 反面对照：真实结果页不能被这条判定误伤。
+	ok := mustSource(t, Deps{Cfg: cfg, HTTP: &stubFetcher{body: fixture(t, "ddg_lite.html")}, State: newFakeState()})
+	deals, err := ok.Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("a normal results page must not be reported as a challenge: %v", err)
+	}
+	if len(deals) == 0 {
+		t.Error("expected the normal fixture to still yield deals")
+	}
+}

@@ -25,6 +25,9 @@ var (
 	ddgHrefFirst  = regexp.MustCompile(`(?is)<a\b[^>]*?href=["']([^"']+)["'][^>]*?class=['"]result-link['"][^>]*>(.*?)</a>`)
 	ddgClassFirst = regexp.MustCompile(`(?is)<a\b[^>]*?class=['"]result-link['"][^>]*?href=["']([^"']+)["'][^>]*>(.*?)</a>`)
 	ddgSnippet    = regexp.MustCompile(`(?is)class=['"]result-snippet['"][^>]*>(.*?)(?:</td>|</div>)`)
+	// ddgChallengeRe marks DuckDuckGo's "bots use DuckDuckGo too" interstitial,
+	// served with HTTP 200 and zero results.
+	ddgChallengeRe = regexp.MustCompile(`(?i)anomaly-modal|/anomaly\.js|id=["']challenge-form["']|cc=botnet`)
 )
 
 // Fetch implements Source: one rotating query per round keeps the crawler polite.
@@ -71,7 +74,12 @@ func (sr *Search) Fetch(ctx context.Context) ([]*model.Deal, error) {
 	}
 	hits := parseSearchResults(string(resp.Body))
 	if len(hits) == 0 {
-		// A challenge page or an empty result set is not a collection failure.
+		// The engine answers 200 with a human-check page when it decides the egress
+		// IP is automated. Silently reporting zero would read as "nothing to find",
+		// which is the opposite diagnosis, so name it.
+		if ddgChallengeRe.MatchString(string(resp.Body)) {
+			return nil, fmt.Errorf("source %s: search engine demanded a human check for %q (no results this round)", sr.Cfg.Name, q)
+		}
 		sr.logger().Debug("search: no results", "source", sr.Cfg.Name, "query", q)
 		return nil, nil
 	}
