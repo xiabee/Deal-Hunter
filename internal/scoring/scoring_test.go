@@ -130,3 +130,30 @@ func TestZeroTrustAndNoOffersCannotLeakAlerts(t *testing.T) {
 		t.Errorf("scoreless item scored %d", res.Score)
 	}
 }
+
+// 开抢时刻必须由评分层交出来，事件提醒才有触发依据。时区只能由调用方给：服务常跑
+// UTC，而公告里的「上午10:00开抢」是北京时间，差 8 小时等于每条都提醒错。
+func TestEvaluateParsesStartOnlyWhenToldWhichZone(t *testing.T) {
+	shanghai := time.FixedZone("CST", 8*3600)
+	d := dealOf("关于开展2026年洪城消费券发放的公告",
+		"核销期限至2026年10月15日。第一轮9月21日上午10:00开始发放，领完即止。")
+	d.PublishedAt = time.Date(2026, 9, 11, 8, 0, 0, 0, shanghai)
+	base := Input{Deal: d, Offers: dict.Scan(d.TextBlob()),
+		Now: time.Date(2026, 9, 11, 9, 0, 0, 0, shanghai)}
+
+	withZone := base
+	withZone.StartsIn = shanghai
+	res := Evaluate(withZone, dict)
+	if res.Starts == nil {
+		t.Fatal("the start moment in the body was not parsed")
+	}
+	want := time.Date(2026, 9, 21, 10, 0, 0, 0, shanghai)
+	if !res.Starts.Equal(want) {
+		t.Errorf("start = %v, want %v", res.Starts, want)
+	}
+
+	// 没有时区就没有可靠的解释方式，宁可不给。
+	if got := Evaluate(base, dict).Starts; got != nil {
+		t.Errorf("must not guess a zone, got %v", got)
+	}
+}

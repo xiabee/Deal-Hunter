@@ -28,7 +28,10 @@ const (
 	CatAIFree   = "ai_free"
 	CatDiscount = "discount"
 	CatResource = "resource"
-	CatUnknown  = "unknown"
+	// CatVoucher marks a locally issued consumption voucher: a dated event rather than a
+	// standing free tier, which changes what "still live" means.
+	CatVoucher = "voucher"
+	CatUnknown = "unknown"
 )
 
 // Offer is one keyword-evidenced offer found in a deal.
@@ -238,4 +241,12 @@ func (d *Deal) TextBlob() string {
 		parts = append(parts, o.Evidence)
 	}
 	return strings.Join(parts, "\n")
+}
+
+// IsDatedEvent reports whether this finding is a one-off event with a moment of
+// its own rather than a standing offer. Government voucher notices stay listed
+// forever and often never say when they end, so "no deadline mentioned" cannot
+// mean "still claimable" for them.
+func (d *Deal) IsDatedEvent() bool {
+	return d.Category == CatVoucher || d.Meta["starts_at"] != ""
 }

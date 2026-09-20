@@ -17,6 +17,8 @@ type Input struct {
 	SourceTrust    int // 0-10, from config
 	OfficialDomain bool
 	Now            time.Time
+	// StartsIn is the zone an announcement's clock belongs to; nil disables start parsing.
+	StartsIn *time.Location
 }
 
 // Result is the scoring verdict. Reject is non-empty when the deal must not
@@ -28,6 +30,7 @@ type Result struct {
 	IsFree      bool
 	DiscountPct int
 	Expires     *time.Time
+	Starts      *time.Time
 	Vendors     []string
 	Product     string
 	Reject      string
@@ -81,6 +84,15 @@ func Evaluate(in Input, dict *keywords.Dict) Result {
 		res.Reject = "expired"
 		res.Why = append(res.Why, "活动已于 "+res.Expires.Format("2006-01-02")+" 截止")
 		return res
+	}
+	// An announcement states its times in the reader's zone, which only the
+	// caller knows: a service running in UTC must still remind for 10:00 Beijing.
+	if in.StartsIn != nil {
+		anchor := now.In(in.StartsIn)
+		if !in.Deal.PublishedAt.IsZero() {
+			anchor = in.Deal.PublishedAt.In(in.StartsIn)
+		}
+		res.Starts = dict.StartsAt(text, anchor)
 	}
 
 	seenKind := map[model.Kind]bool{}

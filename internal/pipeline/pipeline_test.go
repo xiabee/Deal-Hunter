@@ -890,3 +890,43 @@ func TestSourcePanicsAreContained(t *testing.T) {
 }
 
 var _ = notify.DealsOf
+
+// 公告里写明的开抢时刻必须落到入库记录上，否则事件提醒永远看不到它。而且必须按配置
+// 时区解释：服务常年跑 UTC，「上午10:00」是北京时间，差 8 小时等于每条都提醒错。
+func TestRunOnceRecordsStartMomentInReadersZone(t *testing.T) {
+	const voucherFeed = "https://nc.test/tzgg/voucher.rss"
+	body, err := os.ReadFile(filepath.Join("..", "sources", "testdata", "voucher_notice.xml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &cannedFetcher{byURL: map[string][]byte{voucherFeed: body}}
+	app := testApp(t, f, &spyNotifier{}, func(c *config.Config) {
+		c.Timezone = "Asia/Shanghai"
+		c.Sources = []config.Source{{Name: "nc-voucher", Kind: config.KindRSS,
+			URL: voucherFeed, Trust: 9, Category: model.CatVoucher}}
+	})
+	if _, err := app.RunOnce(context.Background(), "unit"); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	var raw string
+	var cat string
+	for _, d := range app.RecentDeals(20) {
+		if strings.Contains(d.Title, "洪城消费券") {
+			raw, cat = d.Meta["starts_at"], d.Category
+		}
+	}
+	if raw == "" {
+		t.Fatal("no starts_at recorded; category was " + cat)
+	}
+	got, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		t.Fatalf("starts_at not RFC3339: %q", raw)
+	}
+	want := time.Date(2026, 9, 21, 10, 0, 0, 0, time.FixedZone("CST", 8*3600))
+	if !got.Equal(want) {
+		t.Errorf("starts_at = %v, want %v", got, want)
+	}
+	if cat != model.CatVoucher {
+		t.Errorf("category = %q, want %q", cat, model.CatVoucher)
+	}
+}

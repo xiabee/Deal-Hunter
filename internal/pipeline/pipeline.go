@@ -472,6 +472,7 @@ func (a *App) judge(d *model.Deal, sc config.Source) (kept, urgent bool) {
 		SourceTrust:    sc.Trust,
 		OfficialDomain: sources.IsOfficialURL(d.URL, sc.Sites),
 		Now:            time.Now(),
+		StartsIn:       a.loc(),
 	}, a.dict)
 	if res.Reject != "" {
 		return false, false
@@ -488,6 +489,9 @@ func (a *App) judge(d *model.Deal, sc config.Source) (kept, urgent bool) {
 	}
 	if res.Expires != nil {
 		d.Meta["expires_at"] = res.Expires.Format(time.RFC3339)
+	}
+	if res.Starts != nil {
+		d.Meta["starts_at"] = res.Starts.Format(time.RFC3339)
 	}
 	if len(offers) > 0 {
 		var kinds []string

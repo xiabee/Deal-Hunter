@@ -309,7 +309,11 @@ func (s *Store) Live(min int, now time.Time, limit int) []model.Deal {
 		if d.Meta["dup_of"] != "" || d.Score < min || !d.Claimable() {
 			continue
 		}
-		if exp, ok := deadline(d); ok && exp.Before(now) {
+		exp, ok := deadline(d)
+		if !ok && d.IsDatedEvent() {
+			continue // an event that never said when it closes is done
+		}
+		if ok && exp.Before(now) {
 			continue // the offer said when it ends, and that moment has passed
 		}
 		out = append(out, d)

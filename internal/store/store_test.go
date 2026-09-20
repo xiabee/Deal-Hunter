@@ -332,3 +332,45 @@ func TestOpenRejectsEmptyDir(t *testing.T) {
 		t.Fatal("expected an error for an empty dir")
 	}
 }
+
+// 政府公告永不下架，也常常不标结束（实测：高台 6 月的端午券公告到 9 月仍挂在栏目里）。
+// 所以「没有 expires_at = 仍然有效」对限时事件类是错的，日报会反复播报一张早发完的券。
+// 长期额度类必须保持原规则不变。
+func TestLiveRequiresADeadlineForDatedEvents(t *testing.T) {
+	st, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	now := time.Now().UTC()
+	mk := func(fp, title, category string, meta map[string]string) *model.Deal {
+		return &model.Deal{Fingerprint: fp, URL: "https://nc.test/" + fp, Title: title, Score: 85,
+			IsFree: true, Category: category, DiscoveredAt: now.Add(-30 * 24 * time.Hour), Meta: meta}
+	}
+	rows := []*model.Deal{
+		mk("v1", "洪城消费券发放公告", model.CatVoucher, map[string]string{}),
+		mk("v2", "洪城消费券第二轮", model.CatVoucher,
+			map[string]string{"starts_at": now.Add(-2 * time.Hour).Format(time.RFC3339)}),
+		mk("v3", "洪城消费券核销中", model.CatVoucher,
+			map[string]string{"expires_at": now.Add(24 * time.Hour).Format(time.RFC3339)}),
+		mk("t1", "GLM 免费额度", model.CatAIFree, map[string]string{}),
+	}
+	for _, d := range rows {
+		if err := st.Save(d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := map[string]bool{}
+	for _, d := range st.Live(50, now, 10) {
+		got[d.Fingerprint] = true
+	}
+	if got["v1"] || got["v2"] {
+		t.Errorf("a dated event with no stated end must leave the report: %v", got)
+	}
+	if !got["v3"] {
+		t.Error("a dated event with a future deadline belongs in the report")
+	}
+	if !got["t1"] {
+		t.Error("standing free tiers must keep the old rule")
+	}
+}
