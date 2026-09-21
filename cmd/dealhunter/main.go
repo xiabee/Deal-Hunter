@@ -44,10 +44,12 @@ const usage = `Deal-Hunter — 全网羊毛雷达（每天一份日报）
   sources       列出全部信息源
   deals         打印最近入库的发现
   daily         立刻发送今天的日报（占用当天那一份）；-dry 只列出不发送
+  events        列出正在跟踪的限时事件（开抢与截止两端、各自的状态）
   notify-test   向所有已配置通道发送自检消息
   doctor        配置、密钥、目录、外连可达性体检
   secretscan    扫描仓库中的凭证与内网拓扑信息（开源发布门禁）
   compact       压缩历史库
+  reparse       用当前解析器重读已入库行的开抢/截止时刻（默认只报告，-write 落盘）
   version       打印版本
 
 全局参数：
@@ -102,6 +104,7 @@ func cli(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		"doctor":      func(c context.Context, a []string) int { return cmdDoctor(c, cfg, log, stdout, a) },
 		"secretscan":  func(_ context.Context, a []string) int { return cmdSecretScan(stdout, stderr, a) },
 		"compact":     func(_ context.Context, a []string) int { return cmdCompact(cfg, log, stdout, a) },
+		"reparse":     func(_ context.Context, a []string) int { return cmdReparse(cfg, stdout, a) },
 		"version":     func(_ context.Context, _ []string) int { fmt.Fprintln(stdout, version.String()); return 0 },
 	}
 	fn, ok := dispatch[cmd]
@@ -754,6 +757,107 @@ func eventMark(it pipeline.EventItem, e config.Event) string {
 }
 
 // locOf resolves the display zone for the same clock the briefing uses.
+// cmdReparse re-reads the clock fields of rows already in the store.
+//
+// A source's cursor only moves forward, so an announcement that was mis-parsed when
+// it arrived is never revisited by the next collection round: the parser fix that
+// would have read it lands on rows that no longer exist. This applies the current
+// parser to what we already hold. It changes time fields only - never the score -
+// because re-ranking old rows on a new parser would let a months-old finding jump
+// into tomorrow's briefing.
+func cmdReparse(cfg *config.Config, stdout io.Writer, args []string) int {
+	fs := flag.NewFlagSet("reparse", flag.ContinueOnError)
+	fs.SetOutput(stdout)
+	write := fs.Bool("write", false, "写回数据目录（默认只报告要改什么）")
+	limit := fs.Int("limit", 0, "只看最近 N 行（0 = 全部）")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	st, err := store.Open(cfg.DataDir)
+	if err != nil {
+		fmt.Fprintf(stdout, "打开数据目录失败：%v\n", err)
+		return 1
+	}
+	defer st.Close()
+
+	dict := keywords.Default()
+	loc := locOf(cfg)
+	now := time.Now()
+	changed := 0
+	tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "  标题\t改动")
+	for _, d := range st.Recent(*limit) {
+		if d.Meta["dup_of"] != "" {
+			continue // 折叠掉的副本不进日报，也不进提醒
+		}
+		anchor := d.DiscoveredAt
+		if !d.PublishedAt.IsZero() {
+			anchor = d.PublishedAt
+		}
+		if anchor.IsZero() {
+			anchor = now
+		}
+		anchor = anchor.In(loc)
+		text := d.TextBlob()
+		// An absent reading is not a correction: a row whose stored deadline this
+		// parser can no longer read keeps it. Dropping it would put a finished
+		// offer back into the briefing, which is worse than the stale value.
+		var diffs []string
+		meta := d.Meta
+		if meta == nil {
+			meta = map[string]string{}
+		}
+		if exp := dict.ExpiresAt(text, anchor); exp != nil {
+			if v := exp.Format(time.RFC3339); meta["expires_at"] != v {
+				diffs = append(diffs, "截止 "+humanMetaTime(meta["expires_at"], loc)+" → "+exp.In(loc).Format("2006-01-02 15:04"))
+				meta["expires_at"] = v
+			}
+		}
+		if starts := dict.StartsAt(text, anchor); starts != nil {
+			if v := starts.Format(time.RFC3339); meta["starts_at"] != v {
+				diffs = append(diffs, "开抢 "+humanMetaTime(meta["starts_at"], loc)+" → "+starts.In(loc).Format("2006-01-02 15:04"))
+				meta["starts_at"] = v
+			}
+		}
+		if len(diffs) == 0 {
+			continue
+		}
+		changed++
+		fmt.Fprintf(tw, "  %s\t%s\n", truncate(d.Title, 34), strings.Join(diffs, "；"))
+		if !*write {
+			continue
+		}
+		d.Meta = meta
+		if err := st.Save(&d); err != nil {
+			fmt.Fprintf(stdout, "写回失败：%v\n", err)
+			return 1
+		}
+	}
+	if changed == 0 {
+		fmt.Fprintf(stdout, "已入库行的时刻与当前解析器一致，无需改动\n")
+		return 0
+	}
+	_ = tw.Flush()
+	if *write {
+		fmt.Fprintf(stdout, "✓ 已写回 %d 行（追加，旧行仍在历史里）\n", changed)
+	} else {
+		fmt.Fprintf(stdout, "以上 %d 行可补出时刻；确认后再加 -write 落盘\n", changed)
+	}
+	return 0
+}
+
+// humanMetaTime renders a stored RFC3339 meta value for the change report.
+func humanMetaTime(v string, loc *time.Location) string {
+	if v == "" {
+		return "（无）"
+	}
+	t, err := time.Parse(time.RFC3339, v)
+	if err != nil {
+		return v
+	}
+	return t.In(loc).Format("2006-01-02 15:04")
+}
+
 func locOf(cfg *config.Config) *time.Location {
 	if l, err := time.LoadLocation(cfg.Timezone); err == nil {
 		return l

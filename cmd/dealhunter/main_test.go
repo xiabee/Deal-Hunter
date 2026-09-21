@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -26,6 +27,12 @@ func TestVersionAndHelp(t *testing.T) {
 	code, out = run(t, "help")
 	if code != 0 || !strings.Contains(out, "secretscan") {
 		t.Fatalf("help should document every command: code=%d", code)
+	}
+	// 这两条是后加的：漏在 help 里的命令不会被任何门禁发现，只能靠人记得查。
+	for _, want := range []string{"events", "reparse"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("help does not document %s", want)
+		}
 	}
 	code, out = run(t)
 	if code != 2 || !strings.Contains(out, "用法") {
@@ -216,4 +223,136 @@ func TestEventsCommandListsDeadlineOnlyRows(t *testing.T) {
 	if strings.Contains(out, "已过窗口") {
 		t.Errorf("a deadline-only row is not a missed opening:\n%s", out)
 	}
+}
+
+// 解析器修好之后，游标已经推进的信息源不会再回到旧公告上，那些行就永远带着修复前读出的
+// （其实是"没有"）时刻。reparse 的职责就是把当前解析器的结论补回已入库的行。
+func TestReparseFillsTheDeadlineOlderRowsMissed(t *testing.T) {
+	dir := t.TempDir()
+	seed(t, dir, `{"fingerprint":"o1","url":"https://nc.test/one","title":"消费券第三批",`+
+		`"summary":"领取后核销截止2026年9月10日","source":"nc","category":"voucher","score":78,`+
+		`"is_free":true,"published_at":"2026-08-05T09:00:00+08:00",`+
+		`"discovered_at":"2026-08-05T09:30:00+08:00","meta":{}}`)
+	// 不带年份的写法只有拿公告自己的发布日当锚点才解得开：拿"今天"当锚点的话，
+	// 9月10日要么已过期要么落在 45 天窗口外，就会被正确地拒收——那正是修复追溯不到的样子。
+	seed(t, dir, `{"fingerprint":"o4","url":"https://nc.test/four","title":"文旅券补发",`+
+		`"summary":"本批核销截止9月10日","source":"nc","category":"voucher","score":66,`+
+		`"is_free":true,"published_at":"2026-08-05T09:00:00+08:00",`+
+		`"discovered_at":"2026-08-05T09:30:00+08:00","meta":{}}`)
+	// 折叠掉的副本既不进日报也不进提醒，重读它只是制造噪音。
+	seed(t, dir, `{"fingerprint":"o3","url":"https://nc.test/three","title":"重复的第三条",`+
+		`"summary":"核销截止2026年9月12日","source":"nc","category":"voucher","score":60,`+
+		`"is_free":true,"published_at":"2026-08-05T09:00:00+08:00",`+
+		`"discovered_at":"2026-08-05T09:30:00+08:00",`+
+		`"meta":{"dup_of":"o1"}}`)
+
+	code, out := run(t, "-data", dir, "reparse")
+	if code != 0 {
+		t.Fatalf("dry run: code=%d out=%s", code, out)
+	}
+	// 默认只报告，不动库：这条命令会在跑着的服务旁边执行，不能顺手改写生产数据。
+	if !strings.Contains(readLog(t, dir), `"meta":{}`) {
+		t.Errorf("dry run must not rewrite rows:\n%s", readLog(t, dir))
+	}
+	if !strings.Contains(out, "2026-09-10") {
+		t.Errorf("dry run should report the deadline it would add:\n%s", out)
+	}
+
+	if code, out := run(t, "-data", dir, "reparse", "-write"); code != 0 {
+		t.Fatalf("write: code=%d out=%s", code, out)
+	}
+	got := rowMeta(t, dir, "o1")
+	// 时刻按公告自身发布日补年份，落在读者时钟的墙钟上，不是主机的 UTC。
+	if want := "2026-09-10T23:59:59+08:00"; got["expires_at"] != want {
+		t.Errorf("expires_at = %q, want %q", got["expires_at"], want)
+	}
+	if score := rowScore(t, dir, "o1"); score != 78 {
+		t.Errorf("reparse must not re-rank rows, score went %d -> %d", 78, score)
+	}
+	if got := rowMeta(t, dir, "o4")["expires_at"]; got != "2026-09-10T23:59:59+08:00" {
+		t.Errorf("yearless deadline should resolve off the row's own publish date, got %q", got)
+	}
+	if got := rowMeta(t, dir, "o3")["expires_at"]; got != "" {
+		t.Errorf("a folded duplicate should be left alone, got %q", got)
+	}
+}
+
+// 抹掉一个已存的截止比漏补更糟：Live 只把"写明且已过"的行请出去，读不出时刻的
+// 限时活动就永久留在日报里。所以解析器这一轮读不出时，旧值必须原样留着。
+func TestReparseNeverErasesAStatedDeadline(t *testing.T) {
+	dir := t.TempDir()
+	stored := "2026-11-30T23:59:59+08:00"
+	seed(t, dir, `{"fingerprint":"o2","url":"https://nc.test/two","title":"一个没有任何日期的标题",`+
+		`"source":"nc","category":"voucher","score":70,"is_free":true,`+
+		`"published_at":"2026-08-05T09:00:00+08:00",`+
+		`"discovered_at":"2026-08-05T09:30:00+08:00",`+
+		`"meta":{"expires_at":"`+stored+`"}}`)
+
+	if code, out := run(t, "-data", dir, "reparse", "-write"); code != 0 {
+		t.Fatalf("code=%d out=%s", code, out)
+	}
+	if got := rowMeta(t, dir, "o2")["expires_at"]; got != stored {
+		t.Errorf("a deadline the parser can no longer read must survive: got %q want %q", got, stored)
+	}
+}
+
+// seed writes one JSONL row into a fresh data directory.
+func seed(t *testing.T, dir, line string) {
+	t.Helper()
+	f, err := os.OpenFile(filepath.Join(dir, "deals.jsonl"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(line + "\n"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func readLog(t *testing.T, dir string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(dir, "deals.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// lastRow returns the fields of the newest occurrence of a fingerprint: the log is
+// append-only, so a rewrite is a later line, not an edit.
+func lastRow(t *testing.T, dir, fp string) map[string]any {
+	t.Helper()
+	var found map[string]any
+	for _, line := range strings.Split(readLog(t, dir), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var row map[string]any
+		if json.Unmarshal([]byte(line), &row) != nil {
+			continue
+		}
+		if row["fingerprint"] == fp {
+			found = row
+		}
+	}
+	if found == nil {
+		t.Fatalf("no row for %s in %s", fp, dir)
+	}
+	return found
+}
+
+func rowMeta(t *testing.T, dir, fp string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	m, _ := lastRow(t, dir, fp)["meta"].(map[string]any)
+	for k, v := range m {
+		out[k], _ = v.(string)
+	}
+	return out
+}
+
+func rowScore(t *testing.T, dir, fp string) int {
+	t.Helper()
+	n, _ := lastRow(t, dir, fp)["score"].(float64)
+	return int(n)
 }
