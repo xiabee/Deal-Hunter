@@ -67,15 +67,15 @@ doctor 报"到期前 3h0m0s"、面板 hint 分开显示两个数。顺带：面�
 约 8 小时 —— 方向上宽容所以一直没被当 bug。现在与 `starts_at` 同规矩：截止日也按调用方给出的
 读者时区（`scoring.Input.ReaderZone`，原 `StartsIn` 改名，因为它的含义已覆盖两端）构造。
 **升级后的可观察变化**：到期日判定整体提前 8 小时，过期券不再出现在日报里（这是修正，不是回归）。
-本项已随 `3db4152` 部署到生产（全量门禁 `✓ office CI passed (linux-ci, 83 files)` 后带版本戳构建）。
+本项已随 `3db4152` 部署到生产（全量门禁在 linux-ci 绿过之后带版本戳构建）。
 
 ## Verification
 
 | 项 | 结论 | 证据 |
 |---|---|---|
-| 单元 + 集成测试 | VERIFIED | 208 个测试函数，`go test -race ./...` 本地与 linux-ci 均全绿 |
+| 单元 + 集成测试 | VERIFIED | `go test -race ./...` 本地与 linux-ci 均全绿。测试函数数量不在这里抄数（抄一次就开始漂）：现算 `grep -rn "^func Test" --include=*_test.go . \| wc -l` |
 | 快速门禁 | VERIFIED | `bash scripts/ci-local.sh --quick` → `✓ CI PASSED e849a0b`（fmt/vet/build/secretscan/身份/离线冒烟） |
-| 全量门禁 + 干净环境 | VERIFIED | `DH_CI_HOST=linux-ci bash scripts/ci-office.sh` → `✓ office CI passed (linux-ci, 83 files)`，解包到 `/tmp/deal-hunter-ci-*` 全新目录 |
+| 全量门禁 + 干净环境 | VERIFIED | `DH_CI_HOST=linux-ci bash scripts/ci-office.sh` → 判决行 `✓ office CI passed (linux-ci, N files)`（N 取自该次运行，别抄），解包到 `/tmp/deal-hunter-ci-*` 全新目录 |
 | 三平台产物 | VERIFIED | 交叉编译 linux/amd64、linux/arm64、windows/amd64 全过；arm64 产物已在真机跑过（见下一行），amd64 产物跑在生产机 |
 | 事件提醒端到端（夹具驱动） | VERIFIED | 窗口内恰好一次、跨重启不重发、窗口外（提前 3 天 / 迟到 2 小时）静默、三条渲染路径都带时刻；窗口守卫经"临时翻宽→变红→还原"验证不是空过 |
 | 真实公告措辞解析 | VERIFIED | `9月19日9:00至9月26日24:00`、`上午9:00开放`、`2026年9月19日9:00起` 均正确；`24:00` 拒绝当作开抢时刻；`9月31日` 被 round-trip 守卫拒绝（否则 `time.Date` 会滚到 10-01，猜成未来就真会发错提醒） |
@@ -97,6 +97,7 @@ doctor 报"到期前 3h0m0s"、面板 hint 分开显示两个数。顺带：面�
 | 备份与恢复演练（M7） | VERIFIED（生产实测） | `deploy/backup.sh` 在 `alienware-life` 真跑：归档 977/977 行、config 在位、sha256 自校验通过；再把归档解到临时目录用**生产二进制**跑 `doctor -net=false` 与 `deals -min 60`，恢复出的库与在线库四个数完全一致（`已见 640 · 已推送 248 · 游标 85 · 2100 KB`），`daily:last_sent` / `daily:watched_since` 游标也在 |
 | 搜索引擎的人机验证不再伪装成"没结果" | VERIFIED（夹具） / NOT VERIFIED（生产） | `lite.duckduckgo.com/lite/` 对生产出口 IP 回了 **HTTP 200 + 验证页**（实测：14KB、内含 `anomaly-modal` / `cc=botnet` / `challenge-form`，0 条结果），采集器原本把它归进"本轮无结果"，面板上看起来像羊毛断了。现在 `search` 源会报 `demanded a human check` 进 `status.sources[].err`。两个方向都变异复查过：检测短路 → 变红；正则误伤正常结果页 → 也变红（夹具用的真实验证页去掉了逐请求签名）。**但 `8076158` 上线后那一轮 `status` 里 human check 命中 0 次** —— 验证窗口在部署前自己解除了，所以这条目前只有夹具证据，等它下次真挡我们时才算生产验证过 |
 | 边界清扫（时钟与预算） | VERIFIED | 四条表驱动测试：`max_per_day: 0` 现在真的是 0（以前 `budgetLeft` 与 `urgentMax` 各把它抬成 1，静音写法变成每天一条惊喜）；预算按**读者本地日**跨日（北京 23:59 花完、00:01 补回，同一个瞬间用 UTC 表达结论不变）；日报到点判定（08:59:59 不发 / 09:00:00 发 / 发过不再发 / 启动时时段已过不补发 / 明天的仍发）；提醒窗口四条边。**其中一条抓到真 bug**：截止时刻正好等于本轮"现在"也会提醒一次，那一刻已无事可做 —— 到期侧改为严格未来（`when.After(now)`），开抢侧保留迟到宽容（十分钟前的开抢还能领）。两条新守卫都变异复查过（改回旧写法各自变红） |
+| 无年份截止 + 紧贴的时刻（M10） | VERIFIED | `ExpiresAt(text, anchor)` 的锚点带两件事：读者钟点、以及补年用的年份。规则保守 —— 同一年读法还没过期才接受；过期时只在年底附近滚一年且不超过锚点后 45 天（9 月的帖子写"截止至8月28日"是已经过了，不是明年）。日期后面紧贴着写了点就按点记（`截止到9月20日凌晨5:40` → 05:40），`24:00` 归到当天末尾；**逗号之后是另一句**，"至9月25日，10:00 开抢"不会把开抢时刻借成截止时刻，这一条单独有断言。用同一份生产语料复测：读数 28 行（含 3 行无年份），抽查两条一条从 23:59 变成 05:40、另一条本来就是真截止，没引入误报。`clockAfter` 做过变异复查（短路即变红）。顺手把 `expiryLead` 前置词表收成一个常量 —— 之前规则表和 `yearlessLeadRe` 各抄一份，改一处就会漂 |
 | 用生产历史语料回灌解析器（M9） | VERIFIED | 从 `alienware-life:/var/lib/deal-hunter/deals.jsonl` 取 1040 行真实公告文本（md5 两端一致，只在构建机的一次性工作区里跑，明细不回传本地），喂给当时的解析器：64 行含日期字样，**只有 5 行读得出截止**。补了两类年份明写的写法（`开放至/持续至/顺延至/延期至/延长至/免费至/限免至` 允许前置词与日期之间最多 6 个非数字；`2026 年 12 月 31 日前` 这类"年在内 + 前"后缀，含空格变体）之后 → **24 行读得出截止**，另加抽查输出：11 个去重的"读到的值 ← 原句"全部是真截止（含 `活动持续至2029年3月31日`、`本期活动截至 2026 年 12 月 31 日`、区间那条），**没有一个把发布日/数据时效读成截止**；反向守卫 `TestExpiresStillRefusesPublicationDates` 就是钉这一点的。剩下的读不出里最大一类是不写年份的 `截止至8月28日`，已作为候选 #1 排队（需要发布日锚点 + 定一个跨度上限）。新规则做过变异复查：删掉前置词与"前"规则，2 条断言立刻变红 | 新鲜度台阶表驱动测试（24h / 72h / 7d / 30d 各两侧 + 时间戳超前按新算）全绿，实现没有 bug；但清扫本身抓到两件事：① `evaluate()` 的第 4 个参数原本**被忽略**，有一条老测试（`TestStaleItemIsPenalized`）把条目的 `PublishedAt` 当"现在"传进去，因为参数是死的才一直通过 —— 参数改名 `now` 并真正接上后它立刻变红，说明那条断言此前在空转；② 精确压在 30 天边界的用例会因"外层 now 早于内层 `time.Now()`"的亚秒漂移过档，所以边界测试必须自带时钟（生产无害：采集间隔 30 分钟）。上限测试做了非空转证明：去掉 `clamp` 后同一夹具有 **103 分** |
 | 单一读者时钟（M8） | VERIFIED | 顶层 `timezone` 现在是唯一开关：写错（`Mars/Nowhere`）在 `config.Validate()` 就拒绝（以前只有 `notify.feishu.timezone` 会报错、顶层这个静默退回主机钟 —— 服务在 UTC 上就等于排程差 8 小时）；`notify.feishu.timezone` 字段已删除，`NewFeishu(cfg, loc)` 由 pipeline 传入同一个 `a.loc()`。守卫测试断言"东八区页脚 09:25 / UTC 页脚 01:25"，把 `tz := clock` 改回 `time.Local` 即变红。旧配置里残留的 `notify.feishu.timezone` 键变成惰性废弃键（有测试守着它不再泄漏进钟） |
 | 只为测试存在的接缝已删（M8） | VERIFIED | `notify.DealsOf` 与 `var _ = notify.DealsOf` 一起删掉（`m.Deals` 本就是导出字段，测试直接用）；顺带清掉因此不再需要的 `model` 导入。同批修掉 README 配置样例里 M2 就删除的 `filter.min_score` 假旋钮，并补上缺的 `event` 块 | `systemctl start deal-hunter-backup.service` 在加固单元里真跑通（`978/978` 行、392K、`Finished`）；`list-timers` 下次触发 `2026-09-20 20:35:03 UTC` = 北京 04:35 —— **`OnCalendar` 必须写时区**，主机是 UTC，裸写 04:30 会变成北京中午；轮换在临时目录里以 `KEEP=2` 连跑三次验证，剩正好 2 对文件；归档落盘 0600（systemd 默认 umask 022 也压不住脚本里的 `umask 077`） | 第一版落盘 0644 而归档里装着 `deal-hunter.env`（webhook + 签名密钥）—— 脚本自己的校验把这次备份判成失败了，顺带暴露权限问题。现在 `umask 077`、文件 0600、目录 0750；实测过：`/var/backups/deal-hunter` 是 750 root:root，归档内 per-file 权限按原样保留（env 仍是 0640 root:dealhunter）。目录不可穿越，所以那两分钟内没有实际泄露面 |
