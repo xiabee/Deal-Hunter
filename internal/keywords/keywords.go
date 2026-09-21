@@ -413,6 +413,12 @@ func (d *Dict) ExpiresAt(text string, anchor time.Time) *time.Time {
 			}
 		}
 	}
+	// An abbreviated range names its own end too: 9月20日至27日 omits the month in the
+	// tail because the first date already gave it. This is tried after the lead-in
+	// forms, where a word like 截止 is the stronger claim on which date ends the offer.
+	if t, ok := shortRangeEnd(text, anchor); ok {
+		return &t
+	}
 	// A window stated as a duration is the announcement talking about its own end:
 	// 限时免费一周 says "a week from now" without naming a date. Only 限时/限免/为期 head
 	// a promo window - 试用一个月 is the length of a trial and 3天会员卡 the validity of the
@@ -422,6 +428,31 @@ func (d *Dict) ExpiresAt(text string, anchor time.Time) *time.Time {
 		return &t
 	}
 	return nil
+}
+
+// shortRangeTailRe reads 9月20日至27日: month and day up front, a joiner, then a bare
+// day whose month the first date already named.
+var shortRangeTailRe = regexp.MustCompile(
+	`(\d{1,2})月(\d{1,2})[日号]?[^\d\n]{0,3}?(?:至|到|~|—|–|-)\s*(\d{1,2})\s*[日号]`)
+
+// shortRangeEnd completes an abbreviated range and hands the tail date to the yearless
+// reader, which owns the year, the trailing clock and the sanity window.
+func shortRangeEnd(text string, anchor time.Time) (time.Time, bool) {
+	if anchor.IsZero() {
+		return time.Time{}, false
+	}
+	ix := shortRangeTailRe.FindStringSubmatchIndex(text)
+	if ix == nil {
+		return time.Time{}, false
+	}
+	startDay, _ := strconv.Atoi(text[ix[4]:ix[5]])
+	day, _ := strconv.Atoi(text[ix[6]:ix[7]])
+	// A tail day that is not after the start belongs to another month; completing it
+	// in this one would put the end before the opening (9月20日至10月3日 read as 9月3日).
+	if day <= startDay {
+		return time.Time{}, false
+	}
+	return yearlessDeadline(text[ix[2]:ix[3]], text[ix[6]:ix[7]], text[ix[1]:], anchor)
 }
 
 // statedDurationRe reads 限时两周 / 限免 3 天 / 为期两周. The bridge between the head and

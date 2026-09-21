@@ -332,6 +332,53 @@ func TestExpiresAtReadsAStatedDuration(t *testing.T) {
 
 // "9月31日" 应该判为读不懂，而不是悄悄变成 10 月 1 日 —— 那会让一张早已结束的券
 // 在日报里多活一天。
+// 区间也可以只写尾部的"日"：「9月20日至27日」的同一个月被省略了。2026-09-21 生产日报
+// 第一条（93 分）就是这个写法，按时长推会被"句中有日期"的守卫正确地挡住，而这里能直接读出结束。
+func TestExpiresAtReadsASameMonthAbbreviatedRange(t *testing.T) {
+	east := time.FixedZone("CST", 8*3600)
+	anchor := time.Date(2026, 9, 21, 13, 50, 0, 0, east)
+
+	accept := []struct{ text, want string }{
+		{"限时福利！9月20日至27日，在 TokenHarbor 免费试用 Qwen3.8-Flash", "2026-09-27 23:59"},
+		{"开放时间9月20日到27日23:00", "2026-09-27 23:00"},
+	}
+	for _, c := range accept {
+		got := Default().ExpiresAt(c.text, anchor)
+		if got == nil {
+			t.Errorf("no deadline read from %q", c.text)
+			continue
+		}
+		if v := got.In(east).Format("2006-01-02 15:04"); v != c.want {
+			t.Errorf("%q -> %s, want %s", c.text, v, c.want)
+		}
+	}
+
+	// 尾部的日小于开头的日，说明它属于下一个月（"9月20日至10月3日" 里没有"月"字被省略这回事），
+	// 按同月去补就会得到一个比开始还早的结束 —— 宁可整条不读。
+	for _, text := range []string{
+		"9月20日至10月3日",
+		"9月20日至3日",
+		"活动至2026年9月30日",
+	} {
+		if got := Default().ExpiresAt(text, anchor); got != nil && !strings.Contains(text, "2026年") {
+			t.Errorf("must not complete %q into the same month, got %v", text, *got)
+		}
+	}
+
+	// 这一条才是尾部日期的顺序控制：锚点早于开头日时，"9月28日至3日"若按同月补就会得到
+	// 比开场还早的 9月3日 —— 有前置词的写法也同理，先写截止再写区间的句子由前置词说了算。
+	fromSept1 := time.Date(2026, 9, 1, 9, 0, 0, 0, east)
+	if got := Default().ExpiresAt("9月28日至3日发放", fromSept1); got != nil {
+		t.Errorf("a tail day before the start is another month, got %v", *got)
+	}
+	got := Default().ExpiresAt("核销截止9月30日，本批9月1日至5日", fromSept1)
+	if got == nil || got.In(east).Format("2006-01-02") != "2026-09-30" {
+		t.Errorf("the 截止 lead should outrank a bare range, got %v", got)
+	}
+}
+
+// "9月31日" 应该判为读不懂，而不是悄悄变成 10 月 1 日 —— 那会让一张早已结束的券
+// 在日报里多活一天。
 // ExpiresAt 与 StartsAt 同族，同样会被 time.Date 的进位骗过：核销期限写成
 // "9月31日" 应该判为读不懂，而不是悄悄变成 10 月 1 日 —— 那会让一张早已结束的券
 // 在日报里多活一天。
