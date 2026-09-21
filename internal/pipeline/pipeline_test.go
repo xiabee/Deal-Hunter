@@ -230,6 +230,11 @@ func TestSourceIdlenessTracksTheLastRoundThatParsedAnything(t *testing.T) {
 			t.Errorf("%s ahead of the reader's clock should clamp to 0, got %v", s.Name, s.Idle)
 		}
 	}
+
+	// 观察起点由第一轮写下（无论那一轮有没有收获）：读侧要靠它区分"衰减"和"刚开始看"。
+	if start, ok := SourceRecordStart(app.st); !ok || time.Since(start) > time.Minute {
+		t.Errorf("the first round should date the record, got %v ok=%v", start, ok)
+	}
 }
 
 // nextFreeModelFeed is the same source one round later with one extra event: a

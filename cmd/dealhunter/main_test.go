@@ -512,14 +512,29 @@ func TestDoctorReportsSourceSilence(t *testing.T) {
 		t.Errorf("a source that spoke an hour ago must not be dragged in: %s", line)
 	}
 
-	// 没有记录 = 一个音都没通过：也要报出来，而不是当成正常。
+	// 一条记录都没有 = 观察刚开始，不能算衰减：那会把"我们刚装上"报成"它坏了"。
 	if err := os.WriteFile(filepath.Join(data, "state.json"), []byte(`{}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	_, outTmp2 := run(t, "-config", cfgPath, "-data", data, "doctor", "-net=false")
 	line = field(outTmp2, "source")
-	if !strings.HasPrefix(line, "!") || !strings.Contains(line, "从没") {
-		t.Errorf("never-heard-from sources should warn with 从没: %s", line)
+	if !strings.HasPrefix(line, "✓") || !strings.Contains(line, "观察") {
+		t.Errorf("an empty record should read as still-watching, not as decay: %s", line)
+	}
+
+	// 记录本身已有两天、某个源从始至终没出过声 —— 这才是可以判的"从没出声"。
+	aged := `{"src:last_hit":{"talkative":"` + time.Now().Add(-time.Hour).UTC().Format(time.RFC3339) + `"},` +
+		`"src:last_hit_since":"` + time.Now().Add(-48*time.Hour).UTC().Format(time.RFC3339) + `"}`
+	if err := os.WriteFile(filepath.Join(data, "state.json"), []byte(aged), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, outTmp3 := run(t, "-config", cfgPath, "-data", data, "doctor", "-net=false")
+	line = field(outTmp3, "source")
+	if !strings.HasPrefix(line, "!") || !strings.Contains(line, "从记录开始起") {
+		t.Errorf("a source silent since a two-day-old record should warn: %s", line)
+	}
+	if strings.Contains(line, "talkative（") {
+		t.Errorf("the source that spoke an hour ago must not be named: %s", line)
 	}
 }
 

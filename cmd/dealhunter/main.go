@@ -885,21 +885,39 @@ func locOf(cfg *config.Config) *time.Location {
 func sourceSilence(cfg *config.Config, st *store.Store, now time.Time) (string, string) {
 	const patience = 36 * time.Hour
 	idle := pipeline.SourceIdleness(cfg, st, now)
+	// 没出声的源要分两种：真的衰减，和这台机器才开始收集证据。记录起点比耐心还短
+	// 时报 warn，就是拿"我们刚装上"当"它坏了"。
+	epoch, epochKnown := pipeline.SourceRecordStart(st)
+	watchOnly := !epochKnown || now.Sub(epoch) <= patience
 	var quiet []string
 	for _, s := range idle {
-		if s.Last.IsZero() || s.Idle > patience {
-			human := "从没解析出内容"
-			if !s.Last.IsZero() {
-				human = humanDelta(s.Idle) + "没出声"
+		if s.Last.IsZero() {
+			if !watchOnly {
+				quiet = append(quiet, s.Name+"（从记录开始起就没解析出内容）")
 			}
-			quiet = append(quiet, s.Name+"（"+human+"）")
+			continue
+		}
+		if s.Idle > patience {
+			quiet = append(quiet, s.Name+"（"+humanDelta(s.Idle)+"没出声）")
+		}
+	}
+	var never int
+	for _, s := range idle {
+		if s.Last.IsZero() {
+			never++
 		}
 	}
 	headline := "全部信源最近都有出声"
-	if len(idle) > 0 {
+	if watchOnly && never > 0 {
+		age := "还没有记录"
+		if epochKnown {
+			age = humanDelta(now.Sub(epoch)) + "前开始"
+		}
+		headline = fmt.Sprintf("%d 个信源还没出过声（观察记录 %s，不足 36h 不算衰减）", never, age)
+	} else if len(idle) > 0 {
 		worst := idle[0] // sorted: never-heard-from first, then longest silence
 		if worst.Last.IsZero() {
-			headline = "有信源从没解析出过内容：" + worst.Name
+			headline = "有信源从记录开始起就没解析出过内容：" + worst.Name
 		} else {
 			headline = "最久没出声的是 " + worst.Name + "（" + humanDelta(worst.Idle) + "前）"
 		}

@@ -857,6 +857,11 @@ func (a *App) sameLocalDay(x, y time.Time) bool {
 // last round, lost on restart - keeps looking green.
 const srcLastHit = "src:last_hit"
 
+// srcLastHitSince dates the record itself. Without it "这个源从没解析出过内容" would
+// be read as "this source has never worked", when the honest reading on a host that
+// started collecting an hour ago is simply "no evidence yet".
+const srcLastHitSince = "src:last_hit_since"
+
 // SourceIdle says how long a source has gone without producing a row. Last is the
 // zero time when the source has never done so - a different complaint from "quiet
 // lately", and never encoded as a negative Idle: a reader whose clock falls a few
@@ -868,6 +873,13 @@ type SourceIdle struct {
 }
 
 func (a *App) recordSourceHits(reports []SourceReport, now time.Time) {
+	// The epoch is written by the first round that runs, hit or not: it is when the
+	// evidence starts, not when evidence was first seen.
+	if _, ok := a.stateTime(srcLastHitSince); !ok {
+		if err := a.setStateTime(srcLastHitSince, now.UTC()); err != nil {
+			a.log.Warn("record source record epoch", "err", err)
+		}
+	}
 	hits := map[string]string{}
 	if b, ok := a.st.GetState(srcLastHit); ok {
 		_ = json.Unmarshal(b, &hits)
@@ -887,6 +899,24 @@ func (a *App) recordSourceHits(reports []SourceReport, now time.Time) {
 	if err := a.st.PutState(srcLastHit, hits); err != nil {
 		a.log.Warn("record source hits", "err", err)
 	}
+}
+
+// SourceRecordStart reports when this host began keeping per-source hit evidence.
+// Callers need it to tell "quiet for days" apart from "we have only watched for an hour".
+func SourceRecordStart(st *store.Store) (time.Time, bool) {
+	b, ok := st.GetState(srcLastHitSince)
+	if !ok {
+		return time.Time{}, false
+	}
+	var s string
+	if json.Unmarshal(b, &s) != nil {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
 }
 
 // SourceIdleness lists every enabled source, most silence first, so the worst one is
