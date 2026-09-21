@@ -82,7 +82,7 @@ if [[ "$QUICK" != "1" ]]; then
 		goarch="${pair#*/}"
 		(
 			export GOOS="$goos" GOARCH="$goarch" CGO_ENABLED=0
-			go build -trimpath -ldflags "-s -w" -o "dist/dealhunter-${goos}-${goarch}" ./cmd/dealhunter
+			go build -trimpath -ldflags "$LDFLAGS" -o "dist/dealhunter-${goos}-${goarch}" ./cmd/dealhunter
 		) || fail "cross-build $pair"
 		echo "  ok $pair"
 	done

@@ -79,7 +79,7 @@ if (-not $Quick) {
     foreach ($pair in @("linux/amd64", "linux/arm64", "windows/amd64")) {
         $goos, $goarch = $pair -split "/"
         $env:GOOS = $goos; $env:GOARCH = $goarch; $env:CGO_ENABLED = "0"
-        go build -trimpath -ldflags "-s -w" -o "dist/dealhunter-$goos-$goarch" ./cmd/dealhunter
+        go build -trimpath -ldflags $ld -o "dist/dealhunter-$goos-$goarch" ./cmd/dealhunter
         if ($LASTEXITCODE -ne 0) { Fail "cross-build $pair" }
         Write-Host "  ok $pair"
         Remove-Item Env:GOOS, Env:GOARCH, Env:CGO_ENABLED
