@@ -878,8 +878,8 @@ func locOf(cfg *config.Config) *time.Location {
 func backupFreshness(dataDir string) (string, string) {
 	b, err := os.ReadFile(filepath.Join(dataDir, "backup.stamp"))
 	if err != nil {
-		return "warn", "数据目录里没有 backup.stamp：这台机器没有留下成功备份的记录" +
-			"（每晚一次要 sudo systemctl enable --now deal-hunter-backup.timer）"
+		return "warn", "数据目录里没有 backup.stamp：backup.sh 没成功跑过" +
+			"（未排程→systemctl enable --now deal-hunter-backup.timer；跑了就失败→journalctl -u 该 unit）"
 	}
 	fields := strings.Fields(string(b))
 	if len(fields) == 0 {

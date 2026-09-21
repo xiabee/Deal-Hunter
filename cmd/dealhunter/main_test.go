@@ -321,6 +321,13 @@ func TestDoctorReportsBackupFreshness(t *testing.T) {
 	if marker != "!" || !strings.Contains(detail, "没有") {
 		t.Errorf("a host that never left a backup stamp should warn: %q %q", marker, detail)
 	}
+	// 没有标记有两种成因，两种都得给出下一步 —— 只说"去 enable 定时器"会在
+	// 已经启用定时器的机器上把人引向错误的方向。
+	for _, want := range []string{"enable --now", "journalctl"} {
+		if !strings.Contains(detail, want) {
+			t.Errorf("the missing-stamp hint should name %q: %q", want, detail)
+		}
+	}
 
 	write := func(age time.Duration) {
 		t.Helper()
