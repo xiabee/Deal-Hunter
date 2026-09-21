@@ -395,6 +395,85 @@ func TestCompactDropsCacheKeysOfDroppedRows(t *testing.T) {
 	}
 }
 
+// 服务进程常驻，运维偶尔在同一份数据目录上跑 CLI —— 两边各持一份完整的状态图。
+// 若 PutState 只写自己那份，后刷盘的一方就把对方刚写的键抹了（生产真实丢过
+// maint:last_compact，doctor 因此谎报"从未压缩过"）。
+func TestConcurrentStoresDoNotEraceEachOthersKeys(t *testing.T) {
+	dir := t.TempDir()
+	a, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	b, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+
+	if err := a.PutState("key:a", "from the first handle"); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.PutState("key:b", "from the second handle"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := a.GetState("key:a"); !ok {
+		t.Error("the second handle's write erased the first one's key")
+	}
+	if _, ok := b.GetState("key:a"); !ok {
+		t.Error("the second handle should see what the first one wrote")
+	}
+
+	reopened, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	for _, k := range []string{"key:a", "key:b"} {
+		if _, ok := reopened.GetState(k); !ok {
+			t.Errorf("%s is missing on disk after both writes", k)
+		}
+	}
+
+	// 合并不能反过来踩掉本次要写的值：两边都有同一个键时，以这次写入为准
+	// （游标只会往前走，用磁盘上的旧值覆盖新值等于退回重抓）。
+	if err := b.PutState("dup:key", "the older write"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.PutState("dup:key", "the newer write"); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fresh.Close()
+	blob, ok := fresh.GetState("dup:key")
+	if !ok || string(blob) != `"the newer write"` {
+		t.Errorf("the later write should win, got %q (ok=%v)", string(blob), ok)
+	}
+
+	// 陈旧内存不许赢磁盘：a 手里还留着它自己早先写过的值，而 b 已经把它更新过一轮。
+	// 以磁盘为底才对 —— 反过来（只补自己缺的键）会让 a 下次写任何键时把旧值刷回去。
+	if err := a.PutState("stale:key", "from a, then superseded"); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.PutState("stale:key", "from b, the current value"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.PutState("something:else", "an unrelated write"); err != nil {
+		t.Fatal(err)
+	}
+	after, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer after.Close()
+	if v, _ := after.GetState("stale:key"); string(v) != `"from b, the current value"` {
+		t.Errorf("a's stale copy rolled the key back: %q", string(v))
+	}
+}
+
 func TestOpenRejectsEmptyDir(t *testing.T) {
 	if _, err := Open("   "); err == nil {
 		t.Fatal("expected an error for an empty dir")

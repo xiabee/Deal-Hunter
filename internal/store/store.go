@@ -423,8 +423,29 @@ func (s *Store) PutState(key string, val any) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Another handle - the long-running service while someone runs a CLI command,
+	// or vice versa - holds its own copy of this map and rewrites the whole file on
+	// every write. Take the file as the base and apply this write on top: whatever
+	// is on disk was persisted by someone after we read it, so it beats our memory,
+	// and the key being written is still the value we were asked to store.
+	s.adoptDiskStateLocked()
 	s.state[key] = json.RawMessage(b)
 	return s.flushStateLocked()
+}
+
+// adoptDiskStateLocked merges state.json into the in-memory map.
+func (s *Store) adoptDiskStateLocked() {
+	cur, err := os.ReadFile(filepath.Join(s.dir, "state.json"))
+	if err != nil || len(strings.TrimSpace(string(cur))) == 0 {
+		return
+	}
+	disk := map[string]json.RawMessage{}
+	if json.Unmarshal(cur, &disk) != nil {
+		return
+	}
+	for k, v := range disk {
+		s.state[k] = v
+	}
 }
 
 func (s *Store) flushStateLocked() error {
