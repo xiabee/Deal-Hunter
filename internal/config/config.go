@@ -16,6 +16,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	// The IANA database is embedded, not looked up. Without it a -trimpath build
+	// cannot find $GOROOT/lib/time/zoneinfo.zip on Windows and every zone name
+	// fails, and a minimal container or an ARM board may ship no zoneinfo at all
+	// while Linux dev boxes happen to work. Costs ~450 KB of a single static binary
+	// and keeps the "zero third-party dependencies" property, since tzdata is stdlib.
+	_ "time/tzdata"
 )
 
 // Known source kinds.
@@ -82,8 +88,9 @@ type Source struct {
 //
 // What gets delivered is not decided here: see Notify.Urgent and Notify.Daily.
 type Feishu struct {
-	Enabled       bool   `json:"enabled"`
-	Timezone      string `json:"timezone,omitempty"`
+	Enabled bool `json:"enabled"`
+	// No timezone here on purpose: the reader has one clock, set at the top level,
+	// and the card footer must agree with the 09:00 promise.
 	APIBase       string `json:"api_base,omitempty"`
 	ReceiveIDType string `json:"receive_id_type,omitempty"`
 
@@ -273,7 +280,7 @@ func Default() *Config {
 			MaxOfficialLookups: 16,
 		},
 		Notify: Notify{
-			Feishu:   Feishu{Enabled: true, Timezone: "Asia/Shanghai"},
+			Feishu:   Feishu{Enabled: true},
 			OpenClaw: OpenClaw{Enabled: true, SkillDir: "", APIPath: "/api/v1/", Description: "Deal-Hunter 羊毛情报"},
 			Daily:    Daily{Enabled: true, At: defaultDailyAt, MinScore: 45, MaxItems: 15},
 			Urgent:   Urgent{Enabled: true, MinScore: 90, MaxPerDay: 1, MaxItems: 5},
@@ -565,6 +572,11 @@ func (c *Config) Validate() error {
 	}
 	if c.Notify.Urgent.MinScore < 0 || c.Notify.Urgent.MinScore > 100 {
 		return fmt.Errorf("config: notify.urgent.min_score %d out of 0..100", c.Notify.Urgent.MinScore)
+	}
+	if c.Timezone != "" {
+		if _, err := time.LoadLocation(c.Timezone); err != nil {
+			return fmt.Errorf("config: timezone %q is not a real zone: %w", c.Timezone, err)
+		}
 	}
 	if c.Notify.Event.MinScore < 0 || c.Notify.Event.MinScore > 100 {
 		return fmt.Errorf("config: notify.event.min_score %d out of 0..100", c.Notify.Event.MinScore)

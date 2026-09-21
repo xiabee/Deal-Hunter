@@ -407,3 +407,35 @@ func TestEventExpiryLeadRejectsNegative(t *testing.T) {
 		t.Errorf("want expiry_lead rejection, got %v", err)
 	}
 }
+
+// `timezone` 决定"09:00 日报""开抢前 45 分钟""卡片页脚"是几点 —— 写错一个字母就
+// 应该当场拒绝，而不是悄悄退回主机时区：服务常年跑 UTC，退回等于所有排程差 8 小时。
+// 以前只有 notify.feishu.timezone 会报错，顶层这个不会。
+func TestBadTopLevelTimezoneIsRefused(t *testing.T) {
+	bad := Default()
+	bad.Timezone = "Mars/Nowhere"
+	if err := bad.Validate(); err == nil || !strings.Contains(err.Error(), "timezone") {
+		t.Errorf("want a timezone rejection, got %v", err)
+	}
+	ok := Default()
+	ok.Timezone = "Asia/Shanghai"
+	if err := ok.Validate(); err != nil {
+		t.Errorf("a real zone must stay valid: %v", err)
+	}
+}
+
+// 一个读者时钟就够了。旧配置里留着 notify.feishu.timezone 也不能改变读者的钟：
+// 它已经不是开关，而是一个被忽略的废弃键（与 digest 那一批同样的处理方式）。
+func TestObsoleteFeishuTimezoneKeyIsInert(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.json")
+	if err := os.WriteFile(path, []byte(`{"timezone":"Asia/Shanghai","notify":{"feishu":{"timezone":"UTC"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("an obsolete key must still load: %v", err)
+	}
+	if got := cfg.Timezone; got != "Asia/Shanghai" {
+		t.Errorf("obsolete feishu.timezone leaked into the reader clock: %s", got)
+	}
+}

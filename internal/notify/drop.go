@@ -9,8 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/xiabee/deal-hunter/internal/model"
 )
 
 // FileDrop writes findings as Markdown and JSON into a directory. This is the
@@ -120,6 +118,3 @@ func (c *Console) Send(_ context.Context, m Message) error {
 	_, err := fmt.Fprint(c.out, m.Plain())
 	return err
 }
-
-// DealsOf exposes the deals carried by a message for assertions in tests.
-func DealsOf(m Message) []model.Deal { return m.Deals }

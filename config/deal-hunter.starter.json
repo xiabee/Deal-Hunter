@@ -15,8 +15,7 @@
   },
   "notify": {
     "feishu": {
-      "enabled": true,
-      "timezone": "Asia/Shanghai"
+      "enabled": true
     },
     "openclaw": {
       "enabled": true,

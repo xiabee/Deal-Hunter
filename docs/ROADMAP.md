@@ -46,7 +46,7 @@
 | M6（门禁加固） | `secretlint` 新增 `consumer_mailbox`：个人邮箱写进**文档正文**也会被拦（`check-identity` 只管提交作者），豁免沿用同行 `secretlint:ignore` + 理由 | 本次提交 |
 | M7（备份与恢复） | `deploy/backup.sh`：打包状态与配置后**自解一次做对比**（行数 / config 在位 / sha256），`umask 077` 因为归档里含 env 密钥；`deal-hunter-backup.{service,timer}` 每晚 04:30 且 `Persistent`；恢复路径写进 README 并在生产演练过 | 本次提交 |
 
-## Next Candidates（按价值排序，未开工）
+| M8（去重与去缝） | 读者时钟只剩顶层 `timezone` 一处，且写错在启动时就拒绝；`notify.DealsOf` 这个只为测试存在的接缝删掉（`m.Deals` 本来就是导出字段） | 本次提交 |
 
 1. **限时事件的另一半：区县与省级栏目按「信源准入」流程实测后再加**（M3 已给出做法与判据）。
    2026-09-21 按市政府站内可发现的栏目量过一轮：`bmdt`（部门动态）/ `jrnc`（今日南昌）/
@@ -83,12 +83,7 @@
 - **升级后旧配置里的废弃键不报错也不生效**（`notify.digest`、`notify.feishu.{min_score,max_per_run,silent_hours}`、`filter.min_score`），`install.sh` 会打一行提示。
 
 ## Technical Debt
-
-- `deploy/install.sh` 只接受带路径的二进制：`sudo ./deploy/install.sh dealhunter-linux-amd64` 会把它当
-  命令去找并报"无法在本机执行"。修法是一行（无斜杠时前缀 `./`）。本次部署踩过一次，记在这里备修。
 - `internal/scheduler` 没有测试文件：`Loop` 直接依赖 `*pipeline.App`，要测触发逻辑得先抽一个小接口（**故意没做**，避免为测试造抽象）。
-- `notify.feishu.timezone` 与顶层 `timezone` 语义重叠，前者现在只用于卡片页脚时间。
-- `notify.DealsOf` 只为测试存在。
 - 采集器类型有 7 种，`sources.New` 是一个 switch；再加两类以上时值得回到注册表写法。
 
 ## Non-Goals

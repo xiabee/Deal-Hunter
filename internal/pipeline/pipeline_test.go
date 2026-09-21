@@ -884,7 +884,6 @@ func TestConstructorGuards(t *testing.T) {
 func TestFeishuStatusHelpers(t *testing.T) {
 	app := testApp(t, &cannedFetcher{}, &spyNotifier{}, func(c *config.Config) {
 		c.Notify.Feishu.Enabled = true
-		c.Notify.Feishu.Timezone = "UTC"
 	})
 	if app.FeishuReady() {
 		t.Error("no webhook configured, so it cannot be ready")
@@ -911,8 +910,6 @@ func TestSourcePanicsAreContained(t *testing.T) {
 		t.Error("the valid source must still be processed")
 	}
 }
-
-var _ = notify.DealsOf
 
 // 公告里写明的开抢时刻必须落到入库记录上，否则事件提醒永远看不到它。而且必须按配置
 // 时区解释：服务常年跑 UTC，「上午10:00」是北京时间，差 8 小时等于每条都提醒错。

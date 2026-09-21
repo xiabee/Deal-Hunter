@@ -154,7 +154,7 @@ func New(cfg *config.Config, log *slog.Logger, opts ...Option) (*App, error) {
 
 	var backends []notify.Notifier
 	if cfg.Notify.Feishu.Enabled {
-		fs, err := notify.NewFeishu(cfg.Notify.Feishu)
+		fs, err := notify.NewFeishu(cfg.Notify.Feishu, a.loc())
 		if err != nil {
 			st.Close()
 			return nil, err

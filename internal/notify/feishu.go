@@ -36,15 +36,13 @@ type Feishu struct {
 }
 
 // NewFeishu builds the backend; missing credentials are allowed so the binary
-// can run and report exactly what is absent.
-func NewFeishu(cfg config.Feishu) (*Feishu, error) {
-	tz := time.Local
-	if cfg.Timezone != "" {
-		if l, err := time.LoadLocation(cfg.Timezone); err == nil {
-			tz = l
-		} else {
-			return nil, fmt.Errorf("feishu: bad timezone %q: %w", cfg.Timezone, err)
-		}
+// can run and report exactly what is absent. `clock` is the reader's zone, the
+// same one the briefing schedule uses — passing it in rather than configuring it
+// twice is what keeps the card footer and the 09:00 promise saying "same hour".
+func NewFeishu(cfg config.Feishu, clock *time.Location) (*Feishu, error) {
+	tz := clock
+	if tz == nil {
+		tz = time.Local
 	}
 	base := strings.TrimRight(cfg.APIBase, "/")
 	if base == "" {

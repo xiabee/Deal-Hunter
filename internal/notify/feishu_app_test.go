@@ -84,7 +84,7 @@ func appServer(t *testing.T, tokenCalls *int32, sendCode int, sendMsg string) *h
 
 func appCfg(base string) config.Feishu {
 	return config.Feishu{
-		Enabled: true, Timezone: "UTC", APIBase: base,
+		Enabled: true, APIBase: base,
 		AppID: testAppID, AppSecret: testAppSecret, ReceiveID: "ou_testrecipient",
 	}
 }
@@ -94,7 +94,7 @@ func TestAppDeliverySendsCard(t *testing.T) {
 	srv := appServer(t, &calls, 0, "")
 	defer srv.Close()
 
-	f, err := NewFeishu(appCfg(srv.URL))
+	f, err := NewFeishu(appCfg(srv.URL), time.UTC)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +120,7 @@ func TestAppTokenIsCachedThenRefreshed(t *testing.T) {
 	var calls int32
 	srv := appServer(t, &calls, 0, "")
 	defer srv.Close()
-	f, _ := NewFeishu(appCfg(srv.URL))
+	f, _ := NewFeishu(appCfg(srv.URL), time.UTC)
 	ctx := context.Background()
 
 	for i := 0; i < 3; i++ {
@@ -162,7 +162,7 @@ func TestAppFallsBackToTextWhenCardRejected(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	f, _ := NewFeishu(appCfg(srv.URL))
+	f, _ := NewFeishu(appCfg(srv.URL), time.UTC)
 	if err := f.Send(context.Background(), NewMessage(KindUrgent, "标题", appDeal())); err != nil {
 		t.Fatalf("a rejected card should fall back instead of dropping the finding: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestAppReportsUpstreamRejectionWithoutLeakingSecrets(t *testing.T) {
 	var calls int32
 	srv := appServer(t, &calls, 230002, "BOT HAS NO PERMISSION")
 	defer srv.Close()
-	f, _ := NewFeishu(appCfg(srv.URL))
+	f, _ := NewFeishu(appCfg(srv.URL), time.UTC)
 
 	err := f.Send(context.Background(), NewMessage(KindUrgent, "标题", appDeal()))
 	if err == nil {
@@ -197,7 +197,7 @@ func TestAppBadSecretIsReported(t *testing.T) {
 	defer srv.Close()
 	cfg := appCfg(srv.URL)
 	cfg.AppSecret = "wrong-value"
-	f, _ := NewFeishu(cfg)
+	f, _ := NewFeishu(cfg, time.UTC)
 
 	err := f.Send(context.Background(), NewMessage(KindUrgent, "t", appDeal()))
 	if err == nil || !strings.Contains(err.Error(), "token code=") {
@@ -220,7 +220,7 @@ func TestAppRequiresMessageID(t *testing.T) {
 		fmt.Fprint(w, `{"code":0,"msg":"success","data":{}}`)
 	}))
 	defer srv.Close()
-	f, _ := NewFeishu(appCfg(srv.URL))
+	f, _ := NewFeishu(appCfg(srv.URL), time.UTC)
 	if err := f.Send(context.Background(), NewMessage(KindUrgent, "t", appDeal())); err == nil {
 		t.Fatal("a response without a message id must be an error")
 	}
@@ -229,12 +229,12 @@ func TestAppRequiresMessageID(t *testing.T) {
 func TestModePreferenceAndUnconfigured(t *testing.T) {
 	both := appCfg("https://example.invalid")
 	both.WebhookURL = hookBase + "abcdefghij" + "0123456789" // runtime-built: keeps the literal out of the repo
-	f, _ := NewFeishu(both)
+	f, _ := NewFeishu(both, time.UTC)
 	if f.Mode() != "webhook" {
 		t.Errorf("the webhook must win when both are configured, got %s", f.Mode())
 	}
 
-	none, _ := NewFeishu(config.Feishu{Enabled: true, Timezone: "UTC"})
+	none, _ := NewFeishu(config.Feishu{Enabled: true}, time.UTC)
 	if none.Mode() != "" || none.Ready() {
 		t.Error("without credentials there is no mode")
 	}
@@ -245,7 +245,7 @@ func TestModePreferenceAndUnconfigured(t *testing.T) {
 
 	partial := appCfg("https://example.invalid")
 	partial.ReceiveID = ""
-	if f, _ := NewFeishu(partial); f.Ready() {
+	if f, _ := NewFeishu(partial, time.UTC); f.Ready() {
 		t.Error("an app identity without a recipient is not usable")
 	}
 }
@@ -258,7 +258,7 @@ func TestReceiveIDTypeValidation(t *testing.T) {
 	for in, want := range cases {
 		cfg := appCfg("https://example.invalid")
 		cfg.ReceiveIDType = in
-		f, _ := NewFeishu(cfg)
+		f, _ := NewFeishu(cfg, time.UTC)
 		if got := f.ReceiveIDType(); got != want {
 			t.Errorf("ReceiveIDType(%q) = %s, want %s", in, got, want)
 		}
@@ -266,12 +266,12 @@ func TestReceiveIDTypeValidation(t *testing.T) {
 }
 
 func TestAPIBaseDefaultsToProduction(t *testing.T) {
-	f, _ := NewFeishu(appCfg(""))
+	f, _ := NewFeishu(appCfg(""), time.UTC)
 	if f.apiBase != "https://open.feishu.cn" {
 		t.Errorf("apiBase = %s", f.apiBase)
 	}
 	trailing := appCfg("https://open.feishu.cn/")
-	f2, _ := NewFeishu(trailing)
+	f2, _ := NewFeishu(trailing, time.UTC)
 	if f2.apiBase != "https://open.feishu.cn" {
 		t.Errorf("trailing slash not trimmed: %s", f2.apiBase)
 	}

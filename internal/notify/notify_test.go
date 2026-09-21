@@ -47,7 +47,7 @@ func TestFeishuDeliversSignedCard(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	f, err := NewFeishu(config.Feishu{Enabled: true, WebhookURL: srv.URL, Secret: "unit-test-secret", Timezone: "UTC"})
+	f, err := NewFeishu(config.Feishu{Enabled: true, WebhookURL: srv.URL, Secret: "unit-test-secret"}, time.UTC)
 	if err != nil {
 		t.Fatalf("NewFeishu: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestFeishuSurfacesUpstreamErrorCode(t *testing.T) {
 		fmt.Fprint(w, `{"code":19021,"msg":"sign match fail"}`)
 	}))
 	defer srv.Close()
-	f, _ := NewFeishu(config.Feishu{WebhookURL: srv.URL, Timezone: "UTC"})
+	f, _ := NewFeishu(config.Feishu{WebhookURL: srv.URL}, time.UTC)
 	err := f.Send(context.Background(), NewMessage(KindUrgent, "x", sampleDeal()))
 	if err == nil || !strings.Contains(err.Error(), "19021") {
 		t.Fatalf("expected the upstream code to be reported, got %v", err)
@@ -138,14 +138,14 @@ func TestFeishuReportsHTTPFailure(t *testing.T) {
 		w.Write([]byte("boom"))
 	}))
 	defer srv.Close()
-	f, _ := NewFeishu(config.Feishu{WebhookURL: srv.URL, Timezone: "UTC"})
+	f, _ := NewFeishu(config.Feishu{WebhookURL: srv.URL}, time.UTC)
 	if err := f.Send(context.Background(), NewMessage(KindUrgent, "x", sampleDeal())); err == nil {
 		t.Fatal("expected an error on HTTP 500")
 	}
 }
 
 func TestFeishuWithoutWebhookNamesTheEnvVar(t *testing.T) {
-	f, _ := NewFeishu(config.Feishu{Enabled: true, Timezone: "UTC"})
+	f, _ := NewFeishu(config.Feishu{Enabled: true}, time.UTC)
 	err := f.Send(context.Background(), NewMessage(KindUrgent, "x", sampleDeal()))
 	if err == nil || !strings.Contains(err.Error(), config.EnvFeishuWebhook) {
 		t.Fatalf("error should tell the operator which env var to set, got %v", err)
@@ -165,17 +165,6 @@ func TestWebhookURLRules(t *testing.T) {
 		if got := URLLooksUsable(raw); got != want {
 			t.Errorf("URLLooksUsable(%q) = %v, want %v", raw, got, want)
 		}
-	}
-}
-
-func TestFeishuResolvesItsTimezoneOrRefusesToStart(t *testing.T) {
-	if _, err := NewFeishu(config.Feishu{Timezone: "Asia/Shanghai"}); err != nil {
-		t.Fatalf("a real zone must load: %v", err)
-	}
-	// The service usually runs in UTC while the card footer is read by someone
-	// on +0800, so the zone is not decoration and a typo in it must not pass.
-	if _, err := NewFeishu(config.Feishu{Timezone: "Mars/Valles"}); err == nil {
-		t.Error("an invalid timezone must be rejected")
 	}
 }
 
@@ -353,7 +342,7 @@ func resolvedDeal(kind, officialURL string) model.Deal {
 }
 
 func TestCardPresentsVerifiedOfficialPageFirst(t *testing.T) {
-	f, _ := NewFeishu(config.Feishu{Timezone: "UTC"})
+	f, _ := NewFeishu(config.Feishu{}, time.UTC)
 	const officialURL = "https://open.bigmodel.cn/pricing"
 	m := NewMessage(KindUrgent, "t", resolvedDeal(official.KindSearchVerified, officialURL))
 	elements := cardElements(f.card(m))
@@ -391,7 +380,7 @@ func TestCardPresentsVerifiedOfficialPageFirst(t *testing.T) {
 }
 
 func TestCardKeepsUnverifiedLinkHonest(t *testing.T) {
-	f, _ := NewFeishu(config.Feishu{Timezone: "UTC"})
+	f, _ := NewFeishu(config.Feishu{}, time.UTC)
 	d := sampleDeal() // no resolution metadata at all
 	b, _ := json.Marshal(f.card(NewMessage(KindUrgent, "t", d)))
 	body := string(b)
@@ -416,7 +405,7 @@ func TestCardKeepsUnverifiedLinkHonest(t *testing.T) {
 // The vendor's front door is a place to check, so it must appear beside an
 // unconfirmed link without ever posing as the found offer.
 func TestCardOffersVendorSiteWithoutClaimingIt(t *testing.T) {
-	f, _ := NewFeishu(config.Feishu{Timezone: "UTC"})
+	f, _ := NewFeishu(config.Feishu{}, time.UTC)
 	d := resolvedDeal(official.KindThirdParty, "https://www.v2ex.com/t/1")
 	d.URL = "https://www.v2ex.com/t/1"
 	d.Meta[official.MetaOriginalURL] = d.URL
@@ -449,7 +438,7 @@ func TestCardOffersVendorSiteWithoutClaimingIt(t *testing.T) {
 // A batch alert must stay scannable on a lock screen: one line per deal, no
 // per-deal buttons, and no runaway text.
 func TestMultiDealAlertIsOneLinePerDeal(t *testing.T) {
-	f, _ := NewFeishu(config.Feishu{Timezone: "UTC"})
+	f, _ := NewFeishu(config.Feishu{}, time.UTC)
 	long := sampleDeal()
 	long.Title = strings.Repeat("限", 90) + " 免费额度"
 	long.Summary = strings.Repeat("很长的一段说明，", 30)
@@ -482,7 +471,7 @@ func TestMultiDealAlertIsOneLinePerDeal(t *testing.T) {
 // The morning briefing is a snapshot of what is still claimable, so each line
 // carries its lifespan and the card stays as tight as the digest.
 func TestDailyBriefingCardShowsLifespan(t *testing.T) {
-	f, _ := NewFeishu(config.Feishu{Timezone: "UTC"})
+	f, _ := NewFeishu(config.Feishu{}, time.UTC)
 	now := time.Now().UTC()
 	live := sampleDeal()
 	live.DiscoveredAt = now.Add(-50 * time.Hour)
@@ -539,7 +528,7 @@ func TestDailySplitsFreshFromOngoing(t *testing.T) {
 		t.Fatalf("sections = %+v", secs)
 	}
 
-	f, _ := NewFeishu(config.Feishu{Timezone: "UTC"})
+	f, _ := NewFeishu(config.Feishu{}, time.UTC)
 	mixed := NewMessage(KindDaily, "t", fresh, stale)
 	mixed.CreatedAt = now
 	b, _ := json.Marshal(f.card(mixed))
@@ -571,7 +560,7 @@ func TestUrgentAndPlainUseTheResolvedLink(t *testing.T) {
 		t.Errorf("plain line should state the verdict: %q", line)
 	}
 	breakthrough := NewMessage(KindUrgent, "⚡ 值得立刻看", d)
-	f, _ := NewFeishu(config.Feishu{Timezone: "UTC"})
+	f, _ := NewFeishu(config.Feishu{}, time.UTC)
 	b, _ := json.Marshal(f.card(breakthrough))
 	if !strings.Contains(string(b), officialURL) {
 		t.Errorf("breakthrough rows should link the vendor page: %s", b)
@@ -584,7 +573,7 @@ func TestEventMessageCarriesTheMomentOnEveryPath(t *testing.T) {
 	when := time.Now().Add(20 * time.Minute).UTC().Format("01月02日 15:04")
 	m := NewMessage(KindEvent, "⏰ 09月21日 10:00 开抢 · 洪城消费券", sampleDeal())
 	m.Title = "⏰ " + when + " 开抢 · 洪城消费券"
-	f, _ := NewFeishu(config.Feishu{Timezone: "UTC"})
+	f, _ := NewFeishu(config.Feishu{}, time.UTC)
 	card, err := json.Marshal(f.card(m))
 	if err != nil {
 		t.Fatal(err)
@@ -605,7 +594,7 @@ func TestEventMessageCarriesTheMomentOnEveryPath(t *testing.T) {
 func TestClosingCardKeepsItsPerRowMomentsOnEveryPath(t *testing.T) {
 	m := NewMessage(KindEvent, "⏰ 2 项临近截止", sampleDeal())
 	m.Intro = "· 09月26日 23:59 截止 · 洪城消费券第三批\n· 09月27日 10:00 开抢 · 滕王阁消费券"
-	f, _ := NewFeishu(config.Feishu{Timezone: "UTC"})
+	f, _ := NewFeishu(config.Feishu{}, time.UTC)
 	card, err := json.Marshal(f.card(m))
 	if err != nil {
 		t.Fatal(err)
@@ -634,5 +623,42 @@ func TestClosingCardKeepsItsPerRowMomentsOnEveryPath(t *testing.T) {
 	}
 	if !strings.Contains(string(body), "截止") {
 		t.Errorf("drop file lost the closing moment: %s", body)
+	}
+}
+
+// 页脚的"几点"和日报排程的"几点"必须是同一个钟：以前两处各有一个 timezone 配置，
+// 改一处就会让读者看到两个不一致的时间。现在时钟由调用方给一次。
+func TestFeishuFooterFollowsTheCallersClock(t *testing.T) {
+	east := time.FixedZone("CST", 8*3600)
+	at := time.Date(2026, 9, 20, 1, 25, 0, 0, time.UTC)
+	hook := config.Feishu{WebhookURL: "https://x.test/hook"}
+
+	inEast, err := NewFeishu(hook, east)
+	if err != nil {
+		t.Fatalf("NewFeishu: %v", err)
+	}
+	inUTC, err := NewFeishu(hook, time.UTC)
+	if err != nil {
+		t.Fatalf("NewFeishu: %v", err)
+	}
+	m := NewMessage(KindDaily, "🌅 羊毛日报", sampleDeal())
+	m.CreatedAt = at
+	foot := func(f *Feishu) string {
+		b, err := json.Marshal(f.card(m))
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := string(b)
+		i := strings.Index(s, "Deal-Hunter · ")
+		if i < 0 {
+			t.Fatalf("no footer in card: %s", s)
+		}
+		return s[i : i+len("Deal-Hunter · ")+11]
+	}
+	if got, want := foot(inEast), "09-20 09:25"; !strings.Contains(got, want) {
+		t.Errorf("east footer = %q, want it to carry %s", got, want)
+	}
+	if got, want := foot(inUTC), "09-20 01:25"; !strings.Contains(got, want) {
+		t.Errorf("utc footer = %q, want it to carry %s", got, want)
 	}
 }

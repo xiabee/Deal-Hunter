@@ -225,15 +225,21 @@ open http://127.0.0.1:8765/          # 内置状态面板
 {
   "interval": "30m",
   "timezone": "Asia/Shanghai",
-  "filter":   { "min_score": 55, "require_offer": true },
+  "filter":   { "require_offer": true, "max_age_hours": 336 },
   "notify": {
     "feishu": { "enabled": true },
     "daily":  { "enabled": true, "at": "09:00", "min_score": 45, "max_items": 15 },
-    "urgent": { "enabled": true, "min_score": 90, "max_per_day": 1, "max_items": 5 }
+    "urgent": { "enabled": true, "min_score": 90, "max_per_day": 1, "max_items": 5 },
+    "event":  { "enabled": true, "lead_time": "45m", "late_grace": "15m", "expiry_lead": "3h",
+                "min_score": 60, "max_per_day": 2, "max_items": 3 }
   },
   "server":   { "bind": "127.0.0.1:8765" }
 }
 ```
+
+`timezone` 是**唯一**的读者时钟：日报的 09:00、开抢前 45 分钟、到期前 3 小时和卡片页脚都按它
+解释，写错（不存在的区划名）会在启动时直接拒绝，而不是悄悄退回主机时区 —— 服务常年跑 UTC，
+退回等于 everything 差 8 小时。
 
 两道分数线各管一件事，别再混用：
 
