@@ -450,11 +450,23 @@ async function loadSources(){
     const last = s.last;
     let state = '未运行', cls = 'warn';
     if (last){ cls = last.err ? 'bad' : 'ok'; state = last.err ? '失败' : '正常'; }
+    // 静默时长比"最近一轮"更诚实：改版后返回 0 行的源不报错，而重启会抹掉轮次记忆。
+    let heard = '', stale = '';
+    if (typeof s.idle_hours === 'number') {
+      if (s.idle_hours < 0) { heard = '从没解析出内容'; stale = 'bad'; }
+      else {
+        const h = s.idle_hours;
+        heard = '上次出声 ' + (h < 48 ? h.toFixed(1) + ' 小时前' : (h / 24).toFixed(1) + ' 天前');
+        stale = h > 36 ? 'bad' : '';
+      }
+    }
     return '<div class="src"><div><div class="n">' +
       '<span class="dot ' + cls + '"></span> ' + esc(s.name) +
       (s.official ? ' <span class="badge official">官方源</span>' : '') +
       (s.enabled ? '' : ' <span class="badge off">已停用</span>') +
-      '</div><div class="u">' + esc(s.kind) + ' · ' + esc(s.url) + '</div></div>' +
+      '</div><div class="u">' + esc(s.kind) + ' · ' + esc(s.url) +
+      (heard ? (' <span class="dot ' + stale + '"></span>' + esc(heard)) : '') +
+      '</div></div>' +
       '<div class="num">' + (last ? ('命中 ' + last.found + ' · 入库 ' + last.stored + ' · ' + last.ms + 'ms') : '—') + '</div>' +
       '<div class="num">' + esc(state) + '</div></div>';
   });

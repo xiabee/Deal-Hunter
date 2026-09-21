@@ -301,6 +301,7 @@ func (a *App) RunOnce(ctx context.Context, trigger string) (*Run, error) {
 		}
 		run.Sources = append(run.Sources, rep)
 	}
+	a.recordSourceHits(run.Sources, time.Now())
 
 	// Resolve links to official, verified vendor pages first, then rank: a
 	// community post that we could not tie back to the vendor is worth less than
@@ -850,6 +851,75 @@ func (a *App) sameLocalDay(x, y time.Time) bool {
 }
 
 // stateTime reads an RFC3339 timestamp stored under key.
+// srcLastHit records, per source, the last moment its page parsed into at least one
+// row. The failure this exists for is the quiet one: a page gets redesigned, the
+// collector returns nothing, nothing errors, and the panel - which only remembers the
+// last round, lost on restart - keeps looking green.
+const srcLastHit = "src:last_hit"
+
+// SourceIdle says how long a source has gone without producing a row. Idle is
+// negative for a source that has never done so, which is a different complaint:
+// that one was probably never configured right.
+type SourceIdle struct {
+	Name string    `json:"name"`
+	Last time.Time `json:"last,omitempty"`
+	Idle time.Duration
+}
+
+func (a *App) recordSourceHits(reports []SourceReport, now time.Time) {
+	hits := map[string]string{}
+	if b, ok := a.st.GetState(srcLastHit); ok {
+		_ = json.Unmarshal(b, &hits)
+	}
+	stamp := now.UTC().Format(time.RFC3339)
+	changed := false
+	for _, r := range reports {
+		if r.Found == 0 || hits[r.Name] == stamp {
+			continue
+		}
+		hits[r.Name] = stamp
+		changed = true
+	}
+	if !changed {
+		return
+	}
+	if err := a.st.PutState(srcLastHit, hits); err != nil {
+		a.log.Warn("record source hits", "err", err)
+	}
+}
+
+// SourceIdleness lists every enabled source, most silence first, so the worst one is
+// always the first line an operator sees.
+func (a *App) SourceIdleness(now time.Time) []SourceIdle {
+	return SourceIdleness(a.cfg, a.st, now)
+}
+
+// SourceIdleness is the read side of the same record, available without an App so
+// read-only commands (doctor) report exactly what the panel does.
+func SourceIdleness(cfg *config.Config, st *store.Store, now time.Time) []SourceIdle {
+	hits := map[string]string{}
+	if b, ok := st.GetState(srcLastHit); ok {
+		_ = json.Unmarshal(b, &hits)
+	}
+	enabled := cfg.EnabledSources()
+	out := make([]SourceIdle, 0, len(enabled))
+	for _, s := range enabled {
+		si := SourceIdle{Name: s.Name, Idle: -1}
+		if t, err := time.Parse(time.RFC3339, hits[s.Name]); err == nil && !t.IsZero() {
+			si.Last = t
+			si.Idle = now.Sub(t)
+		}
+		out = append(out, si)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if (out[i].Idle < 0) != (out[j].Idle < 0) {
+			return out[i].Idle < 0
+		}
+		return out[i].Idle > out[j].Idle
+	})
+	return out
+}
+
 func (a *App) stateTime(key string) (time.Time, bool) {
 	b, ok := a.st.GetState(key)
 	if !ok {

@@ -164,6 +164,59 @@ func testApp(t *testing.T, f sources.Fetcher, spy *spyNotifier, mutate func(*con
 	return app
 }
 
+// 信源改版后最坏的情况不是报错，是**安静地返回 0 行**：面板只看最近一轮，重启就清零，
+// 于是没有任何东西会说话。这里记下每个信源"最后一次解析出行"的时刻。
+// 用"解析出行"而不是"有新发现"，是因为低频源本来就连着几天没新品 —— 那是正常，不是衰减。
+func TestSourceIdlenessTracksTheLastRoundThatParsedAnything(t *testing.T) {
+	const deadURL = "https://feeds.example/quiet.rss"
+	bare := []byte(`<?xml version="1.0"?><rss version="2.0"><channel><title>改版后的页面</title>
+</channel></rss>`)
+	f := &cannedFetcher{byURL: map[string][]byte{feedURL: feedBody(t), deadURL: bare}}
+	app := testApp(t, f, nil, func(c *config.Config) {
+		c.Sources = []config.Source{
+			{Name: "alive", Kind: config.KindRSS, URL: feedURL, Trust: 8},
+			{Name: "silent", Kind: config.KindRSS, URL: deadURL, Trust: 8},
+		}
+	})
+	if _, err := app.RunOnce(context.Background(), "unit"); err != nil {
+		// 空页面在采集器里就是错误（feed contains no items），而错误正是它该有的形状：
+		// 这里要的是"Found=0 就不刷新记号"，所以只要求另一个源成功解析过。
+		t.Logf("round reported: %v", err)
+	}
+
+	byName := map[string]SourceIdle{}
+	for _, s := range app.SourceIdleness(time.Now()) {
+		byName[s.Name] = s
+	}
+	if len(byName) != 2 {
+		t.Fatalf("every enabled source must be reported, got %+v", byName)
+	}
+	alive, ok := byName["alive"]
+	if !ok || alive.Idle < 0 || alive.Idle > time.Minute {
+		t.Errorf("a source that just parsed rows should read as idle for minutes, got %+v", alive)
+	}
+	silent, ok := byName["silent"]
+	if !ok || silent.Idle >= 0 {
+		t.Errorf("a source that has never parsed anything must say 从未, got %+v", silent)
+	}
+
+	// 两天以后：抓到过的那个也变成衰减候选。
+	day := app.SourceIdleness(time.Now().Add(48 * time.Hour))
+	var flagged []string
+	for _, s := range day {
+		if s.Idle < 0 || s.Idle > 36*time.Hour {
+			flagged = append(flagged, s.Name)
+		}
+	}
+	if len(flagged) != 2 {
+		t.Errorf("after 48h both the silent and the gone-quiet source should surface, got %v", flagged)
+	}
+	// 按"最久没出声"排在前，运维看第一行就能抓到最坏的那个。
+	if day[0].Name != "silent" {
+		t.Errorf("the never-heard-from source should lead, got %s", day[0].Name)
+	}
+}
+
 // nextFreeModelFeed is the same source one round later with one extra event: a
 // different link and a different model name, so the collector sees a new finding
 // rather than a repost of one it already has.

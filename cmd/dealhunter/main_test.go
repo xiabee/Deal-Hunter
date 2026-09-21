@@ -451,6 +451,78 @@ func compactionRow(t *testing.T, out string) (string, string) {
 	return "", ""
 }
 
+// 改版后的页面返回 0 行时什么都不报错，而面板只记得最近一轮。doctor 因此要能说出
+// "哪个信源多久没解析出过东西"，且这条读数在重启之后仍然成立。
+func TestDoctorReportsSourceSilence(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	// 两个信源写进配置文件，doctor 才有"全部正常"这个可达的结论。
+	if err := os.WriteFile(cfgPath, []byte(`{"sources":[
+		{"name":"talkative","kind":"rss","url":"https://x.test/a.rss"},
+		{"name":"muted","kind":"rss","url":"https://x.test/b.rss"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	both := func(a, b time.Duration) string {
+		return `{"src:last_hit":{` +
+			`"talkative":"` + time.Now().Add(-a).UTC().Format(time.RFC3339) + `",` +
+			`"muted":"` + time.Now().Add(-b).UTC().Format(time.RFC3339) + `"}}`
+	}
+	data := filepath.Join(dir, "data")
+	if err := os.MkdirAll(data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runDoctor := func() string {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(data, "state.json"), []byte(both(time.Hour, time.Hour)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		code, out := run(t, "-config", cfgPath, "-data", data, "doctor", "-net=false")
+		if code != 0 {
+			t.Fatalf("doctor: code=%d out=%s", code, out)
+		}
+		return out
+	}
+	field := func(out, name string) string {
+		t.Helper()
+		for _, line := range strings.Split(out, "\n") {
+			f := strings.Fields(line)
+			if len(f) >= 2 && f[1] == name {
+				return line
+			}
+		}
+		t.Fatalf("no %q row in:\n%s", name, out)
+		return ""
+	}
+
+	if line := field(runDoctor(), "source"); !strings.HasPrefix(line, "✓") {
+		t.Errorf("two sources that both parsed an hour ago should pass:\n%s", line)
+	}
+
+	// 一个安静 48 小时：只有它被点名，另一个不该被牵连。
+	if err := os.WriteFile(filepath.Join(data, "state.json"),
+		[]byte(both(time.Hour, 48*time.Hour)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, outTmp := run(t, "-config", cfgPath, "-data", data, "doctor", "-net=false")
+	line := field(outTmp, "source")
+	if !strings.HasPrefix(line, "!") || !strings.Contains(line, "muted") {
+		t.Errorf("the silent source should be named in a warn: %s", line)
+	}
+	if strings.Contains(line, "talkative") {
+		t.Errorf("a source that spoke an hour ago must not be dragged in: %s", line)
+	}
+
+	// 没有记录 = 一个音都没通过：也要报出来，而不是当成正常。
+	if err := os.WriteFile(filepath.Join(data, "state.json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, outTmp2 := run(t, "-config", cfgPath, "-data", data, "doctor", "-net=false")
+	line = field(outTmp2, "source")
+	if !strings.HasPrefix(line, "!") || !strings.Contains(line, "从没") {
+		t.Errorf("never-heard-from sources should warn with 从没: %s", line)
+	}
+}
+
 // seed writes one JSONL row into a fresh data directory.
 func seed(t *testing.T, dir, line string) {
 	t.Helper()

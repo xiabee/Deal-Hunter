@@ -295,6 +295,32 @@ func TestSourcesEndpointSummarisesHealth(t *testing.T) {
 	if _, leaked := s["url"].(string); leaked && strings.Contains(s["url"].(string), "query=") {
 		t.Errorf("query parameters should be masked: %v", s["url"])
 	}
+	// 静默时长是"这个源多久没解析出过东西"。改版后返回 0 行的源不会报错，
+	// 而面板原先只记得最近一轮 —— 重启之后就全忘了。
+	idle, ok := s["idle_hours"].(float64)
+	if !ok {
+		t.Fatalf("idle_hours missing from %v", s)
+	}
+	if idle < 0 || idle > 1 {
+		t.Errorf("a source that just ran should read as freshly heard, got %v", idle)
+	}
+	if hit, _ := s["last_hit"].(string); hit == "" {
+		t.Errorf("last_hit should name the moment, got %v", s["last_hit"])
+	}
+}
+
+// 面板上"多久没出声"必须比"最近一轮"更持久：改版后返回 0 行的源不报错，
+// 而轮次记忆随重启消失。这里验的是渲染那段真的读了 idle_hours 并给出两种说法。
+func TestDashboardShowsHowLongASourceHasBeenSilent(t *testing.T) {
+	ts, _, _ := newTestServer(t)
+	resp, body := get(t, ts, "/")
+	defer resp.Body.Close()
+	page := string(body)
+	for _, want := range []string{"idle_hours", "上次出声", "从没解析出内容"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("the sources card should mention %q", want)
+		}
+	}
 }
 
 func TestDigestServesMarkdownForOpenClaw(t *testing.T) {

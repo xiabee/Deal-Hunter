@@ -577,6 +577,8 @@ func cmdDoctor(ctx context.Context, cfg *config.Config, log *slog.Logger, stdout
 		add("compaction", cStat, cDetail)
 		bStat, bDetail := backupFreshness(cfg.DataDir)
 		add("backup", bStat, bDetail)
+		sStat, sDetail := sourceSilence(cfg, st, time.Now())
+		add("source silence", sStat, sDetail)
 		st.Close()
 	}
 
@@ -877,6 +879,37 @@ func locOf(cfg *config.Config) *time.Location {
 }
 
 // humanDelta renders a lead time like "3小时30分" without pretending precision.
+// sourceSilence names the enabled sources that have gone longest without parsing a
+// single row. A redesigned page is the failure nobody reports: the collector returns
+// nothing, nothing errors, and the round looks clean.
+func sourceSilence(cfg *config.Config, st *store.Store, now time.Time) (string, string) {
+	const patience = 36 * time.Hour
+	idle := pipeline.SourceIdleness(cfg, st, now)
+	var quiet []string
+	for _, s := range idle {
+		if s.Idle < 0 || s.Idle > patience {
+			human := "从没解析出内容"
+			if s.Idle >= 0 {
+				human = humanDelta(s.Idle) + "没出声"
+			}
+			quiet = append(quiet, s.Name+"（"+human+"）")
+		}
+	}
+	headline := "全部信源最近都有出声"
+	if len(idle) > 0 {
+		worst := idle[0] // sorted: never-heard-from first, then longest silence
+		if worst.Idle < 0 {
+			headline = "有信源从没解析出过内容：" + worst.Name
+		} else {
+			headline = "最久没出声的是 " + worst.Name + "（" + humanDelta(worst.Idle) + "前）"
+		}
+	}
+	if len(quiet) > 0 {
+		return "warn", fmt.Sprintf("%d 个信源安静过头：%s", len(quiet), truncate(strings.Join(quiet, "、"), 78))
+	}
+	return "ok", headline
+}
+
 // backupFreshness reports the last time deploy/backup.sh finished successfully.
 // The backup runs on a timer whose failures only reach the journal, and the archive
 // is the one recovery path that is not on the same disk as the data - so "we have

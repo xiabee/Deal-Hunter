@@ -260,6 +260,13 @@ func (s *Server) sources(w http.ResponseWriter, _ *http.Request) {
 			byName[rep.Name] = rep
 		}
 	}
+	// Idleness survives restarts, unlike the last-round report above: a source that
+	// quietly starts parsing zero rows looks healthy for exactly as long as the
+	// process has been up.
+	idle := map[string]pipeline.SourceIdle{}
+	for _, si := range s.app.SourceIdleness(time.Now()) {
+		idle[si.Name] = si
+	}
 	out := make([]map[string]any, 0, len(s.cfg.Sources))
 	for _, sc := range s.cfg.Sources {
 		rep, ran := byName[sc.Name]
@@ -270,6 +277,12 @@ func (s *Server) sources(w http.ResponseWriter, _ *http.Request) {
 			"enabled":  !sc.Disabled,
 			"trust":    sc.Trust,
 			"official": len(sc.Sites) > 0,
+		}
+		if si, ok := idle[sc.Name]; ok {
+			item["idle_hours"] = si.Idle.Hours()
+			if !si.Last.IsZero() {
+				item["last_hit"] = si.Last.UTC().Format(time.RFC3339)
+			}
 		}
 		if ran {
 			item["last"] = rep
