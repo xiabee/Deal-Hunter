@@ -1344,3 +1344,136 @@ func TestFirstRoundArmsTheBriefingSchedule(t *testing.T) {
 		t.Error("a real round must arm the briefing schedule, or a fresh install never sends")
 	}
 }
+
+// —— 边界清扫：时钟与预算 ——
+// 这几条不问新功能，只问"读者说不发的时候是不是真的不发""跨日算哪一天""到点算不算到"。
+
+// 写 max_per_day: 0 的人要的是"当天不要因为我而被打断"。以前 budgetLeft 和 urgentMax
+// 都会把 0 抬成 1，于是静音的写法变成每天一条。
+func TestZeroMaxPerDayMeansNoMessages(t *testing.T) {
+	f := &cannedFetcher{byURL: map[string][]byte{feedURL: feedBody(t)}}
+	spy := &spyNotifier{}
+	app := testApp(t, f, spy, func(c *config.Config) {
+		c.Notify.Urgent.MinScore = 60
+		c.Notify.Urgent.MaxPerDay = 0
+	})
+	if _, err := app.RunOnce(context.Background(), "unit"); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if n := spy.count(); n != 0 {
+		t.Errorf("max_per_day 0 must mean nothing sent, got %d messages", n)
+	}
+	if left := app.urgentLeft(time.Now()); left != 0 {
+		t.Errorf("urgentLeft = %d, want 0", left)
+	}
+}
+
+// 预算按读者的本地日记账：北京 23:30 花掉的那一条，要到北京 00:00 之后才补回来 ——
+// 与服务跑在 UTC 无关。
+func TestBudgetResetsOnTheReadersMidnight(t *testing.T) {
+	app := testApp(t, &cannedFetcher{}, &spyNotifier{}, func(c *config.Config) {
+		c.Timezone = "Asia/Shanghai"
+	})
+	east := app.loc()
+	spentAt := time.Date(2026, 9, 20, 23, 30, 0, 0, east)
+	if err := app.spendBudget(urgentCursor, spentAt); err != nil {
+		t.Fatal(err)
+	}
+	if left := app.budgetLeft(urgentCursor, 1, time.Date(2026, 9, 20, 23, 59, 0, 0, east)); left != 0 {
+		t.Errorf("still the same local day, budget = %d, want 0", left)
+	}
+	next := time.Date(2026, 9, 21, 0, 1, 0, 0, east)
+	if left := app.budgetLeft(urgentCursor, 1, next); left != 1 {
+		t.Errorf("after the reader's midnight budget = %d, want 1", left)
+	}
+	// 同一个瞬间用 UTC 表达也不能改变结论（比较的是绝对时刻，记的是本地日）。
+	if left := app.budgetLeft(urgentCursor, 1, next.In(time.UTC)); left != 1 {
+		t.Errorf("UTC-rendered instant gave %d, want 1", left)
+	}
+}
+
+// 到点即发，早一分钟不发，发过不再发；进程启动时若时段已过则不补发昨天的。
+func TestBriefingIsDueOnlyAfterItsOwnSlot(t *testing.T) {
+	app := testApp(t, &cannedFetcher{}, &spyNotifier{}, func(c *config.Config) {
+		c.Timezone = "Asia/Shanghai"
+		c.Notify.Daily.At = "09:00"
+	})
+	east := app.loc()
+	arm := func(when time.Time) {
+		if err := app.setStateTime(dailyWatched, when.UTC()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	slot := time.Date(2026, 9, 21, 9, 0, 0, 0, east)
+
+	arm(slot.Add(-time.Minute))
+	if app.DailyDue(slot.Add(-time.Second)) {
+		t.Error("8:59:59 must not be due")
+	}
+	if !app.DailyDue(slot) {
+		t.Error("exactly 09:00 is due")
+	}
+
+	arm(slot.Add(time.Hour))
+	if app.DailyDue(slot.Add(2 * time.Hour)) {
+		t.Error("a slot that had already passed at startup must not be backfilled")
+	}
+	tomorrow := slot.AddDate(0, 0, 1)
+	if !app.DailyDue(tomorrow) {
+		t.Error("the next slot must still fire")
+	}
+
+	if err := app.setStateTime(dailyCursor, slot); err != nil {
+		t.Fatal(err)
+	}
+	if app.DailyDue(slot.Add(time.Minute)) {
+		t.Error("today's briefing already went out")
+	}
+}
+
+// 提醒窗口的边界到底算不算：开抢前正好 lead、正好 late_grace、截止正好等于现在、
+// 截止正好等于 now+lead。这些决定读者会不会在最后一秒收到一条无用的消息。
+func TestReminderWindowsIncludeTheirOwnEdges(t *testing.T) {
+	due := func(meta map[string]string, at time.Time, lead, grace, expLead time.Duration) []dueEvent {
+		app := testApp(t, &cannedFetcher{}, &spyNotifier{}, func(c *config.Config) {
+			c.Timezone = "UTC"
+			c.Notify.Event.MinScore = 50
+			c.Notify.Event.Lead = config.Duration(lead)
+			c.Notify.Event.LateGrace = config.Duration(grace)
+			c.Notify.Event.ExpiryLead = config.Duration(expLead)
+		})
+		d := &model.Deal{Fingerprint: "e1", Title: "一场活动", URL: "https://x.test/e1", Score: 78,
+			IsFree: true, Category: model.CatVoucher, Offers: []model.Offer{{Kind: model.KindFree}},
+			PublishedAt: at.Add(-time.Hour), DiscoveredAt: at.Add(-time.Hour), Meta: meta}
+		if err := app.st.Save(d); err != nil {
+			t.Fatal(err)
+		}
+		return app.dueEvents(at)
+	}
+	m := func(k string, at time.Time) map[string]string {
+		return map[string]string{k: at.UTC().Format(time.RFC3339)}
+	}
+	now := time.Now().Truncate(time.Second) // meta 里的时刻是秒级的，边界测试不能带亚秒尾巴
+	if got := due(m("starts_at", now.Add(45*time.Minute)), now, 45*time.Minute, 15*time.Minute, 3*time.Hour); len(got) != 1 {
+		t.Errorf("start exactly at the lead edge should be due, got %d", len(got))
+	}
+	if got := due(m("starts_at", now.Add(45*time.Minute+time.Second)), now, 45*time.Minute, 15*time.Minute, 3*time.Hour); len(got) != 0 {
+		t.Errorf("one second beyond the lead should be silent, got %d", len(got))
+	}
+	if got := due(m("starts_at", now.Add(-15*time.Minute)), now, 45*time.Minute, 15*time.Minute, 3*time.Hour); len(got) != 1 {
+		t.Errorf("start exactly at the late-grace edge should still be due, got %d", len(got))
+	}
+	if got := due(m("starts_at", now.Add(-15*time.Minute-time.Second)), now, 45*time.Minute, 15*time.Minute, 3*time.Hour); len(got) != 0 {
+		t.Errorf("past the late grace should be silent, got %d", len(got))
+	}
+	// 截止正好等于"现在"：已经来不及做任何事，不该开口。
+	if got := due(m("expires_at", now), now, 45*time.Minute, 15*time.Minute, 3*time.Hour); len(got) != 0 {
+		t.Errorf("a deadline that is now is not a reminder, got %d", len(got))
+	}
+	if got := due(m("expires_at", now.Add(3*time.Hour)), now, 45*time.Minute, 15*time.Minute, 3*time.Hour); len(got) != 1 {
+		t.Errorf("exactly at the expiry lead edge should be due, got %d", len(got))
+	}
+	if got := due(m("expires_at", now.Add(3*time.Hour+time.Second)), now, 45*time.Minute, 15*time.Minute, 3*time.Hour); len(got) != 0 {
+		t.Errorf("one second beyond the expiry lead should be silent, got %d", len(got))
+	}
+}

@@ -779,12 +779,10 @@ func (a *App) Urgent(now time.Time) UrgentInfo {
 }
 
 // urgentMax is the configured per-day breakthrough ceiling, at least one.
-func (a *App) urgentMax() int {
-	if n := a.cfg.Notify.Urgent.MaxPerDay; n > 0 {
-		return n
-	}
-	return 1
-}
+// urgentMax returns the configured daily interrupt budget as written, including 0.
+// The default of one comes from config.Default(), so an absent key is already
+// covered and an explicit zero must not be rounded up.
+func (a *App) urgentMax() int { return a.cfg.Notify.Urgent.MaxPerDay }
 
 // urgentMaxItems caps how many rows one breakthrough card carries.
 func (a *App) urgentMaxItems() int {
@@ -817,9 +815,13 @@ func (a *App) budgetSpent(key string) (string, int) {
 }
 
 // budgetLeft reports how many messages under key may still go out today.
+// budgetLeft reports how many messages are left for the reader's local day.
+// Zero means zero: a reader who writes max_per_day: 0 is asking not to be
+// interrupted, and silently rounding that up to one message is the difference
+// between "off" and "one surprise a day".
 func (a *App) budgetLeft(key string, max int, now time.Time) int {
-	if max <= 0 {
-		max = 1
+	if max < 0 {
+		max = 0
 	}
 	if day, n := a.budgetSpent(key); day == a.localDay(now) {
 		if left := max - n; left > 0 {
@@ -951,9 +953,14 @@ func (a *App) dueEvents(now time.Time) []dueEvent {
 	var candidates []dueEvent
 	if d := e.ExpiryLead.D(); d > 0 {
 		for _, row := range a.st.Expiring(now, now.Add(d), e.MinScore) {
-			if when, ok := closingInstant(row); ok {
-				candidates = append(candidates, dueEvent{deal: row, when: when, word: "截止"})
+			when, ok := closingInstant(row)
+			// A deadline that is exactly now leaves nothing to do, so the expiry
+			// side asks for strictly the future. The opening side forgives lateness
+			// because a start ten minutes ago is still claimable.
+			if !ok || !when.After(now) {
+				continue
 			}
+			candidates = append(candidates, dueEvent{deal: row, when: when, word: "截止"})
 		}
 	}
 	for _, row := range a.st.Upcoming(now.Add(-e.LateGrace.D()), now.Add(e.Lead.D()), e.MinScore) {
@@ -1183,7 +1190,7 @@ func (a *App) inWindow(e config.Event, when time.Time, word string, now time.Tim
 	}
 	if word == "截止" {
 		d := e.ExpiryLead.D()
-		return d > 0 && !when.Before(now) && !when.After(now.Add(d))
+		return d > 0 && when.After(now) && !when.After(now.Add(d))
 	}
 	return !when.Before(now.Add(-e.LateGrace.D())) && !when.After(now.Add(e.Lead.D()))
 }
