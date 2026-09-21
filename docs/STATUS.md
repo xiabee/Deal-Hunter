@@ -109,9 +109,9 @@ doctor 报"到期前 3h0m0s"、面板 hint 分开显示两个数。顺带：面�
 
 - **开抢**：临近开抢 ≤45 分钟时收到 ⏰，标题带"开抢"，且同一行只收到一次。
 - **到期**：临近截止 ≤3 小时（`expiry_lead`）时收到 ⏰，标题带"截止"；已过期的一律不发。
-- 前提是**库里先得有带时刻的行**：`grep -c expires_at deals.jsonl` 目前为 0，若一直是 0，
-  说明公告措辞仍解析不出来（去看 `dealhunter probe -source nc-vouchers-swj` 的详情正文），
-  而不是提醒通道坏了。
+- 前提是**库里先得有带时刻的行**：2026-09-21 实测为 4 行（1 行 `expires_at` + 3 行 `starts_at`，
+  去重后 721 条记录里）。若一直是 0，说明公告措辞仍解析不出来（去看
+  `dealhunter probe -source nc-vouchers-swj` 的详情正文），而不是提醒通道坏了。
 
 ```bash
 ssh alienware-life 'sudo -u dealhunter /opt/deal-hunter/deal-hunter events -config /etc/deal-hunter/config.json'
@@ -130,7 +130,7 @@ ssh alienware-life 'echo -n "带时刻的行: "; sudo grep -c -e expires_at -e s
 拿不到时刻的公告就不提醒，是有意为之。区县商务局页面直出正文的可能性更大，按 ROADMAP 的
 「信源准入」流程逐条实测后再加。
 
-## 次日确认项：2026-09-21 已复核（三条都有结论）
+## 次日确认项：2026-09-21 已复核（四条都有结论）
 
 1. **恰好发了一份日报** —— VERIFIED。`kind=daily` 今天 2 行（飞书 + OpenClaw drop 各一次），
    `daily:last_sent = 2026-09-21T01:15:40Z` = 北京 09:15:40，落在 09:00–09:31（30m 采集间隔 + jitter）。
@@ -139,8 +139,17 @@ ssh alienware-life 'echo -n "带时刻的行: "; sudo grep -c -e expires_at -e s
    校验确实跑了（当日 `official lookups used=25`），是这些条目本身就是 linux.do / v2ex 的论坛帖，
    找不到"厂商官方入口"是正确答案，不是配额饥饿。以后判断这条要看**判定分布**而不是只看
    `live_verified` 这一个数；单看一个数会把"没找到"读成"没去找"。
-3. **插队没有变成骚扰** —— VERIFIED。`urgent.sent_today = 0`（90 分门槛今天零命中），
-   一天里读者只收到那一份日报。
+3. **插队没有变成骚扰** —— 当天结论 VERIFIED，但当天**没有样本**，所以那只是"没坏"而不是"能用"。
+   当时记录为"90 分门槛零命中"。（那句里的键名 `urgent.sent_today` 是手抄错的，真实键是
+   `urgent:sent`，值形如 `{"date":…, "n":…}`；以 `sudo -u dealhunter` 读 `state.json` 为准。）
+4. **90 分插队通道第一次被真实数据触发** —— VERIFIED（2026-09-21 14:19 北京）。`Qwen3.8-Flash
+   限时免费一周`（`ai_free`，93 分）在采集轮启动后入库，日志两行 `notify: delivered kind=urgent
+   items=1`（飞书 + OpenClaw drop 各一次），轮次行 `urgent_sent=1 urgent_held=0`，
+   `urgent:sent` 记到 `n:1` = 当天上限 `max_per_day: 1` 用满，第二条高分会被 `held` 挡住。
+   这条同时把 ROADMAP 里"理论 87–97"的那个估值钉成了一个真实观测值：**93 落在带内**。
+   与当天的日报不冲突：`kind=daily` 在 09:15 北京发出（早于该条目入库），读者当天收到的是
+   一份日报 + 一条插队，正是约定的两种消息。
+   仍未验证的是**一天内第二条高分被 held** 那一半 —— 需要当天有两条 ≥90 分，目前没有。
 
 ## Current Version
 
