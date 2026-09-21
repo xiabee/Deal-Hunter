@@ -143,7 +143,7 @@ ssh alienware-life 'echo -n "带时刻的行: "; sudo grep -c -e expires_at -e s
 拿不到时刻的公告就不提醒，是有意为之。区县商务局页面直出正文的可能性更大，按 ROADMAP 的
 「信源准入」流程逐条实测后再加。
 
-## 次日确认项：2026-09-21 已复核（八条都有结论）
+## 次日确认项：2026-09-21 已复核（九条都有结论）
 
 1. **恰好发了一份日报** —— VERIFIED。`kind=daily` 今天 2 行（飞书 + OpenClaw drop 各一次），
    `daily:last_sent = 2026-09-21T01:15:40Z` = 北京 09:15:40，落在 09:00–09:31（30m 采集间隔 + jitter）。
@@ -194,6 +194,15 @@ ssh alienware-life 'echo -n "带时刻的行: "; sudo grep -c -e expires_at -e s
    "免费申**请教**程"两条（学生许可证、魔搭额度申请），它们现在钉在测试的接受表里。
    补位后暴露的另一件事（同功能两条占 1 槽）与它的量数据写在 ROADMAP「已实测否决的方向」，
    **结论是不做标题前缀折叠**：当天高分前 40 名里另一对长前缀是"公告 vs 提问帖"，误伤确定、收益 1 槽。
+9. **备份与压缩都有了"上次成功是多久前"的读数** —— VERIFIED（生产 `dc977a4`）。
+   `backup.sh` 成功后在状态目录留 `backup.stamp`（实测 `0640 dealhunter:dealhunter`，内容只有
+   UTC 时刻与归档名），doctor 两行现在都绿：`✓ compaction 上次压缩 0分钟前`、
+   `✓ backup 上次成功备份 53分钟前 · deal-hunter-20260921-135711.tar.gz`。
+   做这件事的过程中揪出两个谎：**手动 `compact` 原先不写 `maint:last_compact`**（我 08:31 压缩过，
+   doctor 却报"从未压缩过"，排程器下次还要白跑一遍）；以及**跑 doctor 的测试漏写 `-net=false`** ——
+   `-net` 默认 true，每次调用都真实探测 15 个信源，单跑 106 秒（`-net=false` 只要 1.8 秒），
+   我新加的三条测试因此在门禁里挂满 600 秒超时。全部转离线后 cmd 包回到 0.15 秒，
+   race 检测也才真正覆盖得到这几条。
 
 ## Current Version
 
