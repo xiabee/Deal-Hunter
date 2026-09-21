@@ -233,6 +233,29 @@ func TestStartsAtRefusesToGuess(t *testing.T) {
 	}
 }
 
+// 一句「截止到9月20日凌晨5:40」里的日期是结束，不是开始。开抢解析只看"日期 + 点"
+// 这个形状，就会把吐槽帖里引用的截止时刻登记成一场开抢，同一个瞬间同时出现在
+// 截止与开抢两列里 —— 2026-09-21 用 reparse 回灌生产库时真实撞到的就是这条。
+// 拒收之后还要能继续往后找：先截止后开抢的公告里，真正的开抢排在后面。
+func TestStartsAtRefusesADeadlineSentence(t *testing.T) {
+	anchor := time.Date(2026, 9, 19, 10, 0, 0, 0, time.UTC)
+
+	if got := Default().StartsAt("我也跟风去申请了一个试用. 截止到9月20日凌晨5:40，我翻了好久论坛", anchor); got != nil {
+		t.Errorf("a quoted deadline is not an opening: %v", *got)
+	}
+	// 同样的日期形状，没有截止前置词时仍要认。
+	if got := Default().StartsAt("9月20日凌晨5:40 开抢", anchor); got == nil {
+		t.Error("the plain opening moment must still parse (otherwise the case above proves nothing)")
+	}
+	got := Default().StartsAt("核销截止2026年9月25日23:59，开抢时间2026年9月20日10:00", anchor)
+	if got == nil {
+		t.Fatal("the real opening after a deadline sentence should still be found")
+	}
+	if want := "2026-09-20 10:00"; got.Format("2006-01-02 15:04") != want {
+		t.Errorf("opening = %s, want %s", got.Format("2006-01-02 15:04"), want)
+	}
+}
+
 // 服务常年跑在 UTC 主机上，而公告里的"截止 9月26日"是读者时区的钟表。用
 // time.Local 构造会把 23:59 变成 UTC 的 23:59，也就是北京的次日 07:59 —— 一张
 // 已经结束的券会在日报里多活 8 小时。所以两个时区必须给出相差整 8 小时的时刻，

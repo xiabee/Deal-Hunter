@@ -249,45 +249,70 @@ func (d *Dict) DiscountPct(text string) int {
 // for something that is already over, while a parsed-but-past one can never fire
 // at all. Guessing low is the only safe direction here.
 func (d *Dict) StartsAt(text string, anchor time.Time) *time.Time {
-	m := startsAtRe.FindStringSubmatch(strings.ReplaceAll(text, "：", ":"))
-	if m == nil {
-		return nil
-	}
-	year := anchor.Year()
-	if m[1] != "" {
-		year, _ = strconv.Atoi(m[1])
-	}
-	mon, _ := strconv.Atoi(m[2])
-	day, _ := strconv.Atoi(m[3])
-	hour, _ := strconv.Atoi(m[5])
-	minute := 0
-	if m[6] != "" {
-		minute, _ = strconv.Atoi(m[6])
-	}
-	switch m[4] {
-	case "下午", "晚上":
-		if hour < 12 {
-			hour += 12
+	blob := strings.ReplaceAll(text, "：", ":")
+	for _, ix := range startsAtRe.FindAllStringSubmatchIndex(blob, -1) {
+		grp := func(i int) string {
+			if ix[2*i] < 0 {
+				return ""
+			}
+			return blob[ix[2*i]:ix[2*i+1]]
 		}
-	case "中午":
-		if hour < 11 {
-			hour += 12
+		// A date quoted inside a deadline sentence is the close, not the open.
+		// Keep looking: announcements routinely say 截止 first and 开抢 second.
+		if deadlineJustBefore(blob, ix[0]) {
+			continue
 		}
+		year := anchor.Year()
+		if grp(1) != "" {
+			year, _ = strconv.Atoi(grp(1))
+		}
+		mon, _ := strconv.Atoi(grp(2))
+		day, _ := strconv.Atoi(grp(3))
+		hour, _ := strconv.Atoi(grp(5))
+		minute := 0
+		if grp(6) != "" {
+			minute, _ = strconv.Atoi(grp(6))
+		}
+		switch grp(4) {
+		case "下午", "晚上":
+			if hour < 12 {
+				hour += 12
+			}
+		case "中午":
+			if hour < 11 {
+				hour += 12
+			}
+		}
+		if year < 2000 || year > 2100 || mon < 1 || mon > 12 || day < 1 || day > 31 ||
+			hour > 23 || minute > 59 {
+			continue
+		}
+		// The anchor carries the zone the announcement's clock belongs to, so the
+		// result is right even though the service itself usually runs in UTC.
+		t := time.Date(year, time.Month(mon), day, hour, minute, 0, 0, anchor.Location())
+		// time.Date happily rolls 9月31日 over into October. An announcement with an
+		// impossible date is a misread, and a reminder on the wrong day is worse than
+		// no reminder at all.
+		if t.Day() != day || int(t.Month()) != mon {
+			continue
+		}
+		return &t
 	}
-	if year < 2000 || year > 2100 || mon < 1 || mon > 12 || day < 1 || day > 31 ||
-		hour > 23 || minute > 59 {
-		return nil
+	return nil
+}
+
+// deadlineLeadNear names the span a deadline word may be separated from its own
+// date by - the same bridge the expiry rules allow, seen from the other side.
+var deadlineLeadNear = regexp.MustCompile(`(?:` + expiryLead + `)[^0-9\n]{0,6}$`)
+
+// deadlineJustBefore reports whether the date starting at at is quoted inside a
+// deadline sentence rather than announcing an opening.
+func deadlineJustBefore(text string, at int) bool {
+	window := []rune(text[:at])
+	if len(window) > 16 {
+		window = window[len(window)-16:]
 	}
-	// The anchor carries the zone the announcement's clock belongs to, so the
-	// result is right even though the service itself usually runs in UTC.
-	t := time.Date(year, time.Month(mon), day, hour, minute, 0, 0, anchor.Location())
-	// time.Date happily rolls 9月31日 over into October. An announcement with an
-	// impossible date is a misread, and a reminder on the wrong day is worse than
-	// no reminder at all.
-	if t.Day() != day || int(t.Month()) != mon {
-		return nil
-	}
-	return &t
+	return deadlineLeadNear.MatchString(string(window))
 }
 
 // startsAtRe matches the date-and-hour spellings seen in government voucher
