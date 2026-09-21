@@ -14,13 +14,16 @@ func dealOf(title, summary string) *model.Deal {
 	return &model.Deal{Title: title, Summary: summary, URL: "https://example.com/x", Source: "test"}
 }
 
-func evaluate(d *model.Deal, trust int, official bool, pub time.Time) Result {
+// evaluate scores d as of `now` (zero means the real current time). The clock is a
+// parameter because freshness is part of the score: passing the item's own
+// PublishedAt here would silently mean "brand new" and no stale test could fail.
+func evaluate(d *model.Deal, trust int, official bool, now time.Time) Result {
 	return Evaluate(Input{
 		Deal:           d,
 		Offers:         dict.Scan(d.TextBlob()),
 		SourceTrust:    trust,
 		OfficialDomain: official,
-		Now:            time.Now(),
+		Now:            now,
 	}, dict)
 }
 
@@ -92,11 +95,12 @@ func TestDeepDiscountBeatsShallow(t *testing.T) {
 }
 
 func TestStaleItemIsPenalized(t *testing.T) {
+	now := time.Now()
 	old := dealOf("大模型限时免费活动", "免费开放")
-	old.PublishedAt = time.Now().AddDate(0, 0, -90)
+	old.PublishedAt = now.AddDate(0, 0, -90)
 	fresh := dealOf("大模型限时免费活动", "免费开放")
-	fresh.PublishedAt = time.Now().Add(-time.Hour)
-	if evaluate(old, 5, false, old.PublishedAt).Score >= evaluate(fresh, 5, false, fresh.PublishedAt).Score {
+	fresh.PublishedAt = now.Add(-time.Hour)
+	if evaluate(old, 5, false, now).Score >= evaluate(fresh, 5, false, now).Score {
 		t.Error("a 90 day old item must not score as high as a fresh one")
 	}
 }
@@ -180,5 +184,58 @@ func TestEvaluateBuildsDeadlineInTheReadersZone(t *testing.T) {
 	}
 	if diff := resUTC.Expires.Sub(*resEast.Expires); diff != 8*time.Hour {
 		t.Errorf("UTC vs UTC+8 differ by %s, want 8h — Evaluate is not passing the zone down", diff)
+	}
+}
+
+// —— 新鲜度加分的边界 ——
+// 这些台阶决定"三天前的免费公告"和"三十一天的免费公告"在日报里排不排得前面。
+// 台阶本身是设计，漂一秒就换档才是 bug；30 天到 31 天之间那段没有加也没有罚，
+// 也是有意的平台期，写下来免得被当成漏档。
+func TestFreshnessTiersChangeOnlyAtTheirEdges(t *testing.T) {
+	now := time.Now()
+	score := func(age time.Duration) int {
+		d := dealOf("某个模型限时免费", "免费额度")
+		d.PublishedAt = now.Add(-age)
+		res := evaluate(d, 0, false, now)
+		return res.Score
+	}
+	fresh := score(time.Minute)
+	cases := []struct {
+		name string
+		age  time.Duration
+		want int
+	}{
+		{"正好 24 小时仍算新", 24 * time.Hour, fresh},
+		{"24 小时零 1 秒降一档", 24*time.Hour + time.Second, fresh - 4},
+		{"正好 72 小时仍是第二档", 72 * time.Hour, fresh - 4},
+		{"72 小时零 1 秒再降一档", 72*time.Hour + time.Second, fresh - 8},
+		{"正好 7 天仍是第三档", 7 * 24 * time.Hour, fresh - 8},
+		{"7 天零 1 秒进入无加成的平台期", 7*24*time.Hour + time.Second, fresh - 12},
+		{"30 天整仍是平台期", 30 * 24 * time.Hour, fresh - 12},
+		{"30 天零 1 秒开始扣陈旧", 30*24*time.Hour + time.Second, fresh - 24},
+		{"时间戳超前（时区偏差）按新算", -time.Hour, fresh},
+	}
+	for _, c := range cases {
+		if got := score(c.age); got != c.want {
+			t.Errorf("%s: score = %d, want %d (age %s)", c.name, got, c.want, c.age)
+		}
+	}
+}
+
+// 把所有加分项一起点着，也不能越过 100：读者看到的分数是同一个尺子，
+// 插队门槛 90 才有意义。
+func TestScoreCannotExceedOneHundred(t *testing.T) {
+	d := dealOf("智谱 GLM-5.3-flash 限时免费开放，全场五折",
+		"官方公告：免费开放且注册赠送百万 tokens 与代金券，另享五折折扣，API 调用 0 元")
+	d.PublishedAt = time.Now().Add(-time.Hour)
+	res := evaluate(d, 10, true, d.PublishedAt)
+	if res.Reject != "" {
+		t.Fatalf("unexpected reject: %s", res.Reject)
+	}
+	if res.Score < 90 {
+		t.Fatalf("the fixture does not stack up (score %d), so the cap assertion would be vacuous", res.Score)
+	}
+	if res.Score > maxScore {
+		t.Errorf("score %d exceeds the cap %d", res.Score, maxScore)
 	}
 }
