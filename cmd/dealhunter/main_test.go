@@ -308,6 +308,74 @@ func compactionMarker(t *testing.T, out string) string {
 	return ""
 }
 
+// 备份是同盘之外唯一的恢复路径，而它跑在 systemd timer 上 —— 失败只进 journal，
+// 没人翻日志就等于"一直在备份"。deploy/backup.sh 成功后在数据目录留一个标记，
+// doctor 替它说话。
+func TestDoctorReportsBackupFreshness(t *testing.T) {
+	dir := t.TempDir()
+	_, out := run(t, "-data", dir, "doctor")
+	if compactionMarker(t, out) == "" {
+		t.Fatal("compaction row should exist")
+	}
+	marker, detail := backupMarker(t, out)
+	if marker != "!" || !strings.Contains(detail, "没有") {
+		t.Errorf("a host that never left a backup stamp should warn: %q %q", marker, detail)
+	}
+
+	write := func(age time.Duration) {
+		t.Helper()
+		stamp := time.Now().UTC().Add(-age).Format("2006-01-02T15:04:05Z")
+		if err := os.WriteFile(filepath.Join(dir, "backup.stamp"),
+			[]byte(stamp+" deal-hunter-x.tar.gz\n"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(2 * time.Hour)
+	_, out = run(t, "-data", dir, "doctor")
+	if marker, _ := backupMarker(t, out); marker != "✓" {
+		t.Errorf("a 2-hour-old backup should pass, marker = %q", marker)
+	}
+
+	write(9 * 24 * time.Hour)
+	_, out = run(t, "-data", dir, "doctor")
+	if marker, detail := backupMarker(t, out); marker != "!" || !strings.Contains(detail, "超过") {
+		t.Errorf("a 9-day-old backup against a nightly timer should warn: %q %q", marker, detail)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "backup.stamp"), []byte("胡说八道\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	_, out = run(t, "-data", dir, "doctor")
+	if marker, _ := backupMarker(t, out); marker == "✓" {
+		t.Error("an unreadable stamp must not be reported as a healthy backup")
+	}
+
+	// 空文件与读不出是两条分支：没有这条，那个防 panic 的守卫就是断言照不到的死代码。
+	if err := os.WriteFile(filepath.Join(dir, "backup.stamp"), nil, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	code, out := run(t, "-data", dir, "doctor")
+	if marker, _ := backupMarker(t, out); marker == "✓" {
+		t.Error("an empty stamp must not be reported as a healthy backup")
+	}
+	if code != 0 {
+		t.Errorf("doctor should still complete on a broken stamp, code=%d out=%s", code, out)
+	}
+}
+
+// backupMarker returns the 结果 column and the detail of the backup row.
+func backupMarker(t *testing.T, out string) (string, string) {
+	t.Helper()
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Fields(line)
+		if len(f) >= 2 && f[1] == "backup" {
+			return f[0], line
+		}
+	}
+	t.Fatalf("no backup row in:\n%s", out)
+	return "", ""
+}
+
 // 排程里的"每 48 轮"是进程内计数，天天部署的机器上永远凑不满，所以压缩这件事必须单独
 // 报一行，不能因为"代码里有排程"就当作在跑。
 func TestDoctorReportsCompactionRecency(t *testing.T) {

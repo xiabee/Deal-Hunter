@@ -575,6 +575,8 @@ func cmdDoctor(ctx context.Context, cfg *config.Config, log *slog.Logger, stdout
 		add("store", "ok", fmt.Sprintf("已见 %d · 已推送 %d · 游标 %d · %d KB", stats.DealsSeen, stats.PushedSeen, stats.StateKeys, stats.DirSizeKB))
 		cStat, cDetail := compactionState(st)
 		add("compaction", cStat, cDetail)
+		bStat, bDetail := backupFreshness(cfg.DataDir)
+		add("backup", bStat, bDetail)
 		st.Close()
 	}
 
@@ -869,6 +871,35 @@ func locOf(cfg *config.Config) *time.Location {
 }
 
 // humanDelta renders a lead time like "3小时30分" without pretending precision.
+// backupFreshness reports the last time deploy/backup.sh finished successfully.
+// The backup runs on a timer whose failures only reach the journal, and the archive
+// is the one recovery path that is not on the same disk as the data - so "we have
+// backups" has to be answered from a record, not from the unit existing.
+func backupFreshness(dataDir string) (string, string) {
+	b, err := os.ReadFile(filepath.Join(dataDir, "backup.stamp"))
+	if err != nil {
+		return "warn", "数据目录里没有 backup.stamp：这台机器没有留下成功备份的记录" +
+			"（每晚一次要 sudo systemctl enable --now deal-hunter-backup.timer）"
+	}
+	fields := strings.Fields(string(b))
+	if len(fields) == 0 {
+		return "warn", "backup.stamp 是空的"
+	}
+	t, err := time.Parse("2006-01-02T15:04:05Z", fields[0])
+	if err != nil {
+		return "warn", "backup.stamp 的首字段不是 UTC 时刻: " + truncate(fields[0], 24)
+	}
+	age := time.Since(t)
+	archive := ""
+	if len(fields) > 1 {
+		archive = " · " + truncate(fields[1], 34)
+	}
+	if age > 36*time.Hour {
+		return "warn", "上次成功备份已是 " + humanDelta(age) + "前，超过每晚一次的节奏" + archive
+	}
+	return "ok", "上次成功备份 " + humanDelta(age) + "前" + archive
+}
+
 // compactionState reports when the store was last compacted. The scheduled trigger is
 // an in-process round counter (every 48 rounds, and no more than once every 7 days), so
 // a host that gets redeployed daily resets it before it fires and never compacts at all

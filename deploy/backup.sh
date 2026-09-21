@@ -81,4 +81,15 @@ for f in "${old[@]:-}"; do
 	log "轮换掉 $f"
 done
 
+# Leave a record the service account can read, so `dealhunter doctor` can answer
+# "when did backups actually last succeed" - a timer that keeps failing only speaks
+# through the journal, which nobody reads. Contents are a timestamp and a filename,
+# so 0640 is enough and nothing secret lands here.
+if printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$NAME.tar.gz" > "$STATE/.backup.stamp.tmp" 2>/dev/null; then
+	chmod 0640 "$STATE/.backup.stamp.tmp" 2>/dev/null || true
+	chown --reference="$STATE" "$STATE/.backup.stamp.tmp" 2>/dev/null || true
+	mv -f "$STATE/.backup.stamp.tmp" "$STATE/backup.stamp" 2>/dev/null ||
+		warn "写 $STATE/backup.stamp 失败：doctor 会一直报「没有备份记录」，备份本身是好的"
+fi
+
 log "备份完成：$DIR/$NAME.tar.gz ($(du -h "$DIR/$NAME.tar.gz" | cut -f1))，保留最近 $KEEP 份"

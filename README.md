@@ -605,8 +605,11 @@ sudo systemctl enable --now deal-hunter-backup.timer            # 每晚 04:30�
 
 脚本不只会打包，还会**把刚写出来的归档解到临时目录再对比一遍**：`deals.jsonl` 行数、
 `config.json` 是否在位、校验和是否对得上，任一不过就不报成功——没被打开过的备份只是个愿望。
-归档里含 `deal-hunter.env`（webhook 与签名密钥），所以整个脚本以 `umask 077` 运行，
-落盘 0600、目录 0750。
+归档里含 `deal-hunter.env`（webhook 与签名密钥），所以整个脚本以 `umask 077` 运行，落盘 0600、目录 0750。
+脚本跑完会在状态目录留一个
+`backup.stamp`（只有时刻和归档名，0640 归服务账户），让 `dealhunter doctor` 能回答
+**"上一次真正备份成功是多久前"** —— 定时器挂在 systemd 上，失败只进 journal，
+没人翻日志就等于"一直在备份"。标记超过 36 小时没更新，doctor 就报 warn。
 
 恢复不需要任何工具，也不需要装回原机器：
 
