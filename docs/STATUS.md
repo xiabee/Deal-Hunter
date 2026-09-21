@@ -93,6 +93,7 @@ doctor 报"到期前 3h0m0s"、面板 hint 分开显示两个数。顺带：面�
 | 面板在采集轮进行中应答（M4） | VERIFIED | 单元层：把信息源卡在请求里，读取方原本等满 3 秒，拆锁后立刻返回，`-race` 干净。生产层：重启后 40 次打 `/api/v1/status` 最大 168ms（1 次非 200 是重启缝隙，稳定态复测 25 次全 200、最大 105ms） |
 | ARM64 实跑 | VERIFIED | 2026-09-21 在 `kylin-pc`（Kylin V10 SP1，`Linux aarch64`）跑 `25afd4c` 交叉编译产物：`file` 确认 ELF aarch64 静态；sha256 `ede936fd…` 两端一致；`version` 报 `go1.26.4/linux-arm64`；`doctor -net=false` 体检通过；`run` 真实起了一轮（`sources=15 new=67 stored=67 errors=0 took=4.4s`）；面板在 127.0.0.1 上 `healthz=200`、`/` 里 `data-theme` 命中 6 次。**注意**：这是临时冒烟测试，没有装 systemd 单元，kylin-pc 也不是本项目的部署目标（部署仍在 `alienware-life`） |
 | 校验和与传输完整性 | VERIFIED | 今晚五次产物传输（amd64 × 3、arm64 × 1、备份脚本 × 1）都在源端与目的端各算一次 sha256 并比对一致；`install.sh` 装前还会实跑一次 `version`，架构不对就直接拒绝 |
+| 嵌入时区库的代价与效果 | VERIFIED（实测） | 生产主机上量到二进制 8,478,882 → 对比上一版备份 8,065,186 = **+413,696 字节**；换到的是 `-trimpath` 产物在 Windows 上从 `rc=2 unknown time zone Asia/Shanghai` 变成 `rc=0`（改动前那个坑是静默退回主机钟）。旧 `notify.feishu.timezone` 键在部署时仍留在生产配置里，`doctor` 与运行都不受影响（惰性废弃键），本次顺手从 `/etc/deal-hunter/config.json` 删掉并重启确认 `next_due` 仍是 `+08:00` |
 | 备份与恢复演练（M7） | VERIFIED（生产实测） | `deploy/backup.sh` 在 `alienware-life` 真跑：归档 977/977 行、config 在位、sha256 自校验通过；再把归档解到临时目录用**生产二进制**跑 `doctor -net=false` 与 `deals -min 60`，恢复出的库与在线库四个数完全一致（`已见 640 · 已推送 248 · 游标 85 · 2100 KB`），`daily:last_sent` / `daily:watched_since` 游标也在 |
 | 搜索引擎的人机验证不再伪装成"没结果" | VERIFIED（夹具） / NOT VERIFIED（生产） | `lite.duckduckgo.com/lite/` 对生产出口 IP 回了 **HTTP 200 + 验证页**（实测：14KB、内含 `anomaly-modal` / `cc=botnet` / `challenge-form`，0 条结果），采集器原本把它归进"本轮无结果"，面板上看起来像羊毛断了。现在 `search` 源会报 `demanded a human check` 进 `status.sources[].err`。两个方向都变异复查过：检测短路 → 变红；正则误伤正常结果页 → 也变红（夹具用的真实验证页去掉了逐请求签名）。**但 `8076158` 上线后那一轮 `status` 里 human check 命中 0 次** —— 验证窗口在部署前自己解除了，所以这条目前只有夹具证据，等它下次真挡我们时才算生产验证过 |
 | 单一读者时钟（M8） | VERIFIED | 顶层 `timezone` 现在是唯一开关：写错（`Mars/Nowhere`）在 `config.Validate()` 就拒绝（以前只有 `notify.feishu.timezone` 会报错、顶层这个静默退回主机钟 —— 服务在 UTC 上就等于排程差 8 小时）；`notify.feishu.timezone` 字段已删除，`NewFeishu(cfg, loc)` 由 pipeline 传入同一个 `a.loc()`。守卫测试断言"东八区页脚 09:25 / UTC 页脚 01:25"，把 `tz := clock` 改回 `time.Local` 即变红。旧配置里残留的 `notify.feishu.timezone` 键变成惰性废弃键（有测试守着它不再泄漏进钟） |
@@ -126,14 +127,17 @@ ssh alienware-life 'echo -n "带时刻的行: "; sudo grep -c -e expires_at -e s
 拿不到时刻的公告就不提醒，是有意为之。区县商务局页面直出正文的可能性更大，按 ROADMAP 的
 「信源准入」流程逐条实测后再加。
 
-## 次日确认项（2026-09-21 09:00 之后）
+## 次日确认项：2026-09-21 已复核（三条都有结论）
 
-1. **是否恰好发了一份日报**：`journalctl -u deal-hunter --since today | grep "kind=daily"` 应为 2 行
-   （两个通道各一次），且 `daily:last_sent` 落在 09:00–09:31 之间。今天 09:25 旧版已发过一次，
-   新版的 `sent_today` 判定正确地没有补发——这条要在真实跨天后复核。
-2. **`live_verified` 是否上升**：目前 0，因为官方链接的联网校验按新设计在**日报发出时**才做。
-   若发出后仍长期为 0，说明 `filter.max_official_lookups=16` 对 15 行日报不够（每行最多 3 次外连）。
-3. **是否还需要插队**：`urgent.sent_today` 若天天为 1，说明 90 分门槛偏低，读者又被打扰了。
+1. **恰好发了一份日报** —— VERIFIED。`kind=daily` 今天 2 行（飞书 + OpenClaw drop 各一次），
+   `daily:last_sent = 2026-09-21T01:15:40Z` = 北京 09:15:40，落在 09:00–09:31（30m 采集间隔 + jitter）。
+2. **`live_verified` 没上升 —— 但原因不是原来写的"预算不够"，那条假设被数据证伪**：
+   今天新入库的 17 行里 `link_kind` 是 `third_party` 11 行、未判定 6 行，**official 0 行**。
+   校验确实跑了（当日 `official lookups used=25`），是这些条目本身就是 linux.do / v2ex 的论坛帖，
+   找不到"厂商官方入口"是正确答案，不是配额饥饿。以后判断这条要看**判定分布**而不是只看
+   `live_verified` 这一个数；单看一个数会把"没找到"读成"没去找"。
+3. **插队没有变成骚扰** —— VERIFIED。`urgent.sent_today = 0`（90 分门槛今天零命中），
+   一天里读者只收到那一份日报。
 
 ## Current Version
 
