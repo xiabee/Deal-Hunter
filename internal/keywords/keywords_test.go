@@ -319,3 +319,49 @@ func TestExpiresAtReadsExplicitDateRange(t *testing.T) {
 		t.Errorf("day-only range end = %s, want 2026-09-20 23:59", s)
 	}
 }
+
+// 从生产历史库里回灌出来的两种真实写法（不是编的语法）：
+//
+//	"需在 2026 年 12 月 31 日前注册"            —— 年在前、"前"在后，现有规则只认 ISO 横线写法
+//	"限时免费开放至2026年8月31日" / "使用期限直接顺延至2026年8月31日" / "活动持续至 2026 年 9 月 30 日"
+//
+// —— 前置词与日期之间夹着动词，且"至"跟在动词后，原规则的 `\s*[:：至]?\s*` 跨不过去。
+// 这两类年份都写明白了，不属于"猜日期"，读不出来就是白丢一条有期限的羊毛。
+func TestExpiresAtReadsRealPhrasingFromTheCorpus(t *testing.T) {
+	east := time.FixedZone("CST", 8*3600)
+	cases := []struct {
+		text, want string
+	}{
+		{"活动需在各平台完成认证，需在 2026 年 12 月 31 日前注册", "2026-12-31 23:59"},
+		{"现通过 CodeBuddy 平台限时免费开放至2026年8月31日，用户可零成本体验", "2026-08-31 23:59"},
+		{"将混元Hy3大模型免费调用权益再度延期，免费使用期限直接顺延至2026年8月31日", "2026-08-31 23:59"},
+		{"模型在 Qoder 平台限时免费开放，活动持续至 2026 年 9 月 30 日 23:59:59（UTC+8）", "2026-09-30 23:59"},
+	}
+	for _, c := range cases {
+		got := Default().ExpiresAt(c.text, east)
+		if got == nil {
+			t.Errorf("no deadline read from %q", c.text)
+			continue
+		}
+		if s := got.Format("2006-01-02 15:04"); s != c.want {
+			t.Errorf("%q -> %s, want %s", c.text, s, c.want)
+		}
+	}
+}
+
+// 反过来：这些同样来自真实语料，但不该被当成截止 —— 它们是文章发布日/数据时效，
+// 或者是"截至某月"这种没有日的说法。把它们读成截止会让一条早已过期的羊毛继续占日报。
+func TestExpiresStillRefusesPublicationDates(t *testing.T) {
+	east := time.FixedZone("CST", 8*3600)
+	for _, text := range []string{
+		"2026 年 9 月 Ai 免费额度日历｜限时羊毛、长期额度与三个坑",
+		"本文基于 2025-09-02 的最新官网与权威测评，一口气梳理 6 款",
+		"2026 年免费 AI 大模型 API 清单：官方文档核实版（截至 2026-08）",
+		"数据时效：2026 年 7 月，具体以各平台官网为准",
+		"网站编辑 2026-07-12 11:40:02 腾讯云代码助手免费额度",
+	} {
+		if got := Default().ExpiresAt(text, east); got != nil {
+			t.Errorf("must not read a deadline out of %q, got %s", text, got.Format(time.RFC3339))
+		}
+	}
+}

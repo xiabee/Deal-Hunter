@@ -110,9 +110,15 @@ func Default() *Dict {
 	}
 	sort.Slice(d.vendors, func(i, j int) bool { return d.vendors[i].needle < d.vendors[j].needle })
 	d.expiry = []expiryRule{
-		{regexp.MustCompile(`(?:截止|截至|有效期至|核销期限|使用期限|结束时间|活动至|到期)\s*[:：至]?\s*(20\d{2})[-/.年]\s*(\d{1,2})[-/.月]\s*(\d{1,2})`), "ymd"},
+		// The bridge between a lead-in and the date is a few non-digit characters,
+		// because real announcements say 免费使用期限直接顺延至2026年8月31日 and
+		// 限时免费开放至2026年8月31日, not just 截止日期: …
+		{regexp.MustCompile(`(?:截止|截至|有效期至|核销期限|使用期限|结束时间|活动至|到期|开放至|持续至|顺延至|延期至|延长至|免费至|限免至)[^0-9\n]{0,6}?(20\d{2})\s*[-/.年]\s*(\d{1,2})\s*[-/.月]\s*(\d{1,2})`), "ymd"},
 		{regexp.MustCompile(`(?i)(?:until|ends?\s+(?:on|by)|deadline|valid\s+(?:thru|through|until))\s+([a-z]{3,9})\.?\s+(\d{1,2})[, ]+(\d{4})`), "mdy"},
 		{regexp.MustCompile(`(?i)(20\d{2})-(\d{1,2})-(\d{1,2})\s*(?:前结束|截止|到期|失效|过期)`), "ymd"},
+		// …and the suffix form carries the year, so "需在 2026 年 12 月 31 日前注册"
+		// is a stated deadline rather than a guess. A bare "8月28日前" stays unread.
+		{regexp.MustCompile(`(?i)(20\d{2})\s*[-/.年]\s*(\d{1,2})\s*[-/.月]\s*(\d{1,2})\s*日?\s*(?:之?前)`), "ymd"},
 	}
 	return d
 }
