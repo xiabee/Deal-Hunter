@@ -49,9 +49,13 @@ tar --null --no-recursion --files-from="$LIST" -cf "$TARBALL" || die "tar failed
 FILES_SHIPPED="$(tr '\0' '\n' < "$LIST" | grep -c . || true)"
 BYTES="$(wc -c < "$TARBALL" | tr -d ' ')"
 [[ "$FILES_SHIPPED" -gt 30 ]] || die "only $FILES_SHIPPED files listed — is git available?"
-tar -tf "$TARBALL" 2>/dev/null | grep -qx 'go.mod' || die "go.mod missing from the payload"
-tar -tf "$TARBALL" 2>/dev/null | grep -qx 'scripts/ci-local.sh' || die "ci script missing from the payload"
-if tar -tf "$TARBALL" 2>/dev/null | grep -qE '(^|/)[^/]*\.env$'; then
+# Read the listing into a variable rather than piping tar into grep: grep -q exits at
+# the first match, which SIGPIPEs tar, and under pipefail that 141 looks exactly like a
+# missing file - a gate that fails its own healthy payload.
+LISTING="$(tar -tf "$TARBALL" 2>/dev/null)" || die "cannot read back the payload"
+grep -qx 'go.mod' <<<"$LISTING" || die "go.mod missing from the payload"
+grep -qx 'scripts/ci-local.sh' <<<"$LISTING" || die "ci script missing from the payload"
+if grep -qE '(^|/)[^/]*\.env$' <<<"$LISTING"; then
 	die "refusing to ship a .env file to the builder"
 fi
 say "payload: $FILES_SHIPPED files, $BYTES bytes"
