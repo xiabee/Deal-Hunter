@@ -215,6 +215,21 @@ func TestSourceIdlenessTracksTheLastRoundThatParsedAnything(t *testing.T) {
 	if day[0].Name != "silent" {
 		t.Errorf("the never-heard-from source should lead, got %s", day[0].Name)
 	}
+
+	// 时钟倒挂不能伪装成"从没出声"：读的一侧比写的一侧早几十秒是真实发生过的
+	// （服务刚重启就有人跑 doctor）。哨兵必须是 Last 为零，不是 Idle 为负。
+	future := time.Now().Add(2 * time.Hour).UTC().Format(time.RFC3339)
+	if err := app.st.PutState(srcLastHit, map[string]string{"alive": future, "silent": future}); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range app.SourceIdleness(time.Now()) {
+		if s.Last.IsZero() {
+			t.Errorf("%s has a stamp and must not read as never-heard-from", s.Name)
+		}
+		if s.Idle != 0 {
+			t.Errorf("%s ahead of the reader's clock should clamp to 0, got %v", s.Name, s.Idle)
+		}
+	}
 }
 
 // nextFreeModelFeed is the same source one round later with one extra event: a

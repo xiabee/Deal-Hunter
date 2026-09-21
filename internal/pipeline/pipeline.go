@@ -857,12 +857,13 @@ func (a *App) sameLocalDay(x, y time.Time) bool {
 // last round, lost on restart - keeps looking green.
 const srcLastHit = "src:last_hit"
 
-// SourceIdle says how long a source has gone without producing a row. Idle is
-// negative for a source that has never done so, which is a different complaint:
-// that one was probably never configured right.
+// SourceIdle says how long a source has gone without producing a row. Last is the
+// zero time when the source has never done so - a different complaint from "quiet
+// lately", and never encoded as a negative Idle: a reader whose clock falls a few
+// seconds ahead of the writer's would otherwise read a healthy source as broken.
 type SourceIdle struct {
 	Name string    `json:"name"`
-	Last time.Time `json:"last,omitempty"`
+	Last time.Time `json:"last"`
 	Idle time.Duration
 }
 
@@ -904,16 +905,21 @@ func SourceIdleness(cfg *config.Config, st *store.Store, now time.Time) []Source
 	enabled := cfg.EnabledSources()
 	out := make([]SourceIdle, 0, len(enabled))
 	for _, s := range enabled {
-		si := SourceIdle{Name: s.Name, Idle: -1}
+		si := SourceIdle{Name: s.Name}
 		if t, err := time.Parse(time.RFC3339, hits[s.Name]); err == nil && !t.IsZero() {
 			si.Last = t
 			si.Idle = now.Sub(t)
+			if si.Idle < 0 {
+				si.Idle = 0 // a reader that started before the last round finished
+			}
+		} else {
+			si.Idle = -1 // never: signalled by the zero Last, kept for sort ordering
 		}
 		out = append(out, si)
 	}
 	sort.SliceStable(out, func(i, j int) bool {
-		if (out[i].Idle < 0) != (out[j].Idle < 0) {
-			return out[i].Idle < 0
+		if out[i].Last.IsZero() != out[j].Last.IsZero() {
+			return out[i].Last.IsZero()
 		}
 		return out[i].Idle > out[j].Idle
 	})

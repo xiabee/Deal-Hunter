@@ -887,9 +887,9 @@ func sourceSilence(cfg *config.Config, st *store.Store, now time.Time) (string, 
 	idle := pipeline.SourceIdleness(cfg, st, now)
 	var quiet []string
 	for _, s := range idle {
-		if s.Idle < 0 || s.Idle > patience {
+		if s.Last.IsZero() || s.Idle > patience {
 			human := "从没解析出内容"
-			if s.Idle >= 0 {
+			if !s.Last.IsZero() {
 				human = humanDelta(s.Idle) + "没出声"
 			}
 			quiet = append(quiet, s.Name+"（"+human+"）")
@@ -898,7 +898,7 @@ func sourceSilence(cfg *config.Config, st *store.Store, now time.Time) (string, 
 	headline := "全部信源最近都有出声"
 	if len(idle) > 0 {
 		worst := idle[0] // sorted: never-heard-from first, then longest silence
-		if worst.Idle < 0 {
+		if worst.Last.IsZero() {
 			headline = "有信源从没解析出过内容：" + worst.Name
 		} else {
 			headline = "最久没出声的是 " + worst.Name + "（" + humanDelta(worst.Idle) + "前）"
