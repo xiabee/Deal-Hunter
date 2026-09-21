@@ -46,6 +46,12 @@ type Stats struct {
 }
 
 // Open prepares dir, loads the existing log and returns a writable store.
+// StateLastCompact records when the store was last compacted. Both writers mean the
+// same fact - the scheduled sweep and the operator's `dealhunter compact` - so the
+// scheduler must not re-run right after a manual one, and doctor must not keep
+// warning on a host that was just tidied by hand.
+const StateLastCompact = "maint:last_compact"
+
 func Open(dir string) (*Store, error) {
 	if strings.TrimSpace(dir) == "" {
 		return nil, errors.New("store: empty dir")

@@ -313,7 +313,7 @@ func compactionMarker(t *testing.T, out string) string {
 // doctor 替它说话。
 func TestDoctorReportsBackupFreshness(t *testing.T) {
 	dir := t.TempDir()
-	_, out := run(t, "-data", dir, "doctor")
+	_, out := run(t, "-data", dir, "doctor", "-net=false")
 	if compactionMarker(t, out) == "" {
 		t.Fatal("compaction row should exist")
 	}
@@ -338,13 +338,13 @@ func TestDoctorReportsBackupFreshness(t *testing.T) {
 		}
 	}
 	write(2 * time.Hour)
-	_, out = run(t, "-data", dir, "doctor")
+	_, out = run(t, "-data", dir, "doctor", "-net=false")
 	if marker, _ := backupMarker(t, out); marker != "✓" {
 		t.Errorf("a 2-hour-old backup should pass, marker = %q", marker)
 	}
 
 	write(9 * 24 * time.Hour)
-	_, out = run(t, "-data", dir, "doctor")
+	_, out = run(t, "-data", dir, "doctor", "-net=false")
 	if marker, detail := backupMarker(t, out); marker != "!" || !strings.Contains(detail, "超过") {
 		t.Errorf("a 9-day-old backup against a nightly timer should warn: %q %q", marker, detail)
 	}
@@ -352,7 +352,7 @@ func TestDoctorReportsBackupFreshness(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "backup.stamp"), []byte("胡说八道\n"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	_, out = run(t, "-data", dir, "doctor")
+	_, out = run(t, "-data", dir, "doctor", "-net=false")
 	if marker, _ := backupMarker(t, out); marker == "✓" {
 		t.Error("an unreadable stamp must not be reported as a healthy backup")
 	}
@@ -361,7 +361,7 @@ func TestDoctorReportsBackupFreshness(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "backup.stamp"), nil, 0o640); err != nil {
 		t.Fatal(err)
 	}
-	code, out := run(t, "-data", dir, "doctor")
+	code, out := run(t, "-data", dir, "doctor", "-net=false")
 	if marker, _ := backupMarker(t, out); marker == "✓" {
 		t.Error("an empty stamp must not be reported as a healthy backup")
 	}
@@ -387,7 +387,7 @@ func backupMarker(t *testing.T, out string) (string, string) {
 // 报一行，不能因为"代码里有排程"就当作在跑。
 func TestDoctorReportsCompactionRecency(t *testing.T) {
 	dir := t.TempDir()
-	code, out := run(t, "-data", dir, "doctor")
+	code, out := run(t, "-data", dir, "doctor", "-net=false")
 	if code != 0 {
 		t.Fatalf("doctor: code=%d out=%s", code, out)
 	}
@@ -403,7 +403,7 @@ func TestDoctorReportsCompactionRecency(t *testing.T) {
 		[]byte(`{"maint:last_compact":"`+stale+`"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, out = run(t, "-data", dir, "doctor")
+	_, out = run(t, "-data", dir, "doctor", "-net=false")
 	if got := compactionMarker(t, out); got != "!" {
 		t.Errorf("a 51-day-old compaction should warn, marker = %q", got)
 	}
@@ -416,10 +416,39 @@ func TestDoctorReportsCompactionRecency(t *testing.T) {
 		[]byte(`{"maint:last_compact":"`+fresh+`"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, out = run(t, "-data", dir, "doctor")
+	_, out = run(t, "-data", dir, "doctor", "-net=false")
 	if got := compactionMarker(t, out); got != "✓" {
 		t.Errorf("a recent compaction should pass, marker = %q\n%s", got, out)
 	}
+}
+
+// 手动 compact 与排程 compact 是同一件事，必须留同一个记号：不然刚压缩过的机器在
+// doctor 里仍然写着"从未压缩过"，而排程器也会在下一次凑满轮数时白跑一遍。
+func TestManualCompactRecordsTheSameMarkerAsTheSchedule(t *testing.T) {
+	dir := t.TempDir()
+	seed(t, dir, `{"fingerprint":"m1","url":"https://x.test/1","title":"昨天收录的一条","source":"s",`+
+		`"category":"ai_free","score":70,"is_free":true,`+
+		`"discovered_at":"`+time.Now().AddDate(0, 0, -3).UTC().Format(time.RFC3339)+`"}`)
+	if code, out := run(t, "-data", dir, "compact"); code != 0 {
+		t.Fatalf("compact: code=%d out=%s", code, out)
+	}
+	_, out := run(t, "-data", dir, "doctor", "-net=false")
+	if marker, detail := compactionRow(t, out); marker == "!" && strings.Contains(detail, "从未压缩") {
+		t.Errorf("a manual compact should count as a compaction:\n%s", out)
+	}
+}
+
+// compactionRow returns the marker and the whole line for the compaction check.
+func compactionRow(t *testing.T, out string) (string, string) {
+	t.Helper()
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Fields(line)
+		if len(f) >= 2 && f[1] == "compaction" {
+			return f[0], line
+		}
+	}
+	t.Fatalf("no compaction row in:\n%s", out)
+	return "", ""
 }
 
 // seed writes one JSONL row into a fresh data directory.

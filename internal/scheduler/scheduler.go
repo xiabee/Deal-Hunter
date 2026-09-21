@@ -10,6 +10,7 @@ import (
 
 	"github.com/xiabee/deal-hunter/internal/config"
 	"github.com/xiabee/deal-hunter/internal/pipeline"
+	"github.com/xiabee/deal-hunter/internal/store"
 )
 
 // Loop is the daemon driver.
@@ -23,7 +24,6 @@ type Loop struct {
 const (
 	compactEveryRounds = 48
 	compactKeepDays    = 60
-	stateLastCompact   = "maint:last_compact"
 )
 
 // Run blocks until ctx is cancelled, doing one round immediately unless
@@ -88,7 +88,7 @@ func (l *Loop) nextDelay() time.Duration {
 
 func (l *Loop) compact() {
 	st := l.App.Store()
-	if b, ok := st.GetState(stateLastCompact); ok {
+	if b, ok := st.GetState(store.StateLastCompact); ok {
 		var s string
 		if json.Unmarshal(b, &s) == nil {
 			if t, err := time.Parse(time.RFC3339, s); err == nil && time.Since(t) < 7*24*time.Hour {
@@ -100,6 +100,6 @@ func (l *Loop) compact() {
 		l.Log.Warn("compact failed", "err", err)
 		return
 	}
-	_ = st.PutState(stateLastCompact, time.Now().UTC().Format(time.RFC3339))
+	_ = st.PutState(store.StateLastCompact, time.Now().UTC().Format(time.RFC3339))
 	l.Log.Info("store compacted", "keep_days", compactKeepDays)
 }

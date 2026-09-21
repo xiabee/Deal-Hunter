@@ -670,6 +670,12 @@ func cmdCompact(cfg *config.Config, log *slog.Logger, stdout io.Writer, args []s
 		fmt.Fprintf(stdout, "压缩失败：%v\n", err)
 		return 1
 	}
+	// Same marker the scheduled sweep writes: a manual compaction must count, or
+	// doctor keeps warning and the scheduler repeats work that was just done.
+	if err := st.PutState(store.StateLastCompact, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		fmt.Fprintf(stdout, "✓ 压缩完成：%d → %d 条（但记不下时间：%v）\n", before, st.Stats().DealsSeen, err)
+		return 1
+	}
 	fmt.Fprintf(stdout, "✓ 压缩完成：%d → %d 条\n", before, st.Stats().DealsSeen)
 	return 0
 }
@@ -905,7 +911,7 @@ func backupFreshness(dataDir string) (string, string) {
 // a host that gets redeployed daily resets it before it fires and never compacts at all
 // - which is why this is its own check rather than a line inside "store".
 func compactionState(st *store.Store) (string, string) {
-	b, ok := st.GetState("maint:last_compact")
+	b, ok := st.GetState(store.StateLastCompact)
 	if !ok {
 		return "warn", "从未压缩过（排程是连续 48 轮且距上次 7 天，重启会清零）；手动：deal-hunter compact"
 	}
