@@ -136,6 +136,10 @@
 - **升级后旧配置里的废弃键不报错也不生效**（`notify.digest`、`notify.feishu.{min_score,max_per_run,silent_hours}`、`filter.min_score`），`install.sh` 会打一行提示。
 
 ## Technical Debt
+- **`Store.Live` 每次都整体重读 JSONL —— 量过，不是债**：2026-09-21 生产实测 `daily -dry`
+  端到端 `0.09 s`（含进程启动、配置、整库解码、渲染），而真实采集轮次是 `2.8–6.0 s`（17 个源的
+  网络耗时占大头）。库 1.2 MB / 779 行。就算长到 10 倍也只是每次多几百毫秒，且轮次本来就是网络瓶颈。
+  **别为此加缓存**——那会引入"缓存与追加写不一致"这类新故障，而现在的成本是零。
 - `internal/scheduler` 没有测试文件：`Loop` 直接依赖 `*pipeline.App`，要测触发逻辑得先抽一个小接口（**故意没做**，避免为测试造抽象）。
 - 采集器类型有 7 种，`sources.New` 是一个 switch；再加两类以上时值得回到注册表写法。
 
