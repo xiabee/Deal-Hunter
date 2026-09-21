@@ -81,19 +81,24 @@ func Evaluate(in Input, dict *keywords.Dict) Result {
 		res.Score += discountBonus(res.DiscountPct)
 		res.Why = append(res.Why, fmt.Sprintf("+%d 折扣 %d%%", discountBonus(res.DiscountPct), res.DiscountPct))
 	}
-	res.Expires = dict.ExpiresAt(text, in.ReaderZone)
+	// An announcement states its times in the reader's zone, and a date written
+	// without a year belongs to the year the announcement was published — only the
+	// caller knows either. A service running in UTC must still remind for 10:00
+	// Beijing and read "至9月10日" as this year's.
+	anchor := now
+	if !in.Deal.PublishedAt.IsZero() {
+		anchor = in.Deal.PublishedAt
+	}
+	if in.ReaderZone != nil {
+		anchor = anchor.In(in.ReaderZone)
+	}
+	res.Expires = dict.ExpiresAt(text, anchor)
 	if res.Expires != nil && res.Expires.Before(now) {
 		res.Reject = "expired"
 		res.Why = append(res.Why, "活动已于 "+res.Expires.Format("2006-01-02")+" 截止")
 		return res
 	}
-	// An announcement states its times in the reader's zone, which only the
-	// caller knows: a service running in UTC must still remind for 10:00 Beijing.
 	if in.ReaderZone != nil {
-		anchor := now.In(in.ReaderZone)
-		if !in.Deal.PublishedAt.IsZero() {
-			anchor = in.Deal.PublishedAt.In(in.ReaderZone)
-		}
 		res.Starts = dict.StartsAt(text, anchor)
 	}
 

@@ -113,7 +113,7 @@ func Default() *Dict {
 		// The bridge between a lead-in and the date is a few non-digit characters,
 		// because real announcements say 免费使用期限直接顺延至2026年8月31日 and
 		// 限时免费开放至2026年8月31日, not just 截止日期: …
-		{regexp.MustCompile(`(?:截止|截至|有效期至|核销期限|使用期限|结束时间|活动至|到期|开放至|持续至|顺延至|延期至|延长至|免费至|限免至)[^0-9\n]{0,6}?(20\d{2})\s*[-/.年]\s*(\d{1,2})\s*[-/.月]\s*(\d{1,2})`), "ymd"},
+		{regexp.MustCompile(`(?:` + expiryLead + `)[^0-9\n]{0,6}?(20\d{2})\s*[-/.年]\s*(\d{1,2})\s*[-/.月]\s*(\d{1,2})`), "ymd"},
 		{regexp.MustCompile(`(?i)(?:until|ends?\s+(?:on|by)|deadline|valid\s+(?:thru|through|until))\s+([a-z]{3,9})\.?\s+(\d{1,2})[, ]+(\d{4})`), "mdy"},
 		{regexp.MustCompile(`(?i)(20\d{2})-(\d{1,2})-(\d{1,2})\s*(?:前结束|截止|到期|失效|过期)`), "ymd"},
 		// …and the suffix form carries the year, so "需在 2026 年 12 月 31 日前注册"
@@ -296,42 +296,70 @@ func (d *Dict) StartsAt(text string, anchor time.Time) *time.Time {
 var startsAtRe = regexp.MustCompile(
 	`(?:(\d{4})年)?(\d{1,2})月(\d{1,2})日?[^0-9]{0,8}?(上午|中午|下午|晚上|凌晨)?[^0-9]{0,4}?(\d{1,2})\s*(?:时|点|:)\s*(\d{1,2})?`)
 
+// expiryLead lists how a Chinese announcement points at its own end. The bridge
+// between the lead-in and the date allows a few non-digit characters, because real
+// text says 免费使用期限直接顺延至2026年8月31日 rather than 截止日期：…
+const expiryLead = `截止|截至|有效期至|核销期限|使用期限|结束时间|活动至|到期|开放至|持续至|顺延至|延期至|延长至|免费至|限免至`
+
+// yearlessSpan caps what a date written without a year may mean: 45 days past the
+// anchor. A September post mentioning a bare 8月28日 means a date that already
+// passed, not next August; a 12月30日 post may mean 1月5日.
+const yearlessSpan = 45 * 24 * time.Hour
+
+var (
+	yearlessLeadRe = regexp.MustCompile(`(?:` + expiryLead + `)[^0-9\n]{0,6}?(\d{1,2})月(\d{1,2})日`)
+	yearlessPreRe  = regexp.MustCompile(`(\d{1,2})月(\d{1,2})日\s*(?:之?前)`)
+)
+
 // ExpiresAt parses a deadline mentioned in the text, if one is present.
-func (d *Dict) ExpiresAt(text string, loc *time.Location) *time.Time {
+//
+// The anchor is the finding's own clock: its zone explains the wall clock (an
+// announcement says 9月10日 meaning Beijing while the service runs UTC), and its
+// year resolves dates written without one. A zero anchor keeps the old, stricter
+// behaviour: an explicit year or nothing at all.
+func (d *Dict) ExpiresAt(text string, anchor time.Time) *time.Time {
+	loc := time.Local
+	if !anchor.IsZero() {
+		loc = anchor.Location()
+	}
 	for _, rule := range d.expiry {
-		m := rule.re.FindStringSubmatch(text)
-		if m == nil {
+		ix := rule.re.FindStringSubmatchIndex(text)
+		if ix == nil {
 			continue
+		}
+		grp := func(i int) string {
+			if ix[2*i] < 0 {
+				return ""
+			}
+			return text[ix[2*i]:ix[2*i+1]]
 		}
 		var year, mon, day int
 		switch rule.order {
 		case "mdy":
-			n, ok := monthNumber(m[1])
+			n, ok := monthNumber(grp(1))
 			if !ok {
 				continue
 			}
 			mon = n
-			day, _ = strconv.Atoi(m[2])
-			year, _ = strconv.Atoi(m[3])
+			day, _ = strconv.Atoi(grp(2))
+			year, _ = strconv.Atoi(grp(3))
 		default:
-			year, _ = strconv.Atoi(m[1])
-			n, ok := monthNumber(m[2])
+			year, _ = strconv.Atoi(grp(1))
+			n, ok := monthNumber(grp(2))
 			if !ok {
 				continue
 			}
 			mon = n
-			day, _ = strconv.Atoi(m[3])
+			day, _ = strconv.Atoi(grp(3))
 		}
 		if year < 2000 || year > 2100 || mon < 1 || mon > 12 || day < 1 || day > 31 {
 			continue
 		}
-		// The deadline is a wall clock the reader reads, and the service usually
-		// runs in UTC; nil means "whatever this host's clock is" for callers that
-		// have no configured zone.
-		if loc == nil {
-			loc = time.Local
+		hour, minute, sec := 23, 59, 59
+		if h, m, ok := clockAfter(text[ix[1]:]); ok {
+			hour, minute, sec = h, m, 0
 		}
-		t := time.Date(year, time.Month(mon), day, 23, 59, 59, 0, loc)
+		t := time.Date(year, time.Month(mon), day, hour, minute, sec, 0, loc)
 		// time.Date rolls 9月31日 into October. An unreadable deadline must not
 		// become a later one, or a finished offer keeps a day of airtime in the
 		// briefing.
@@ -346,7 +374,91 @@ func (d *Dict) ExpiresAt(text string, loc *time.Location) *time.Time {
 	if t, ok := rangeEnd(text, loc); ok {
 		return &t
 	}
+	// Dates written without a year are the largest remaining family in the real
+	// corpus (限时免费至9月10日, 9月30日前领取). They are only readable against the
+	// finding's own date, and only when that reading is still ahead of it.
+	if !anchor.IsZero() {
+		for _, re := range []*regexp.Regexp{yearlessLeadRe, yearlessPreRe} {
+			ix := re.FindStringSubmatchIndex(text)
+			if ix == nil {
+				continue
+			}
+			if t, ok := yearlessDeadline(text[ix[2]:ix[3]], text[ix[4]:ix[5]], text[ix[1]:], anchor); ok {
+				return &t
+			}
+		}
+	}
 	return nil
+}
+
+// clockAfter reads an optional "下午6:00" / "5:40" / "24:00" that follows a date.
+// Announcements do spell out a cut-off hour (试用截止到9月20日凌晨5:40), and 24:00
+// is how they write "end of that day", so it maps there rather than being refused.
+func clockAfter(rest string) (hour, minute int, ok bool) {
+	m := deadlineClockRe.FindStringSubmatch(rest)
+	if m == nil {
+		return 0, 0, false
+	}
+	h, err := strconv.Atoi(m[2])
+	if err != nil || h > 24 {
+		return 0, 0, false
+	}
+	switch m[1] {
+	case "下午", "晚上":
+		if h < 12 {
+			h += 12
+		}
+	case "中午":
+		if h < 11 {
+			h += 12
+		}
+	}
+	if h == 24 {
+		return 23, 59, true
+	}
+	min := 0
+	if m[3] != "" {
+		min, err = strconv.Atoi(m[3])
+		if err != nil || min > 59 {
+			return 0, 0, false
+		}
+	}
+	return h, min, true
+}
+
+// deadlineClockRe only accepts a clock hugging the date (optionally behind a
+// 凌晨/下午 word). A comma means a new clause: "免费至9月10日，10:00 开抢" would
+// otherwise borrow the opening hour as the deadline.
+var deadlineClockRe = regexp.MustCompile(`^(?:日|号)?\s*(凌晨|上午|中午|下午|晚上)?\s*(\d{1,2})\s*[:时点]\s*(\d{1,2})?`)
+
+// yearlessDeadline reads "M月D日" against the anchor's year, rolling to the next
+// year only when that stays within yearlessSpan — a September post mentioning a
+// bare 8月28日 means a date that already passed, not next August.
+func yearlessDeadline(monStr, dayStr, rest string, anchor time.Time) (time.Time, bool) {
+	mon, err1 := strconv.Atoi(monStr)
+	day, err2 := strconv.Atoi(dayStr)
+	if err1 != nil || err2 != nil || mon < 1 || mon > 12 || day < 1 || day > 31 {
+		return time.Time{}, false
+	}
+	loc := anchor.Location()
+	hour, minute, sec := 23, 59, 59
+	if h, m, ok := clockAfter(rest); ok {
+		hour, minute, sec = h, m, 0
+	}
+	for _, year := range []int{anchor.Year(), anchor.Year() + 1} {
+		t := time.Date(year, time.Month(mon), day, hour, minute, sec, 0, loc)
+		if t.Day() != day || int(t.Month()) != mon {
+			return time.Time{}, false // an impossible date (9月31日) is unreadable, not later
+		}
+		if t.Before(anchor) {
+			continue
+		}
+		if t.After(anchor.Add(yearlessSpan)) {
+			return time.Time{}, false
+		}
+		return t, true
+	}
+	return time.Time{}, false
 }
 
 // A range is written by joining two complete dates, so it is read with two small

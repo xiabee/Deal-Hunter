@@ -121,19 +121,25 @@ func TestIsNoise(t *testing.T) {
 	}
 }
 
+// anchorAt builds the clock a finding carries into ExpiresAt / StartsAt: any
+// instant inside the zone under test.
+func anchorAt(loc *time.Location) time.Time {
+	return time.Date(2026, 6, 15, 9, 0, 0, 0, loc)
+}
+
 func TestExpiresAt(t *testing.T) {
 	d := Default()
-	got := d.ExpiresAt("活动截止 2026-10-01，过期不候", nil)
+	got := d.ExpiresAt("活动截止 2026-10-01，过期不候", time.Time{})
 	if got == nil {
 		t.Fatal("expected a parsed deadline")
 	}
 	if got.Year() != 2026 || int(got.Month()) != 10 || got.Day() != 1 {
 		t.Errorf("deadline = %s, want 2026-10-01", got.Format("2006-01-02"))
 	}
-	if d.ExpiresAt("没有时间信息", nil) != nil {
+	if d.ExpiresAt("没有时间信息", time.Time{}) != nil {
 		t.Error("expected no deadline")
 	}
-	en := d.ExpiresAt("Offer ends on September 30, 2026", nil)
+	en := d.ExpiresAt("Offer ends on September 30, 2026", time.Time{})
 	if en == nil || !en.Equal(time.Date(2026, 9, 30, 23, 59, 59, 0, time.Local)) {
 		t.Errorf("english deadline = %v", en)
 	}
@@ -234,8 +240,8 @@ func TestStartsAtRefusesToGuess(t *testing.T) {
 func TestExpiresAtBuildsDeadlineInTheReadersZone(t *testing.T) {
 	const text = "活动截止：2026年9月26日"
 	east := time.FixedZone("UTC+8", 8*3600)
-	inUTC := Default().ExpiresAt(text, time.UTC)
-	inEast := Default().ExpiresAt(text, east)
+	inUTC := Default().ExpiresAt(text, anchorAt(time.UTC))
+	inEast := Default().ExpiresAt(text, anchorAt(east))
 	if inUTC == nil || inEast == nil {
 		t.Fatalf("both zones must resolve the deadline: %v / %v", inUTC, inEast)
 	}
@@ -251,10 +257,10 @@ func TestExpiresAtBuildsDeadlineInTheReadersZone(t *testing.T) {
 // "9月31日" 应该判为读不懂，而不是悄悄变成 10 月 1 日 —— 那会让一张早已结束的券
 // 在日报里多活一天。
 func TestExpiresAtRejectsImpossibleDates(t *testing.T) {
-	if got := Default().ExpiresAt("有效期至 2026年9月31日", nil); got != nil {
+	if got := Default().ExpiresAt("有效期至 2026年9月31日", time.Time{}); got != nil {
 		t.Errorf("impossible deadline must not resolve, got %v", *got)
 	}
-	if got := Default().ExpiresAt("有效期至 2026年10月15日", nil); got == nil {
+	if got := Default().ExpiresAt("有效期至 2026年10月15日", time.Time{}); got == nil {
 		t.Error("a real deadline must still parse")
 	}
 }
@@ -263,7 +269,7 @@ func TestExpiresAtRejectsImpossibleDates(t *testing.T) {
 // 「券必须有 expires_at 才进日报」这条规则会把所有券一律挡在门外。
 func TestExpiresAtReadsVoucherRedemptionDeadline(t *testing.T) {
 	for _, text := range []string{"核销期限至2026年10月15日", "使用期限：2026年11月3日"} {
-		if got := Default().ExpiresAt(text, nil); got == nil {
+		if got := Default().ExpiresAt(text, time.Time{}); got == nil {
 			t.Errorf("no deadline parsed from %q", text)
 		}
 	}
@@ -302,7 +308,7 @@ func TestStartsAtHandlesRealAnnouncementPhrasing(t *testing.T) {
 func TestExpiresAtReadsExplicitDateRange(t *testing.T) {
 	text := "新加坡时间：2026年9月18日10:00至2026年9月30日23:59"
 	zone := time.FixedZone("CST", 8*3600)
-	got := Default().ExpiresAt(text, zone)
+	got := Default().ExpiresAt(text, anchorAt(zone))
 	if got == nil {
 		t.Fatalf("the end of an explicit range is a deadline: %q", text)
 	}
@@ -311,7 +317,7 @@ func TestExpiresAtReadsExplicitDateRange(t *testing.T) {
 	}
 
 	// 没有小时的时候仍按"当天过完"算，与既有规则一致。
-	dayOnly := Default().ExpiresAt("活动时间：2026年9月1日至2026年9月20日", zone)
+	dayOnly := Default().ExpiresAt("活动时间：2026年9月1日至2026年9月20日", anchorAt(zone))
 	if dayOnly == nil {
 		t.Fatal("a day-only range must still yield a deadline")
 	}
@@ -338,7 +344,7 @@ func TestExpiresAtReadsRealPhrasingFromTheCorpus(t *testing.T) {
 		{"模型在 Qoder 平台限时免费开放，活动持续至 2026 年 9 月 30 日 23:59:59（UTC+8）", "2026-09-30 23:59"},
 	}
 	for _, c := range cases {
-		got := Default().ExpiresAt(c.text, east)
+		got := Default().ExpiresAt(c.text, anchorAt(east))
 		if got == nil {
 			t.Errorf("no deadline read from %q", c.text)
 			continue
@@ -360,8 +366,123 @@ func TestExpiresStillRefusesPublicationDates(t *testing.T) {
 		"数据时效：2026 年 7 月，具体以各平台官网为准",
 		"网站编辑 2026-07-12 11:40:02 腾讯云代码助手免费额度",
 	} {
-		if got := Default().ExpiresAt(text, east); got != nil {
+		if got := Default().ExpiresAt(text, anchorAt(east)); got != nil {
 			t.Errorf("must not read a deadline out of %q, got %s", text, got.Format(time.RFC3339))
 		}
+	}
+}
+
+// 不写年份的截止（"限时免费至9月10日"、"截止至1月5日"）是语料里剩下的最大一类。
+// 锚点是发布日期：它的钟决定时刻怎么解释，它的年决定"9月10日"是哪一年。
+// 规则刻意保守：同一年的读法还没过期才接受；只有临近年底时才允许跨年滚一年，
+// 且滚完必须在锚点之后 45 天以内 —— 9 月的文章里一个不写年的"8月28日"，
+// 意思是"已经过了"，不是"明年8月28日"。
+func TestExpiresAtResolvesYearlessDeadlinesFromTheAnchor(t *testing.T) {
+	east := time.FixedZone("CST", 8*3600)
+
+	cases := []struct {
+		name   string
+		anchor time.Time
+		text   string
+		want   string
+		expect bool
+	}{
+		{
+			name:   "同年仍在未来",
+			anchor: time.Date(2026, 8, 4, 9, 0, 0, 0, east), // 文章发布于 8 月 4 日
+			text:   "腾讯Hy3限时免费体验，CodeBuddy、WorkBuddy同步上线，限时免费至9月10日，支持API调用",
+			want:   "2026-09-10 23:59", expect: true,
+		},
+		{
+			name:   "九月看到八月二十八，是已经过了",
+			anchor: time.Date(2026, 9, 21, 9, 0, 0, 0, east),
+			text:   "CDN流量包免费领取活动，分享赢速干T恤，截止至8月28日。",
+			expect: false,
+		},
+		{
+			name:   "八月初看到八月二十八，还来得及",
+			anchor: time.Date(2026, 8, 4, 9, 0, 0, 0, east),
+			text:   "CDN流量包免费领取活动，分享赢速干T恤，截止至8月28日。",
+			want:   "2026-08-28 23:59", expect: true,
+		},
+		{
+			name:   "年底附近允许滚一年",
+			anchor: time.Date(2026, 12, 30, 9, 0, 0, 0, east),
+			text:   "本期限量领取，报名从速，截止至1月5日。",
+			want:   "2027-01-05 23:59", expect: true,
+		},
+		{
+			name:   "滚一年太远就不读",
+			anchor: time.Date(2026, 12, 30, 9, 0, 0, 0, east),
+			text:   "年度盘点里的长期额度，截止至6月1日。",
+			expect: false,
+		},
+	}
+	for _, c := range cases {
+		got := Default().ExpiresAt(c.text, c.anchor)
+		if !c.expect {
+			if got != nil {
+				t.Errorf("%s: must stay unread, got %s", c.name, got.Format(time.RFC3339))
+			}
+			continue
+		}
+		if got == nil {
+			t.Errorf("%s: no deadline read from %q", c.name, c.text)
+			continue
+		}
+		if s := got.In(east).Format("2006-01-02 15:04"); s != c.want {
+			t.Errorf("%s: %s, want %s", c.name, s, c.want)
+		}
+	}
+}
+
+// 年份明写的老规矩不变：锚点只是提供钟点，不参与补年。
+func TestYearlessRuleDoesNotTouchExplicitYears(t *testing.T) {
+	east := time.FixedZone("CST", 8*3600)
+	late := time.Date(2026, 12, 30, 9, 0, 0, 0, east)
+	got := Default().ExpiresAt("核销期限至2026年10月15日", late)
+	if got == nil {
+		t.Fatal("an explicit year must still parse regardless of the anchor")
+	}
+	if s := got.In(east).Format("2006-01-02"); s != "2026-10-15" {
+		t.Errorf("explicit year rewritten by the anchor: %s", s)
+	}
+	if Default().ExpiresAt("没有时间信息", late) != nil {
+		t.Error("still no deadline in text that has none")
+	}
+}
+
+// 语料里的真实一句："截止到9月20日凌晨5:40，我翻了好久论坛"。日期读对了、时刻丢掉，
+// 这张券就在日报里多活 18 小时 —— 既然原话写了点，就没有理由按"当天过完"算。
+// 反过来，没写点的（核销期限至2026年10月15日）继续按 23:59:59 收尾。
+func TestExpiresAtHonoursAStatedClockTime(t *testing.T) {
+	east := time.FixedZone("CST", 8*3600)
+	published := time.Date(2026, 9, 19, 10, 0, 0, 0, east)
+	cases := []struct {
+		text, want string
+	}{
+		{"社区里有人晒单，试用活动截止到9月20日凌晨5:40，我翻了好久论坛", "2026-09-20 05:40"},
+		{"本期活动截至 2026 年 9 月 30 日 23:59:59（UTC+8）", "2026-09-30 23:59"},
+		{"限时免费开放至2026年8月31日18:00，之后恢复计价", "2026-08-31 18:00"},
+		{"核销期限至2026年10月15日，逾期作废", "2026-10-15 23:59"},
+	}
+	for _, c := range cases {
+		got := Default().ExpiresAt(c.text, published)
+		if got == nil {
+			t.Errorf("no deadline read from %q", c.text)
+			continue
+		}
+		if s := got.In(east).Format("2006-01-02 15:04"); s != c.want {
+			t.Errorf("%q -> %s, want %s", c.text, s, c.want)
+		}
+	}
+
+	// 逗号之后是另一句话："10:00 开抢"不能被借来当截止时刻。
+	borrowed := Default().ExpiresAt("本期券限时免费至9月25日，10:00 开抢，先到先得", published)
+	if borrowed == nil {
+		t.Fatal("the date itself must still be readable")
+	}
+	if s := borrowed.In(east).Format("2006-01-02 15:04"); s != "2026-09-25 23:59" {
+		t.Errorf("borrowed a clock from the next clause: %s", s)
 	}
 }
