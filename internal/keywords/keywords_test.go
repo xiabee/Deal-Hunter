@@ -276,6 +276,62 @@ func TestExpiresAtBuildsDeadlineInTheReadersZone(t *testing.T) {
 	}
 }
 
+// 「限时免费一周」是公告自己写明的时长，不是我们对日期的猜测：从今天起算一周就是
+// 下周一收尾。2026-09-21 生产日报第一条就是这个形状（93 分），库里既没有截止也不会
+// 到期提醒，三周后它还会挂在日报首位。
+//
+// 只有 限时/限免/为期 三个头部词才算，且句中出现任何具体日期时一律让路 —— 那句里的
+// 日期永远比时长准（"限免两周至9月10日" 若按两周推，会把 9 月 10 日说成 9 月 4 日）。
+func TestExpiresAtReadsAStatedDuration(t *testing.T) {
+	east := time.FixedZone("CST", 8*3600)
+	anchor := time.Date(2026, 9, 21, 9, 0, 0, 0, east)
+
+	accept := []struct {
+		text, want string
+	}{
+		{"Qwen3.8-Flash 限时免费一周", "2026-09-28 23:59"},
+		{"Hy4 preview 发布，WorkBuddy 限时两周", "2026-10-05 23:59"},
+		{"新模型上线，限免 3 天", "2026-09-24 23:59"},
+		{"DeepSeek V4.1-Flash 登陆，为期两周", "2026-10-05 23:59"},
+		{"上线首发，限免12小时", "2026-09-21 21:00"},
+	}
+	for _, c := range accept {
+		got := Default().ExpiresAt(c.text, anchor)
+		if got == nil {
+			t.Errorf("no deadline read from %q", c.text)
+			continue
+		}
+		if v := got.In(east).Format("2006-01-02 15:04"); v != c.want {
+			t.Errorf("%q -> %s, want %s", c.text, v, c.want)
+		}
+	}
+
+	// 拒收表：这些句子讲的是别的东西的有效期，或者头部词与时长之间隔着别的字。
+	for _, text := range []string{
+		"我今天领上了gpt学生优惠，可以试用一个月",                       // 试用时长，不是活动窗口
+		"QQ音乐豪华绿钻3天会员卡——5张",                           // 卡本身的有效期
+		"WorkBuddy 双模型限免：Hy4 preview 两周 + Hy3 到 9 月底", // 头部与时长之间隔着别的字
+		"永久免费，不限时长",
+		"上线首发，限时三十天", // 认不出"三十"，也不能把它读成"十"
+	} {
+		if got := Default().ExpiresAt(text, anchor); got != nil {
+			t.Errorf("must not read a window out of %q, got %v", text, *got)
+		}
+	}
+
+	// 句里写了日期时，日期说了算：按周推会把 9 月 10 日推成 9 月 4 日。
+	if got := Default().ExpiresAt("新模型限免两周至9月10日", anchor); got != nil {
+		t.Errorf("a duration must not override a written date, got %v", *got)
+	}
+	early := time.Date(2026, 9, 1, 9, 0, 0, 0, east)
+	got := Default().ExpiresAt("本轮限免至9月10日，全程限免两周", early)
+	if got == nil || got.In(east).Format("2006-01-02") != "2026-09-10" {
+		t.Errorf("the stated 限免至 date should win: %v", got)
+	}
+}
+
+// "9月31日" 应该判为读不懂，而不是悄悄变成 10 月 1 日 —— 那会让一张早已结束的券
+// 在日报里多活一天。
 // ExpiresAt 与 StartsAt 同族，同样会被 time.Date 的进位骗过：核销期限写成
 // "9月31日" 应该判为读不懂，而不是悄悄变成 10 月 1 日 —— 那会让一张早已结束的券
 // 在日报里多活一天。

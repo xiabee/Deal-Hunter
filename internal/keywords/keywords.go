@@ -413,7 +413,73 @@ func (d *Dict) ExpiresAt(text string, anchor time.Time) *time.Time {
 			}
 		}
 	}
+	// A window stated as a duration is the announcement talking about its own end:
+	// 限时免费一周 says "a week from now" without naming a date. Only 限时/限免/为期 head
+	// a promo window - 试用一个月 is the length of a trial and 3天会员卡 the validity of the
+	// card, neither of which says when the offer stops being claimable. Any date written
+	// in the same text outranks the arithmetic.
+	if t, ok := statedDurationEnd(text, loc, anchor); ok {
+		return &t
+	}
 	return nil
+}
+
+// statedDurationRe reads 限时两周 / 限免 3 天 / 为期两周. The bridge between the head and
+// the number may not contain a numeral, so 限时三十天 is refused rather than read as 十天.
+var statedDurationRe = regexp.MustCompile(
+	`(?:限时|限免|为期)[^0-9\n一二三四五六七八九十两]{0,4}?([一二两三四五六七八九十]|\d{1,2})\s*(小时|天|日|周|个月|月)`)
+
+// writtenDateRe names any calendar date in the text, with or without a year.
+var writtenDateRe = regexp.MustCompile(`\d{1,2}\s*月\s*\d{1,2}\s*[日号]|20\d{2}\s*[-/.年]\s*\d{1,2}`)
+
+var durationNumbers = map[string]int{
+	"一": 1, "两": 2, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
+}
+
+// statedDurationEnd turns a stated duration into the instant the offer stops being
+// current, counted from the finding's own date because that is when the clock starts.
+func statedDurationEnd(text string, loc *time.Location, anchor time.Time) (time.Time, bool) {
+	if anchor.IsZero() {
+		return time.Time{}, false
+	}
+	m := statedDurationRe.FindStringSubmatch(text)
+	if m == nil || writtenDateRe.MatchString(text) {
+		return time.Time{}, false
+	}
+	n, ok := durationNumbers[m[1]]
+	if !ok {
+		n, ok = 0, false
+		if v, err := strconv.Atoi(m[1]); err == nil {
+			n, ok = v, true
+		}
+	}
+	if !ok || n < 1 {
+		return time.Time{}, false
+	}
+	switch m[2] {
+	case "小时":
+		if n > 72 {
+			return time.Time{}, false
+		}
+		t := anchor.Add(time.Duration(n) * time.Hour)
+		return t, true
+	case "周":
+		n *= 7
+	}
+	if n > 366 {
+		return time.Time{}, false
+	}
+	// A day-counted window ends at the last second of that day, the same way an
+	// announced date without an hour does.
+	d := anchor.AddDate(0, 0, n)
+	if m[2] == "个月" || m[2] == "月" {
+		d = anchor.AddDate(0, n, 0)
+	}
+	t := time.Date(d.Year(), d.Month(), d.Day(), 23, 59, 59, 0, loc)
+	if t.Day() != d.Day() || t.Month() != d.Month() {
+		return time.Time{}, false
+	}
+	return t, true
 }
 
 // clockAfter reads an optional "下午6:00" / "5:40" / "24:00" that follows a date.
