@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -1261,6 +1262,73 @@ func TestDueEventsOrderOpeningBeforeLaterDeadline(t *testing.T) {
 	// 第三行等下一轮：没发出去就不该留下"已提醒"的标记。
 	if _, reminded := app.stateTime(eventRemindedPrefix + "later"); reminded {
 		t.Error("a row that never left must not be marked as reminded")
+	}
+}
+
+// 一条卡带不下的行不是丢掉：没发出去就不写标记，下一轮再发，当天的第二张卡用满
+// max_per_day 之后才作罢。2026-09-30 生产就是这个形状（同一时刻 4 条到期，
+// 而 max_items 3、max_per_day 2），而上面那条测试从没跑过第二轮 —— 这里把"等下一轮"
+// 从评论变成断言。
+func TestEventOverflowIsCarriedByTheNextRound(t *testing.T) {
+	empty := []byte(`<?xml version="1.0"?><rss version="2.0"><channel><title>t</title><item>
+<title>本周行业新闻汇总</title><link>https://nc.test/news/1</link>
+<description>技术动态与产品发布，不涉及价格。</description>
+<pubDate>` + time.Now().Add(-time.Hour).Format(time.RFC1123Z) + `</pubDate>
+</item></channel></rss>`)
+	f := &cannedFetcher{byURL: map[string][]byte{feedURL: empty}}
+	spy := &spyNotifier{}
+	app := testApp(t, f, spy, func(c *config.Config) {
+		c.Timezone = "Asia/Shanghai"
+		c.Notify.Event.MinScore = 50
+		c.Notify.Event.ExpiryLead = config.Duration(3 * time.Hour)
+		c.Notify.Event.MaxItems = 3
+		c.Notify.Event.MaxPerDay = 2
+	})
+	due := time.Now().Add(2 * time.Hour).Format(time.RFC3339)
+	for i := 0; i < 7; i++ {
+		d := &model.Deal{Fingerprint: fmt.Sprintf("e%d", i), Title: fmt.Sprintf("同日截止的券 %d", i),
+			URL: "https://nc.test/e" + fmt.Sprint(i), Score: 78, IsFree: true,
+			Category: model.CatVoucher, Offers: []model.Offer{{Kind: model.KindFree}},
+			PublishedAt: time.Now().Add(-time.Hour), DiscoveredAt: time.Now().Add(-time.Hour),
+			Meta: map[string]string{"expires_at": due}}
+		if err := app.st.Save(d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var sent []int
+	for round := 0; round < 3; round++ {
+		if _, err := app.RunOnce(context.Background(), "unit"); err != nil {
+			t.Fatalf("round %d: %v", round, err)
+		}
+		msgs := spy.byKind(notify.KindEvent)
+		sent = append(sent, len(msgs[len(msgs)-1].Deals))
+	}
+
+	msgs := spy.byKind(notify.KindEvent)
+	if len(msgs) != 2 {
+		t.Fatalf("max_per_day 2 must cap the day at two cards, got %d (%v)", len(msgs), sent)
+	}
+	if sent[0] != 3 || sent[1] != 3 {
+		t.Errorf("each card should carry max_items rows, the rest waits for the next round: %v", sent)
+	}
+	marked := 0
+	for i := 0; i < 7; i++ {
+		if _, ok := app.stateTime(eventRemindedPrefix + fmt.Sprintf("e%d", i)); ok {
+			marked++
+		}
+	}
+	if marked != 6 {
+		t.Errorf("six delivered rows must be marked, the seventh must not: %d", marked)
+	}
+	// 第 7 条留给运维的可见信号：它还在跟踪列表里，状态是"窗口内待提醒"，不是消失。
+	var waiting bool
+	for _, it := range app.UpcomingEvents(time.Now()) {
+		if !it.Reminded && it.InWindow {
+			waiting = true
+		}
+	}
+	if !waiting {
+		t.Error("the row the budget could not carry must still show as waiting inside its window")
 	}
 }
 
