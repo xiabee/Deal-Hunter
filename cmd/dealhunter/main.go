@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -572,6 +573,8 @@ func cmdDoctor(ctx context.Context, cfg *config.Config, log *slog.Logger, stdout
 	} else {
 		stats := st.Stats()
 		add("store", "ok", fmt.Sprintf("已见 %d · 已推送 %d · 游标 %d · %d KB", stats.DealsSeen, stats.PushedSeen, stats.StateKeys, stats.DirSizeKB))
+		cStat, cDetail := compactionState(st)
+		add("compaction", cStat, cDetail)
 		st.Close()
 	}
 
@@ -866,6 +869,30 @@ func locOf(cfg *config.Config) *time.Location {
 }
 
 // humanDelta renders a lead time like "3小时30分" without pretending precision.
+// compactionState reports when the store was last compacted. The scheduled trigger is
+// an in-process round counter (every 48 rounds, and no more than once every 7 days), so
+// a host that gets redeployed daily resets it before it fires and never compacts at all
+// - which is why this is its own check rather than a line inside "store".
+func compactionState(st *store.Store) (string, string) {
+	b, ok := st.GetState("maint:last_compact")
+	if !ok {
+		return "warn", "从未压缩过（排程是连续 48 轮且距上次 7 天，重启会清零）；手动：deal-hunter compact"
+	}
+	var s string
+	if json.Unmarshal(b, &s) != nil {
+		return "warn", "maint:last_compact 读不出"
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return "warn", "maint:last_compact 不是时刻: " + truncate(s, 24)
+	}
+	age := time.Since(t)
+	if age > 8*24*time.Hour {
+		return "warn", "上次压缩已是 " + humanDelta(age) + "前，超过 7 天的排程"
+	}
+	return "ok", "上次压缩 " + humanDelta(age) + "前"
+}
+
 func humanDelta(d time.Duration) string {
 	switch {
 	case d < 0:

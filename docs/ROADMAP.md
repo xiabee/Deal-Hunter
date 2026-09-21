@@ -110,7 +110,17 @@
 - **插队门槛 90 分只有一个真实样本**：2026-09-21 14:19 `Qwen3.8-Flash 限时免费一周` 打出 93 分并
   真实投出（见 STATUS 第 4 条），落在预测的 87–97 带内。但一个样本不足以判断"门槛是不是太高/太低"，
   也没验证过同一天第二条高分被 `held` 的行为。**别再把它当未验证的估值，也别当已定案的阈值。**
-- **`state.json` 里会残留 `digest:last_sent`**：盘点通道已删，旧键没人读也没人清理；`Compact` 只重写 `deals.jsonl`。
+- **排程压缩在频繁部署的机器上等于没有**：`scheduler` 每 48 轮触发一次 `Compact`，而轮次是
+  **进程内计数**——30 分钟一轮意味着要"连续 24 小时不重启"才凑得满，任何一次部署都把它清零。
+  2026-09-21 生产跑了一整天、部署六次，`maint:last_compact` 这个键**至今不存在**。
+  `dealhunter doctor` 现在单独报这一行（warn 而不是被"有排程"糊过去）。要不要真的定时，
+  是运维决定：加一条 systemd timer 跑 `deal-hunter compact` 最直接，但它会删数据
+  （60 天前且分数<60 或已推送的行），所以本项目不擅自启用。
+- **`Compact` 顺带清掉跟随行而死的缓存键**：`official:deal:<fp>` 只在读的时候判 7 天 TTL，
+  键本身从不删；行被压缩掉之后那个键再没人读得到，而 `state.json` 每次写入都是整体重写。
+  现在压缩会把"所属行已经不在了"的判定键和退役的 `digest:*` 一起删掉；
+  `official:verify:<url>` 跨行共享，保留。
+
 - **升级后旧配置里的废弃键不报错也不生效**（`notify.digest`、`notify.feishu.{min_score,max_per_run,silent_hours}`、`filter.min_score`），`install.sh` 会打一行提示。
 
 ## Technical Debt

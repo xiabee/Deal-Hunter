@@ -449,7 +449,8 @@ func (s *Store) flushStateLocked() error {
 	return nil
 }
 
-// Compact rewrites the log keeping one row per fingerprint, newest first.
+// Compact rewrites the log keeping one row per fingerprint, newest first, and drops
+// the state keys that only the removed rows could have referenced.
 func (s *Store) Compact(keepDays int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -502,8 +503,31 @@ func (s *Store) Compact(keepDays int) error {
 		return fmt.Errorf("store: rename compact: %w", err)
 	}
 	s.seen = map[string]time.Time{}
+	keptFP := make(map[string]bool, len(kept))
 	for _, d := range kept {
 		s.seen[d.Fingerprint] = d.DiscoveredAt
+		keptFP[d.Fingerprint] = true
+	}
+	// A cached vendor-entry verdict belongs to the row it was looked up for: once
+	// that row leaves the log, nothing can ever read the key again (it is keyed by
+	// fingerprint), and state.json is rewritten whole on every write. The retired
+	// 盘点通道 keys have no reader at all.
+	var drop []string
+	for k := range s.state {
+		switch {
+		case strings.HasPrefix(k, "digest:"):
+			drop = append(drop, k)
+		case strings.HasPrefix(k, "official:deal:"):
+			if !keptFP[k[len("official:deal:"):]] {
+				drop = append(drop, k)
+			}
+		}
+	}
+	for _, k := range drop {
+		delete(s.state, k)
+	}
+	if err := s.flushStateLocked(); err != nil {
+		return err
 	}
 	l, err := os.OpenFile(filepath.Join(s.dir, "deals.jsonl"), os.O_APPEND|os.O_WRONLY, 0o640)
 	if err != nil {

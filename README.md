@@ -502,7 +502,7 @@ dealhunter [全局参数] <命令>
   notify-test   全通道链路自检
   doctor        配置/密钥/目录/外连 体检
   secretscan    敏感信息与内网拓扑扫描（发布门禁）
-  compact       压缩历史库
+  compact       压缩历史库（同时清掉"所属行已不在"的官方入口判定键）
   reparse       用当前解析器重读已入库行的开抢/截止时刻（默认只报告，-write 落盘）
 ```
 

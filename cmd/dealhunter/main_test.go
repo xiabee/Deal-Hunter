@@ -296,6 +296,57 @@ func TestReparseNeverErasesAStatedDeadline(t *testing.T) {
 	}
 }
 
+// compactionMarker returns the 结果 column of the compaction row (! warn, ✓ ok, x fail).
+func compactionMarker(t *testing.T, out string) string {
+	t.Helper()
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "compaction") {
+			return strings.Fields(line)[0]
+		}
+	}
+	t.Fatalf("no compaction row in:\n%s", out)
+	return ""
+}
+
+// 排程里的"每 48 轮"是进程内计数，天天部署的机器上永远凑不满，所以压缩这件事必须单独
+// 报一行，不能因为"代码里有排程"就当作在跑。
+func TestDoctorReportsCompactionRecency(t *testing.T) {
+	dir := t.TempDir()
+	code, out := run(t, "-data", dir, "doctor")
+	if code != 0 {
+		t.Fatalf("doctor: code=%d out=%s", code, out)
+	}
+	if got := compactionMarker(t, out); got != "!" {
+		t.Errorf("a store that never compacted should warn, marker = %q", got)
+	}
+	if !strings.Contains(out, "从未压缩") {
+		t.Errorf("and say so:\n%s", out)
+	}
+
+	stale := time.Now().UTC().AddDate(0, 0, -51).Format(time.RFC3339)
+	if err := os.WriteFile(filepath.Join(dir, "state.json"),
+		[]byte(`{"maint:last_compact":"`+stale+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, out = run(t, "-data", dir, "doctor")
+	if got := compactionMarker(t, out); got != "!" {
+		t.Errorf("a 51-day-old compaction should warn, marker = %q", got)
+	}
+	if !strings.Contains(out, "超过 7 天的排程") {
+		t.Errorf("and name the schedule it missed:\n%s", out)
+	}
+
+	fresh := time.Now().UTC().AddDate(0, 0, -2).Format(time.RFC3339)
+	if err := os.WriteFile(filepath.Join(dir, "state.json"),
+		[]byte(`{"maint:last_compact":"`+fresh+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, out = run(t, "-data", dir, "doctor")
+	if got := compactionMarker(t, out); got != "✓" {
+		t.Errorf("a recent compaction should pass, marker = %q\n%s", got, out)
+	}
+}
+
 // seed writes one JSONL row into a fresh data directory.
 func seed(t *testing.T, dir, line string) {
 	t.Helper()

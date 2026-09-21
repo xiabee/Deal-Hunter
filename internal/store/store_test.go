@@ -327,6 +327,74 @@ func TestCompactCollapsesAndKeepsLatest(t *testing.T) {
 	}
 }
 
+// 官方入口判定的缓存键按 fingerprint 存，读的时候判 7 天 TTL，却没人删：Compact 把行丢掉
+// 之后那些键成了孤儿，而 state.json 每写一次就整体重写一遍。生产 4 天攒了 64 个。
+func TestCompactDropsCacheKeysOfDroppedRows(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	old := deal("很久以前的低分发现", "https://example.com/old", 40)
+	old.DiscoveredAt = time.Now().UTC().AddDate(0, 0, -100)
+	fresh := deal("昨天的发现", "https://example.com/new", 80)
+	for _, d := range []*model.Deal{old, fresh} {
+		if err := s.Save(d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 盘点通道的旧键也是同样处境：没人读、没人清。
+	for k, v := range map[string]any{
+		"official:deal:" + old.Fingerprint:   map[string]string{"kind": "vendor_entry"},
+		"official:deal:" + fresh.Fingerprint: map[string]string{"kind": "third_party"},
+		"official:verify:https://x/pricing":  map[string]string{"kind": "ok"},
+		"digest:last_sent":                   time.Now().UTC().Format(time.RFC3339),
+		"search:cursor:search-ai-free-cn":    146,
+		"daily:last_sent":                    time.Now().UTC().Format(time.RFC3339),
+	} {
+		if err := s.PutState(k, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Compact(30); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+
+	if _, ok := s.GetState("official:deal:" + old.Fingerprint); ok {
+		t.Error("the verdict of a dropped row must go with it")
+	}
+	if _, ok := s.GetState("official:deal:" + fresh.Fingerprint); !ok {
+		t.Error("a verdict for a surviving row must stay")
+	}
+	if _, ok := s.GetState("official:verify:https://x/pricing"); !ok {
+		t.Error("verify results are shared across rows and outlive any single one")
+	}
+	if _, ok := s.GetState("digest:last_sent"); ok {
+		t.Error("the retired 盘点通道 key has no reader")
+	}
+	for _, k := range []string{"search:cursor:search-ai-free-cn", "daily:last_sent"} {
+		if _, ok := s.GetState(k); !ok {
+			t.Errorf("%s must survive compaction", k)
+		}
+	}
+
+	// 重开一次才算证明删除落到了盘上：只改内存的话上面每一条也会是绿的。
+	dir := s.Dir()
+	s.Close()
+	reopened, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if _, ok := reopened.GetState("official:deal:" + old.Fingerprint); ok {
+		t.Error("the pruned key came back after a reopen — the state file was not rewritten")
+	}
+	if _, ok := reopened.GetState("official:deal:" + fresh.Fingerprint); !ok {
+		t.Error("the surviving verdict must still be on disk")
+	}
+}
+
 func TestOpenRejectsEmptyDir(t *testing.T) {
 	if _, err := Open("   "); err == nil {
 		t.Fatal("expected an error for an empty dir")
