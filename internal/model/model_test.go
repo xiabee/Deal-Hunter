@@ -71,6 +71,10 @@ func TestClaimableSeparatesOffersFromOpinions(t *testing.T) {
 		"阿里云 Qwen3.8-Max 新品发布 限时 5 折",
 		"OpenAI 开放 ChatGPT for Microsoft Word，免费用户可用",
 		"新用户赠送 100 万 tokens 额度",
+		// 「申**请教**程」是"申请"+"教程"，不是"请教"：这两个标题是生产日报里
+		// 真实可领的条目，被子串误伤过一次。
+		"2026年IDEA、PyCharm等专业版学生免费申请教育许可证",
+		"ModelScope（魔搭）免费大模型 API 额度申请教程：绑定手机号领取",
 	}
 	for _, title := range offers {
 		d := &Deal{Title: title, IsFree: true}
@@ -84,6 +88,12 @@ func TestClaimableSeparatesOffersFromOpinions(t *testing.T) {
 		"用着无力 也要吐槽一下glm5.3",
 		"某家的 glm 5.3 flash 也是符合夜间免费的吧",
 		"这个免费额度值不值",
+		// 2026-09-21 日报里真实混进来的：读者点开什么也领不到。
+		"最近在本地整了grok2api,好多东西不懂，求佬解答",
+		"请教推荐哪个plan套餐",
+		"精装修交付装修请教",
+		"求推荐网站的模板",
+		"帮我看看这个Team 空间的提示是什么意思",
 	}
 	for _, title := range notOffers {
 		d := &Deal{Title: title, IsFree: true}

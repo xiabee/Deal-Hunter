@@ -176,8 +176,10 @@ func DedupKey(title string) string {
 }
 
 // doubtAboutOffer names a question or a gripe about somebody else's pricing,
-// which is nothing the reader can claim this morning.
-var doubtAboutOffer = regexp.MustCompile(`吐槽|求助|是不是|有没有|该选|如何评价|值不值|翻车|失望`)
+// which is nothing the reader can claim this morning. 请教 is only a request when
+// it does not follow 申: "免费申请教育许可证" and "额度申请教程" are 申请+教程, the
+// single most common false positive this filter produced on real traffic.
+var doubtAboutOffer = regexp.MustCompile(`吐槽|求助|是不是|有没有|该选|如何评价|值不值|翻车|失望|求佬?解答|求指导|(^|[^申])请教|求推荐|帮我看看`)
 
 // endsInQuestion reports whether the title is phrased as a question or a guess.
 func endsInQuestion(title string) bool {
