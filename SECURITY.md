@@ -21,6 +21,7 @@ Deal-Hunter 是一个会**主动访问外部站点**并把结果**推送到你�
 |---|---|---|
 | 凭证泄漏进仓库 | 密钥只从 `DH_*` 环境变量读取；结构体字段是 `json:"-"`；CI 扫描全仓 | `TestSecretsCannotBeSmuggledThroughTheConfigFile`, `TestRepositoryIsOpenSourceClean` |
 | 凭证出现在日志/接口/错误里 | `internal/redact` 对 webhook token、`key: value`、query 参数脱敏；上游错误先脱敏再入库 | `TestNoCredentialEverLeavesTheProcess`, `Test*redact*` |
+| 凭证出现在体检输出里 | `doctor` 那一行只打**主机名**：路径与 query（里面就是 hook token）在打印前被截掉 | `TestDoctorPrintsOnlyTheHostOfAWebhook` |
 | 只读面板被暴露到公网 | `config.Validate()` 只允许回环 / `100.64/10` / `.ts.net` 绑定，公网需 `DH_ALLOW_PUBLIC_BIND=1` | `TestPublicBindIsRefused`, `TestLoopbackAndTailscaleBindsAreAllowed` |
 | 被恶意信息源诱导打内网（SSRF） | 出站解析后拦截回环/RFC1918/链路本地/云元数据；元数据地址即使放开内网也不放行 | `TestBlockedTargets`, `TestPrivateTargetsAllowedWhenConfigured` |
 | 摘要接口路径穿越 | 固定文件名 + `filepath.Abs` 前缀校验，越界返回 403 | `TestDigestServesMarkdownForOpenClaw` |

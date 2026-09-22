@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/xiabee/deal-hunter/internal/config"
 )
 
 func run(t *testing.T, args ...string) (int, string) {
@@ -383,9 +385,27 @@ func backupMarker(t *testing.T, out string) (string, string) {
 	return "", ""
 }
 
-// 压缩这件事必须单独报一行：排程曾经数的是**进程内**轮次（每 48 轮），天天部署的机器
-// 永远凑不满，而"代码里有排程"看起来一切正常。现在改成每轮检查、以盘上记号节流，
-// 这一行仍然要存在——它回答的是"上一次真剪过是什么时候"。
+// doctor 会把飞书目的地打在终端上 —— 那行只能是主机名。API 侧同一条承诺早就有测试
+// （httpapi 的 TestNoCredentialEverLeavesTheProcess），CLI 这一条一直没有：
+// 截断逻辑写在 doctor 里，改坏了没有任何门禁会发现。
+func TestDoctorPrintsOnlyTheHostOfAWebhook(t *testing.T) {
+	t.Setenv(config.EnvFeishuWebhook, "https://open.feishu.invalid/open-apis/bot/v2/hook/supersecrettoken1234567")
+	t.Setenv(config.EnvFeishuSecret, "TOPSECRETVALUE")
+	t.Setenv(config.EnvFeishuEnabled, "true")
+	code, out := run(t, "-data", t.TempDir(), "doctor", "-net=false")
+	if code != 0 {
+		t.Fatalf("doctor: code=%d out=%s", code, out)
+	}
+	if !strings.Contains(out, "open.feishu.invalid") {
+		t.Errorf("the host should be shown, that is the whole point of the row:\n%s", out)
+	}
+	for _, secret := range []string{"supersecrettoken1234567", "TOPSECRETVALUE", "/open-apis/bot/"} {
+		if strings.Contains(out, secret) {
+			t.Errorf("doctor leaked %q into its output:\n%s", secret, out)
+		}
+	}
+}
+
 // 解析器改进之后，历史行只有 reparse 会去读第二次 —— 而"该不该跑一次 reparse"
 // 这件事原本只能靠人记得。doctor 从此自己报漂移，且报的数必须与 reparse 的数一致。
 func TestDoctorReportsReparseDrift(t *testing.T) {
@@ -440,6 +460,9 @@ func TestDoctorReportsReparseDrift(t *testing.T) {
 	}
 }
 
+// 压缩这件事必须单独报一行：排程曾经数的是**进程内**轮次（每 48 轮），天天部署的机器
+// 永远凑不满，而"代码里有排程"看起来一切正常。现在改成每轮检查、以盘上记号节流，
+// 这一行仍然要存在——它回答的是"上一次真剪过是什么时候"。
 func TestDoctorReportsCompactionRecency(t *testing.T) {
 	dir := t.TempDir()
 	code, out := run(t, "-data", dir, "doctor", "-net=false")

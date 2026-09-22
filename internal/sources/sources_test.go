@@ -497,6 +497,41 @@ func TestSnapshotSeedsBaselineThenReportsOnlyNewFacts(t *testing.T) {
 	}
 }
 
+// mode=json 这条支路此前从没被测过（现有快照测试都走 html）：flattenJSON 把嵌套的
+// 价格字段拍平成 "path=value"，那是 API 型快照唯一的读法 —— 拍平错了就等于整个源失明。
+func TestSnapshotReadsFactsOutOfAJSONPayload(t *testing.T) {
+	cfg := config.Source{Name: "snapjson", Kind: config.KindSnapshot,
+		URL: "https://api.example.com/plans", Keywords: []string{"免费", "折"},
+		Params: map[string]string{"mode": "json"}}
+	state := newFakeState()
+	// 值本身要够长（≥8 字），否则"去掉路径"这种改动会先被长度闸门挡掉，
+	// 红在别处而不是红在"路径前缀"这条主张上 —— 那样这条断言等于没测。
+	base := `{"meta":{"total":1},"data":{"plans":[{"name":"Pro","per_month":"¥0 首月免费领一周","seats":2}]}}`
+
+	seed := mustSource(t, Deps{Cfg: cfg, HTTP: &stubFetcher{body: []byte(base)}, State: state})
+	if deals, err := seed.Fetch(context.Background()); err != nil || len(deals) != 0 {
+		t.Fatalf("a first run only stores a baseline, deals=%d err=%v", len(deals), err)
+	}
+	if _, ok := state.GetState("snapshot:facts:snapjson"); !ok {
+		t.Fatal("baseline cursor missing")
+	}
+
+	changed := `{"meta":{"total":2},"data":{"plans":[{"name":"Pro","per_month":"¥0 首月免费领一周","seats":2},` +
+		`{"name":"Team","per_month":"三人以内长期免费","seats":5}]}}`
+	again := mustSource(t, Deps{Cfg: cfg, HTTP: &stubFetcher{body: []byte(changed)}, State: state})
+	deals, err := again.Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("changed payload: %v", err)
+	}
+	if len(deals) != 1 {
+		t.Fatalf("expected exactly the new fact, got %s", titles(deals))
+	}
+	// 路径前缀是这条支路的产物本身：没有它，两个同名字段就没法区分。
+	if !strings.Contains(deals[0].Title, "data.plans[1].per_month=") {
+		t.Errorf("fact should carry its JSON path: %q", deals[0].Title)
+	}
+}
+
 func TestSnapshotReportsErrorWhenPageHasNoPriceFacts(t *testing.T) {
 	cfg := config.Source{Name: "empty", Kind: config.KindSnapshot, URL: "https://www.example.com/plain"}
 	src := mustSource(t, Deps{Cfg: cfg, HTTP: &stubFetcher{body: []byte("<html><body><p>这里没有任何价格信息</p></body></html>")}})
@@ -629,6 +664,40 @@ func urlEscape(s string) string { return url.QueryEscape(s) }
 
 // 政府门户的通知公告行普遍写成 <a>标题</a><i class="time">2026-09-11</i>，而 </a>
 // 正好是段落边界，于是日期落进了下一段。没有发布日，正文里「9月21日10:00开抢」这类
+// class_contains 把抓取限定在页面里那一格的**附近**：focusOnClass 从每个命中处保留
+// 4000 字节的窗口。所以它挡掉的是窗口外的东西（页头页尾那些"免费"字样），而不是
+// "只留这一个元素"——测试钉的是前者，钉后者会把实现改成一个它没承诺过的样子。
+// 两行的标题都取 ≥10 字：短于 min_text_len 的行会被另一道闸门挡掉，那样这条测试
+// 就在测别的东西了（我第一次就踩了这个，"远那一行"凭空消失看起来像 focus 生效）。
+func TestHTMLClassFocusLimitsScrapingToThePromoGrid(t *testing.T) {
+	page := []byte(`<html><body>
+<div class="promo-grid"><a href="https://x.test/a">模型 A 限时免费一周</a></div>
+` + strings.Repeat("<p>普通新闻条目</p>", 200) + `
+<div class="site-map"><a href="https://x.test/z">模型 Z 长期免费领一周</a></div>
+</body></html>`)
+	fetch := func(params map[string]string) string {
+		t.Helper()
+		cfg := config.Source{Name: "focus", Kind: config.KindHTML,
+			URL: "https://x.test/promos", Keywords: []string{"免费"}, Params: params}
+		deals, err := mustSource(t, Deps{Cfg: cfg, HTTP: &stubFetcher{body: page}}).Fetch(context.Background())
+		if err != nil {
+			t.Fatalf("Fetch: %v", err)
+		}
+		return titles(deals)
+	}
+
+	if all := fetch(nil); !strings.Contains(all, "模型 A") || !strings.Contains(all, "模型 Z") {
+		t.Fatalf("without the focus both rows are candidates:\n%s", all)
+	}
+	only := fetch(map[string]string{"class_contains": "promo-grid"})
+	if !strings.Contains(only, "模型 A") {
+		t.Errorf("the row inside the focused window must survive: %s", only)
+	}
+	if strings.Contains(only, "模型 Z") {
+		t.Errorf("the row ~5KB past the grid is outside the 4000-byte window; the focus is not filtering: %s", only)
+	}
+}
+
 // 不写年份的时刻就没有推断锚点，所以日期段必须挂回前一条。
 func TestHTMLListRowDateAttachesToPreviousItem(t *testing.T) {
 	list := []byte(`<html><body><ul>

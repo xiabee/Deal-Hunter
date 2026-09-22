@@ -211,19 +211,6 @@ func (d *Deal) Claimable() bool {
 	return false
 }
 
-// Kinds lists the distinct offer kinds in the deal.
-func (d *Deal) Kinds() []Kind {
-	seen := map[Kind]bool{}
-	var out []Kind
-	for _, o := range d.Offers {
-		if !seen[o.Kind] {
-			seen[o.Kind] = true
-			out = append(out, o.Kind)
-		}
-	}
-	return out
-}
-
 // SortOffersAndTags normalizes slice order so identical deals serialize the same.
 func (d *Deal) SortOffersAndTags() {
 	sort.SliceStable(d.Offers, func(i, j int) bool {

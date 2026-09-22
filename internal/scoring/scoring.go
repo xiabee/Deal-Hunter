@@ -200,8 +200,6 @@ func Evaluate(in Input, dict *keywords.Dict) Result {
 	return res
 }
 
-func discountPct(pct int) int { return pct }
-
 func discountBonus(pct int) int {
 	switch {
 	case pct >= 50:

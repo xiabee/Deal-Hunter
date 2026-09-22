@@ -108,18 +108,6 @@ func URLLooksUsable(raw string) bool {
 		(err == nil && port != "" && (host == "127.0.0.1" || host == "localhost"))
 }
 
-// WebhookHost returns the destination host for status output; the token itself
-// is never logged.
-func (f *Feishu) WebhookHost() string {
-	if !f.Ready() {
-		return ""
-	}
-	if i := strings.Index(f.cfg.WebhookURL[8:], "/"); i > 0 {
-		return f.cfg.WebhookURL[:8+i]
-	}
-	return f.cfg.WebhookURL
-}
-
 // CardTemplate picks the header colour from the deal's shape.
 func CardTemplate(m Message) string {
 	switch m.Kind {
@@ -472,11 +460,4 @@ func (f *Feishu) post(ctx context.Context, endpoint, bearer string, body []byte)
 		return &resp, fmt.Errorf("feishu: code=0 but no message id (HTTP %d)", raw.StatusCode)
 	}
 	return &resp, nil
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

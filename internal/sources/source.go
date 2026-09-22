@@ -185,28 +185,6 @@ func (b base) want(text string) bool {
 	return false
 }
 
-// IsOfficial reports whether a result URL belongs to a vendor's own domain,
-// which is a strong trust signal for scoring.
-func (b base) IsOfficial(resultURL string) bool {
-	if len(b.Cfg.Sites) == 0 {
-		return false
-	}
-	h := hostOf(resultURL)
-	if h == "" {
-		h = hostOf(b.Cfg.URL)
-	}
-	for _, s := range b.Cfg.Sites {
-		s = strings.ToLower(strings.TrimSpace(s))
-		if s != "" && (h == s || strings.HasSuffix(h, "."+s)) {
-			return true
-		}
-	}
-	return false
-}
-
-// OfficialHosts exposes the vendor domain check to the pipeline.
-func OfficialHosts(cfg config.Source) []string { return cfg.Sites }
-
 // IsOfficialURL reports whether u lives on one of sites (exact or subdomain).
 func IsOfficialURL(u string, sites []string) bool {
 	h := hostOf(u)

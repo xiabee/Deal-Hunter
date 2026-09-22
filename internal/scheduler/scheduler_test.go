@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -72,16 +74,37 @@ func logLines(t *testing.T, app *pipeline.App) string {
 	return string(b)
 }
 
+// markerOnDisk tolerates a failed read: the store replaces state.json by
+// rename, and on Windows a poll that lands inside that window gets a sharing
+// violation. That is "not yet", not "broken" - and it must not be fatal, or the
+// test's own instrument is what fails.
 func markerOnDisk(t *testing.T, app *pipeline.App) bool {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join(app.Store().Dir(), "state.json"))
 	if err != nil {
-		if os.IsNotExist(err) {
-			return false
-		}
-		t.Fatalf("read state: %v", err)
+		return false
 	}
 	return strings.Contains(string(b), store.StateLastCompact)
+}
+
+// syncBuf keeps the loop's own log so a failure can say *why*: compact() reports a
+// failed sweep as a warning and returns, and without these lines the only evidence
+// left is "the rows moved but no marker appeared".
+type syncBuf struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuf) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuf) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 func setMarker(t *testing.T, app *pipeline.App, at time.Time) {
@@ -130,7 +153,8 @@ func TestSweepIsNotResetByARestart(t *testing.T) {
 	old := seed(t, app, 90, 30, "九十天前的低分条目")
 	cfg.Interval = config.Duration(24 * time.Hour) // 一轮之后就该一直卡在等待里
 
-	loop := &Loop{App: app, Cfg: cfg, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	var logs syncBuf
+	loop := &Loop{App: app, Cfg: cfg, Log: slog.New(slog.NewTextHandler(&logs, nil))}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
@@ -143,10 +167,12 @@ func TestSweepIsNotResetByARestart(t *testing.T) {
 		}
 		select {
 		case <-done:
-			t.Fatal("Run returned before the first sweep happened")
+			t.Fatalf("Run returned before the first sweep happened\nloop log:\n%s", logs.String())
 		case <-deadline:
-			t.Fatalf("no sweep within the first round after a start; "+
-				"the old row is still there: %v", strings.Contains(logLines(t, app), old.Fingerprint))
+			log, err := os.ReadFile(filepath.Join(app.Store().Dir(), "deals.jsonl"))
+			pruned := err != nil || !strings.Contains(string(log), old.Fingerprint)
+			t.Fatalf("no sweep marker within the first round; old row pruned=%v (read err: %v)\nloop log:\n%s",
+				pruned, err, logs.String())
 		case <-time.After(20 * time.Millisecond):
 		}
 	}

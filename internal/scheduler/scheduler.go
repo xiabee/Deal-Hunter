@@ -97,6 +97,12 @@ func (l *Loop) compact() {
 		l.Log.Warn("compact failed", "err", err)
 		return
 	}
-	_ = st.PutState(store.StateLastCompact, time.Now().UTC().Format(time.RFC3339))
+	// A marker that fails to land means the next round prunes again, and - worse
+	// for the operator - doctor keeps saying "never compacted" after a sweep that
+	// really happened. Say so instead of swallowing it.
+	if err := st.PutState(store.StateLastCompact, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		l.Log.Warn("compact marker not written", "err", err)
+		return
+	}
 	l.Log.Info("store compacted", "keep_days", compactKeepDays)
 }

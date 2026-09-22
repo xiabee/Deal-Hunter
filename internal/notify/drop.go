@@ -37,9 +37,6 @@ func NewFileDrop(dir, prefix string) (*FileDrop, error) {
 // Name implements Notifier.
 func (f *FileDrop) Name() string { return "openclaw-drop" }
 
-// Dir reports where files land.
-func (f *FileDrop) Dir() string { return f.dir }
-
 // Send writes latest.md, latest.json and an append-only daily log.
 func (f *FileDrop) Send(_ context.Context, m Message) error {
 	md := renderMarkdown(m)
