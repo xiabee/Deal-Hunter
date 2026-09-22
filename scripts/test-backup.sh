@@ -50,6 +50,14 @@ printf '%s' '{"sources":[],"server":{"enabled":false,"bind":"127.0.0.1:0"}}' > "
 printf '%s\n' 'DH_FEISHU_WEBHOOK=placeholder-for-the-backup-drill' 'DH_DATA_DIR=/var/lib/deal-hunter' > "$ETC/deal-hunter.env"
 chmod 600 "$ETC/deal-hunter.env"
 
+# From here on, a failing command is a *result*, not a reason to stop: every leg
+# reports through ok/bad and the exit code comes from the counter at the bottom.
+# With `set -e` (plus pipefail) any `x=$(ls pattern-that-matches-nothing | wc -l)`
+# aborts the whole drill - precisely in the case the counting leg exists to catch,
+# so a product regression would report fewer reds, not more. The fixture above still
+# runs under -e: a half-built sandbox should not produce twenty bogus failures.
+set +e
+
 echo "▸ backup.sh 在假根 $ROOT 下能跑完"
 out=$(DH_BACKUP_ROOT="$ROOT" DH_BACKUP_KEEP=2 bash deploy/backup.sh 2>&1) || { bad "第一次备份就失败：$out"; echo "$out"; exit 1; }
 grep -q "归档可解开" <<<"$out" && ok "自校验通过（解得开、config.json 在位）" || bad "没有报可解开：$out"
@@ -143,6 +151,52 @@ n_surv=$(ls -1 "$bdir"/deal-hunter-*.tar.gz 2>/dev/null | wc -l | tr -d ' ')
 ( cd "$bdir" && sha256sum --quiet --check "$(basename "$survivor").sha256" ) \
 	&& ok "活下来的那份校验得过（是刚做的备份，不是诱饵）" \
 	|| bad "活下来的那份校验不过——留下的可能是诱饵"
+
+echo "▸ 另存一份到别处（DH_BACKUP_PUSH），以及它失败时该留下什么"
+# Production has never set DH_BACKUP_PUSH, so this branch had never been executed
+# anywhere - while it is exactly the leg that would protect the backups from the disk
+# they currently share with the service.
+offsite="$ROOT/offsite"
+mkdir -p "$offsite"
+sleep 1.2
+rc=0
+out=$(DH_BACKUP_ROOT="$ROOT" DH_BACKUP_KEEP=1 DH_BACKUP_PUSH="$offsite" bash deploy/backup.sh 2>&1) || rc=$?
+(( rc == 0 )) && ok "带 PUSH 的备份跑完了" || bad "带 PUSH 的备份失败（rc=$rc）：$out"
+grep -q '已另存一份' <<<"$out" && ok "报出了另存这一步" || bad "没有另存的记录：$out"
+[[ $(ls -1 "$offsite" 2>/dev/null | wc -l | tr -d ' ') == "2" ]] \
+	&& ok "归档与校验和都到了另一处（2 个文件）" || bad "另存目录里有 $(ls -1 "$offsite" 2>/dev/null | wc -l | tr -d ' ') 个文件，应为 2"
+pushed=$(ls -1 "$offsite"/deal-hunter-*.tar.gz 2>/dev/null | head -1)
+[[ -n $pushed ]] && ( cd "$offsite" && sha256sum --quiet --check "$(basename "$pushed").sha256" ) \
+	&& ok "另存那份的校验和自洽" || bad "另存那份校验不过"
+# 只数文件数会放过"推了一个空壳过去"，所以拿字节比。
+[[ -n $pushed && -f $bdir/$(basename "$pushed") ]] && cmp -s "$pushed" "$bdir/$(basename "$pushed")" \
+	&& ok "另存与本地是同一份字节" || bad "两份内容不同（或缺了本地那份）"
+
+# `out=$(...) || rc=$?` because `set -e` would otherwise end the drill here, and the
+# status has to come from backup.sh rather than from the assignment succeeding.
+before=$(ls -1 "$bdir"/deal-hunter-*.tar.gz | wc -l | tr -d ' ')
+stamp_before=$(cat "$STATE/backup.stamp")
+sleep 1.2
+rc=0
+out=$(DH_BACKUP_ROOT="$ROOT" DH_BACKUP_KEEP=1 DH_BACKUP_PUSH="$ROOT/no-such-place" bash deploy/backup.sh 2>&1) || rc=$?
+(( rc != 0 )) && ok "推送到不存在的目标时整轮以非零退出（定时器会留下失败记录）" \
+	|| bad "推送没成功却报了 0"
+grep -q '推送到' <<<"$out" && ok "点名叫出是推送这一步失败" || bad "没有说明失败原因：$out"
+# A round that dies at the push still leaves its own archive behind (rotation happens
+# after the push), so what must hold is "nothing was lost", not "the count is frozen".
+# The stronger claim is the one the sweep leans on: the archive backup.stamp names has
+# to still be on disk.
+n_after=$(ls -1 "$bdir"/deal-hunter-*.tar.gz | wc -l | tr -d ' ')
+(( n_after >= before )) && ok "本机一份都没少（$before → $n_after，失败那轮只会多不会丢）" \
+	|| bad "跨机失败把本地的也带坏了（$before → $n_after）"
+named=$(awk '{print $2}' "$STATE/backup.stamp")
+[[ -n $named && -f "$bdir/$named" ]] \
+	&& ok "记号指的那份归档仍在盘上（$named）" || bad "backup.stamp 指着一个不存在的归档：「$named」"
+# The stamp is the last thing a run writes, so a round that failed halfway must not
+# leave "success" behind - the sweep reads it as the reason it is allowed to delete.
+[[ $(cat "$STATE/backup.stamp") == "$stamp_before" ]] \
+	&& ok "失败那一轮没有改写 backup.stamp（排程仍认上一次完整成功的时刻）" \
+	|| bad "失败的一轮把记号也刷了：$(cat "$STATE/backup.stamp")"
 
 echo
 
