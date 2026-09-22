@@ -3,71 +3,21 @@
 > 给下一次会话用的恢复点。只写有证据的结论：VERIFIED / NOT VERIFIED / BLOCKED / NOT APPLICABLE。
 > 长期方向看 [ROADMAP.md](ROADMAP.md)，用法看 [../README.md](../README.md)。
 
-最近更新：2026-09-20（M5 到期前提醒 + 面板日间模式做完；生产仍为 `3db4152`，待部署这一版）
+最近更新：2026-09-22。**生产跑的是哪个提交、怎么核**见下面「Current Version」——那里只给命令，
+不给抄下来的哈希，因为抄下来的哈希每隔几个部署就是错的（这一篇就过期过一次）。
 
-## Current Milestone
+## 现在在等什么
 
-**M5 · 到期前提醒（复用 M3 的事件通道）** —— 用户批准的形态：不新增第四类消息，同一张 ⏰ 卡
-既报"要开抢"也报"要作废"，两个钟共用 `event:reminded:<fp>` 与 `event:sent` 预算。
-落点：`Store.Expiring`、`notify.event.expiry_lead`（默认 3h，`0s` 只关到期侧）、
-`status.event` 拆出 `due_opening` / `due_expiry`、`dealhunter events` 增"事由"列、
-doctor 报"到期前 3h0m0s"、面板 hint 分开显示两个数。顺带：面板加日间模式（默认跟随系统）。
+1. **三个已经排上日期的真实窗口**（M3/M5 那件挂起项第一次有了具体时刻，判据在「复核判据」）：
+   `09-27 23:59 截止`（93 分，到期窗口北京 20:59 起）、`09-30 23:59 截止`（三条同刻，
+   一张卡装不下会由下一轮补发）、`10-20 06:00 开抢`。
+2. **三件要人判的事**：清单/汇总类条目要不要继续进日报（量过：在效候选里 32 条）；备份要不要
+   跨机（`DH_BACKUP_PUSH`，现在与生产同一块盘）；面板日间模式的观感（结构有门禁盯着，好不好看没有工具能测）。
+3. 维护排程要不要自动化：`compact` 有排程但依赖"连续 48 轮不重启"，见 ROADMAP Known Risks。
 
-**M3 的挂起项没变，只是范围扩到两端**：真实"到时候收到且只收到一次"仍 NOT VERIFIED ——
-生产里此刻只有 1 行带时刻（一条 linux.do 的免费额度，开抢窗口已过），南昌仍没有临近开抢或
-截止的公告。判据见下面的「复核判据」。
-
-### 上一节：M3 · 本地消费券与开抢前提醒（设计见 [superpowers/specs/](superpowers/specs/)）
-
-代码与部署都已完成：`follow_detail` 与列表行日期、`starts_at` 解析、限时事件的日报在效口径分叉、
-事件提醒通道（配置 / 调度 / 三条渲染路径 / 状态字段 / 面板）、`dealhunter events` 复核命令、
-南昌两个官方信源经 `extra_sources` 上线。它的挂起项已由 M5 接上同一张卡。
-
-## Last Completed：M5 到期前提醒 + 面板日间模式（2026-09-20）
-
-**到期侧**：`Store.Expiring(from, through, min)`（与 `Upcoming` 同形状，键换 `expires_at`）；
-`dueEvents` 合并两个锚点、按"还有多久发生"排序、**同一行取更近的那个钟**，仍受
-`event:reminded:<fp>` 一次性约束，预算仍是 `event:sent`。到期只提醒**还没过去**的截止时刻
-（`from = now`），过期即静默。`expiry_lead=0s` 只关到期侧、不动开抢侧。
-
-四条守卫都做了变异复查（改回旧写法必红）：到期窗口内提醒一次、`max_items` 截断且第三行不留
-"已提醒"标记、标题带上"截止"字样、只有截止时刻的行也进 `events` 清单与面板 due 计数。
-`dealhunter events` 之前会把只有截止的行显示成"开抢时刻 01-01 08:05 / -2562048小时前"，
-现在按 `Moment` + `事由` 显示 —— 这就是加那条 CLI 测试的理由。
-
-**日间模式**：`index.html` 的配色全部走 `:root` 变量，新增 `[data-theme=light]` 一组覆盖；
-原先 7 处 `rgba(255,255,255,.0x)` 覆盖层与 4 处浅紫/浅青文字收进 `--glass/--glass2/--edge/
---sum/--tint-*`，否则在纸白底上直接看不见。切换按钮在顶栏，首屏顺序 `localStorage('dh-theme')`
-→ `prefers-color-scheme` → 暗色，判定写在 `<style>` 之前以免刷新闪白。
-门禁能测的是"浅色块重定义了 5 个核心变量 + 正文对底色对比度 ≥ WCAG AA 4.5:1 + 不留硬编码白覆盖层"；
-**好不好看没测也没有工具能测，需要人眼过一遍**。
-
-## Last Completed：M3 部署 + 真机观察（2026-09-20）
-
-生产机 `alienware-life` 装 `e849a0b`，17 源全部启用，`backends=[feishu openclaw-drop]`。
-观察一轮完整采集后的事实：
-
-- **商务局源** `nc-vouchers-swj`：`found=1 stored=0`。那一条是 4 月的《如何领取养老服务消费券》问答，
-  列表行日期解析正确（probe 打出 2026-04-29），随后被 14 天年龄闸门与 `event.min_score` 双重挡下——
-  "抓到但拒收"是设计行为。它的详情外链指向 `mp.weixin.qq.com`，取回 65 字，被
-  `html: detail body too thin to be the announcement` 正确拒收。
-- **市政府源** `nc-vouchers-zf`：`found=0`。同日 `curl` 直取该页 200 / 32KB / 123ms，
-  可见行标题全是"拟补贴对象公示""换新补贴明细""送达公告""备案批复"这类，**没有一条含券关键词**，
-  该源自带的 keyword/deny 闸门把它们全拒了是正确行为。`found` 统计的是过闸后的行数
-  （`pipeline.go:271` → `sources/source.go` 的 keyword/deny 判定），所以 0 不等于解析失效。
-- **事件通道**：`due_now=0 sent_today=0`；`dealhunter events` 报"没有在跟踪的限时事件"。
-- **不骚扰**：本轮 `event_sent=0 urgent_sent=0`；`kind=alert` 最后一次出现在 03:33（旧二进制），
-  03:46 部署后 0 次。日报 `sent_today=true`，`next_due=2026-09-21T09:00+08:00`。
-- **顺手清理**：删掉 15 个升级残留（`/opt/deal-hunter` 与 `/etc/deal-hunter` 各留最近 3 份备份 +
-  `config.json.bak-relay`），以及 `/tmp/dh-deploy-20260920-114649` 和探测临时文件。
-
-## 同日做完：截止时刻的时区（ROADMAP 候选 #5）
-
-`ExpiresAt` 之前按主机钟表（`time.Local`）摆"23:59:59"，而服务跑 UTC，于是北京的截止日在库里多活
-约 8 小时 —— 方向上宽容所以一直没被当 bug。现在与 `starts_at` 同规矩：截止日也按调用方给出的
-读者时区（`scoring.Input.ReaderZone`，原 `StartsIn` 改名，因为它的含义已覆盖两端）构造。
-**升级后的可观察变化**：到期日判定整体提前 8 小时，过期券不再出现在日报里（这是修正，不是回归）。
-本项已随 `3db4152` 部署到生产（全量门禁在 linux-ci 绿过之后带版本戳构建）。
+里程碑逐个做了什么、留下什么证据，都在 ROADMAP 的里程碑表（M0–M17）里；本文只写**当前状态、
+验证结论、下一次该接手什么**。原先这里抄了 2026-09-20 那几节的 M3/M5 叙述，已经删掉 ——
+它们当时就写着"生产仍为 `3db4152`"，而那是七个部署之前的事情。
 
 ## Verification
 
@@ -85,7 +35,7 @@ doctor 报"到期前 3h0m0s"、面板 hint 分开显示两个数。顺带：面�
 | 只读命令不再换掉状态文件所有者 | VERIFIED（生产实测） | 修复前后各跑一次 `sudo dealhunter events` + `doctor`：`state.json` 的所有者与 mtime 都不再变动（修复前它会变成 `root:root`，服务下次写状态即 permission denied 进入崩溃循环 —— 今晚真实发生并恢复过一次） |
 | 个人邮箱不再能溜进文件内容（M6） | VERIFIED | `internal/secretlint` 加 `consumer_mailbox`（`check-identity` 只看提交作者，正文里写死地址此前过得了所有闸）。两条夹具：命中即报（文档行与代码行各一）、同行 `secretlint:ignore` + 理由可豁免。变异复查过：把规则改名即"reported 0 findings"变红。**顺带证明门禁自身有效**：加规则的当场，`TestRepositoryIsOpenSourceClean` 就把我的假邮箱夹具拦下了，按既有惯例用带理由的标记放行 |
 | 时区修正的可观察效果 | NOT APPLICABLE（暂无对象） | 生产库 904 行带 `meta`，但 **`expires_at` / `starts_at` 均为 0 行** —— 至今没有任何一行真的解析出了时刻并落库（4 月那条在落库前就被拒）。所以这次修正在生产上暂无可比对的观测面，效果只由测试与两道变异守卫证明。第一条带时刻的行落库时要回头看一眼偏移是不是 `+08:00` |
-| 真机观察：券公告触发行为 | VERIFIED（观察本身） | 见上一节：两源一条正确拒收、一条今日无券关键词，事件通道 0 发 0 候补，无误发无骚扰 |
+| 真机观察：券公告触发行为 | VERIFIED（观察本身） | 南昌两源：商务局源那一条是 4 月的《如何领取养老服务消费券》问答，被 14 天年龄闸门与 `event.min_score` 双重挡下；市政府源当天 `found=0`，直取该页 200/32KB 可见行全是"拟补贴对象公示""换新补贴明细"这类，**没有一条含券关键词** —— 两种"抓到但拒收"都是设计行为。判据要记牢：**`found` 统计的是过闸后的行数，0 不等于解析失效**（这条后来被写进代码：`SourceReport.Parsed` 是闸门前的条数，健康度用它，不用 `Found`）。事件通道当时 0 发 0 候补，无误发无骚扰 |
 | **真实"到时候提醒"实地复核（开抢与到期两端）** | **NOT VERIFIED** | 今天南昌没有"写了明确时刻且临近开抢或截止"的市级公告；唯一在闸内的行是 4 月问答。省级在跑的（赣超 / 体育消费券 9-14 起、每人每周限领 2 张）用的是**周期性/无年份**措辞，M3 故意不猜。触发路径已由夹具与真实措辞两侧证明，等的只是一条现实公告 |
 | 到期前提醒（M5，夹具驱动） | VERIFIED | 窗口内（2h / lead 3h）恰好一次且跨轮不重发；还有 5 天与已过期 30 分钟都静默；`max_items=2` 截断后第三行不留标记；标题带"截止"；只有截止时刻的行进 `events` 清单与 `due_expiry` 计数。四条守卫逐个变异复查过（把实现改回旧写法即红） |
 | 起止区间写法的截止（生产真丢过一条） | VERIFIED | 部署 `378fd8d` 后 `dealhunter events` 打出生产第一条带时刻的行：`09-18 10:00 开抢 … 89 分 Qwen3.8-Flash`，而 `expires_at` 为空 —— 原文是「新加坡时间：2026年9月18日10:00至2026年9月30日23:59」，区间没有"截止"前置词，于是按 M3 口径整条掉出日报。加 `rangeEnd`（两个小正则：区间前后各须一个完整日期）后修复。端到端守卫 `TestBriefingKeepsADatedEventWrittenAsARange` 与单元守卫都做过变异复查：短路 `rangeEnd` 即"got 0 rows" |
@@ -283,10 +233,7 @@ config/deploy/dist）与 `/tmp/dh-wire-feishu.sh`（9-19，把服务接到租户
 - 生产 `/etc/deal-hunter/config.json` 已清理：删掉 digest 与 feishu 的废弃键，显式写入
   `daily` / `urgent` / `event`，南昌两源放在 `extra_sources`；`openclaw.{command,args}`
   （sudo 包装脚本）原样保留。废弃的 `DH_MIN_SCORE` 之类已从生产配置移除；env 密钥未动。
-- `notify.feishu.timezone` 现在只用于卡片页脚时间，与顶层 `timezone` 语义重叠。
+- 读者的钟只有顶层 `timezone` 一处（`notify.feishu.timezone` 字段已在 M8 删除；旧配置里留着它
+  也只是惰性废弃键，不影响运行）。写错时区在 `config.Validate()` 就拒绝，不再静默退回主机钟。
 - OpenClaw 的开关只有 JSON 里的 `notify.openclaw.enabled`，**没有** `DH_OPENCLAW_ENABLED` 环境变量。
 
-## Next Candidate
-
-ROADMAP 的 Next Candidates #1「到期前提醒」：与 M3 共用 `starts_at`、`Upcoming` 与事件调度，
-是 M3 机制的延长线，最省事。
