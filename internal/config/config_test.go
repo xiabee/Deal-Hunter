@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -534,6 +535,48 @@ func TestShippedConfigsOnlyUseRealKeys(t *testing.T) {
 		}
 		if err := cfg.Validate(); err != nil {
 			t.Errorf("%s would be refused by Validate: %v", name, err)
+		}
+	}
+}
+
+// 出厂 env 样例是运维照抄的那一份，两个方向都会骗人：代码里新增了一个 DH_*
+// 而样例没有，功能等于不存在；样例里留着一个代码不认的 DH_*，运维调了半天没反应
+// （DH_MIN_SCORE 就是这么被删掉的）。真来源是 config.go 里的常量，所以按它对表。
+func TestEnvExampleCoversExactlyTheDocumentedVariables(t *testing.T) {
+	code, err := os.ReadFile("config.go")
+	if err != nil {
+		t.Fatalf("read config.go: %v", err)
+	}
+	handled := map[string]bool{}
+	for _, m := range regexp.MustCompile(`"(DH_[A-Z_]+)"`).FindAllStringSubmatch(string(code), -1) {
+		handled[m[1]] = true
+	}
+	if len(handled) < 20 {
+		t.Fatalf("only %d DH_* constants read back from config.go, so this check would pass vacuously", len(handled))
+	}
+
+	example, err := os.ReadFile(filepath.Join("..", "..", "deploy", "deal-hunter.env.example"))
+	if err != nil {
+		t.Fatalf("read the env example: %v", err)
+	}
+	// 只有"赋值"（含注释掉的赋值）才算把开关交给了抄写的人。散文里的提及不算 ——
+	// DH_MIN_SCORE 就出现在"这个开关曾经没用、已删除"的说明里，那是历史，不是旋钮。
+	mentioned := map[string]bool{}
+	for _, m := range regexp.MustCompile(`(?m)^\s*#?\s*(DH_[A-Z_]+)=`).FindAllStringSubmatch(string(example), -1) {
+		mentioned[m[1]] = true
+	}
+	if len(mentioned) < 20 {
+		t.Fatalf("only %d DH_* assignments found in the env example", len(mentioned))
+	}
+
+	for name := range handled {
+		if !mentioned[name] {
+			t.Errorf("config.go 读 %s，但 deploy/deal-hunter.env.example 里找不到它 —— 运维无从知道这个开关存在", name)
+		}
+	}
+	for name := range mentioned {
+		if !handled[name] {
+			t.Errorf("env 样例提到 %s，但 config.go 已经不读它了 —— 照抄的人会调一个不起作用的开关", name)
 		}
 	}
 }
