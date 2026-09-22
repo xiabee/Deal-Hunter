@@ -383,8 +383,9 @@ func backupMarker(t *testing.T, out string) (string, string) {
 	return "", ""
 }
 
-// 排程里的"每 48 轮"是进程内计数，天天部署的机器上永远凑不满，所以压缩这件事必须单独
-// 报一行，不能因为"代码里有排程"就当作在跑。
+// 压缩这件事必须单独报一行：排程曾经数的是**进程内**轮次（每 48 轮），天天部署的机器
+// 永远凑不满，而"代码里有排程"看起来一切正常。现在改成每轮检查、以盘上记号节流，
+// 这一行仍然要存在——它回答的是"上一次真剪过是什么时候"。
 func TestDoctorReportsCompactionRecency(t *testing.T) {
 	dir := t.TempDir()
 	code, out := run(t, "-data", dir, "doctor", "-net=false")

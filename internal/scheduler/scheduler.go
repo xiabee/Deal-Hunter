@@ -21,18 +21,14 @@ type Loop struct {
 	SkipFirst bool
 }
 
-const (
-	compactEveryRounds = 48
-	compactKeepDays    = 60
-)
+const compactKeepDays = 60
 
 // Run blocks until ctx is cancelled, doing one round immediately unless
 // SkipFirst is set.
 func (l *Loop) Run(ctx context.Context) error {
-	rounds := 0
 	if !l.SkipFirst {
-		rounds++
 		l.round(ctx, "startup")
+		l.compact()
 	}
 	for {
 		delay := l.nextDelay()
@@ -47,11 +43,8 @@ func (l *Loop) Run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil
 		}
-		rounds++
 		l.round(ctx, "tick")
-		if rounds%compactEveryRounds == 0 {
-			l.compact()
-		}
+		l.compact()
 	}
 }
 
@@ -86,6 +79,10 @@ func (l *Loop) nextDelay() time.Duration {
 	return base + time.Duration(rand.Int63n(int64(j)))
 }
 
+// compact prunes the log at most once every seven days. The throttle is the
+// marker on disk, not a round count: a host that gets redeployed daily used to
+// reset the counter before it ever reached 48, so the log grew unbounded while
+// the schedule looked configured.
 func (l *Loop) compact() {
 	st := l.App.Store()
 	if b, ok := st.GetState(store.StateLastCompact); ok {

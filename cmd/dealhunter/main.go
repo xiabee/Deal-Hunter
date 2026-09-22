@@ -957,14 +957,14 @@ func backupFreshness(dataDir string) (string, string) {
 	return "ok", "上次成功备份 " + humanDelta(age) + "前" + archive
 }
 
-// compactionState reports when the store was last compacted. The scheduled trigger is
-// an in-process round counter (every 48 rounds, and no more than once every 7 days), so
-// a host that gets redeployed daily resets it before it fires and never compacts at all
-// - which is why this is its own check rather than a line inside "store".
+// compactionState reports when the store was last compacted. The scheduled trigger
+// checks every round and throttles on this marker (no more than once every 7 days),
+// so a redeploy cannot postpone the sweep forever - which is why this is its own
+// check rather than a line inside "store".
 func compactionState(st *store.Store) (string, string) {
 	b, ok := st.GetState(store.StateLastCompact)
 	if !ok {
-		return "warn", "从未压缩过（排程是连续 48 轮且距上次 7 天，重启会清零）；手动：deal-hunter compact"
+		return "warn", "从未压缩过（排程是每轮检查、距上次 ≥7 天才剪）；手动：deal-hunter compact"
 	}
 	var s string
 	if json.Unmarshal(b, &s) != nil {
