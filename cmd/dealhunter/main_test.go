@@ -5,8 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +25,97 @@ func run(t *testing.T, args ...string) (int, string) {
 	return code, buf.String()
 }
 
+// 同一件事写在三个地方：dispatch 表（真来源）、usage 文本、README 的命令清单。
+// 手抄的清单会绿着空转 —— 漏一个命令只有人翻 help 才发现。这里按真来源对表：
+// 从 AST 取 dispatch 的键，再要求 usage 与 README 各列出**同一批**名字，两个方向都查。
+func TestCommandListsAgreeWithTheDispatchTable(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	file, err := parser.ParseFile(token.NewFileSet(), "main.go", src, 0)
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+	var keys []string
+	ast.Inspect(file, func(n ast.Node) bool {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok || len(as.Lhs) != 1 {
+			return true
+		}
+		id, ok := as.Lhs[0].(*ast.Ident)
+		if !ok || id.Name != "dispatch" {
+			return true
+		}
+		lit, ok := as.Rhs[0].(*ast.CompositeLit)
+		if !ok {
+			t.Fatalf("dispatch is not a composite literal")
+		}
+		for _, el := range lit.Elts {
+			kv, ok := el.(*ast.KeyValueExpr)
+			if !ok {
+				continue
+			}
+			k, ok := kv.Key.(*ast.BasicLit)
+			if !ok {
+				continue
+			}
+			keys = append(keys, strings.Trim(k.Value, `"`))
+		}
+		return false
+	})
+	if len(keys) < 10 {
+		t.Fatalf("the dispatch table was not read back (got %d keys: %v)", len(keys), keys)
+	}
+
+	inList := func(text string) map[string]bool {
+		out := map[string]bool{}
+		for _, line := range strings.Split(text, "\n") {
+			m := regexp.MustCompile(`^  ([a-z][a-z-]{2,})\s{2,}[^ ]`).FindStringSubmatch(line)
+			if m != nil {
+				out[m[1]] = true
+			}
+		}
+		return out
+	}
+	usageList := inList(usage)
+
+	readme, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
+	if err != nil {
+		t.Fatalf("read README: %v", err)
+	}
+	readmeList := inList(string(readme))
+
+	for _, name := range keys {
+		if !usageList[name] {
+			t.Errorf("命令 %q 在 dispatch 表里，但 usage 没写它", name)
+		}
+		if !readmeList[name] {
+			t.Errorf("命令 %q 在 dispatch 表里，但 README 的命令清单没写它", name)
+		}
+	}
+	// 反方向：文档里不能有一个跑不通的名字。
+	for name := range usageList {
+		if !contains(keys, name) {
+			t.Errorf("usage documents %q, which is not a command", name)
+		}
+	}
+	for name := range readmeList {
+		if !contains(keys, name) {
+			t.Errorf("README documents %q, which is not a command", name)
+		}
+	}
+}
+
+func contains(hay []string, needle string) bool {
+	for _, h := range hay {
+		if h == needle {
+			return true
+		}
+	}
+	return false
+}
+
 func TestVersionAndHelp(t *testing.T) {
 	code, out := run(t, "version")
 	if code != 0 || !strings.Contains(out, "deal-hunter") {
@@ -29,12 +124,6 @@ func TestVersionAndHelp(t *testing.T) {
 	code, out = run(t, "help")
 	if code != 0 || !strings.Contains(out, "secretscan") {
 		t.Fatalf("help should document every command: code=%d", code)
-	}
-	// 这两条是后加的：漏在 help 里的命令不会被任何门禁发现，只能靠人记得查。
-	for _, want := range []string{"events", "reparse"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("help does not document %s", want)
-		}
 	}
 	code, out = run(t)
 	if code != 2 || !strings.Contains(out, "用法") {
