@@ -74,6 +74,99 @@ if ($LASTEXITCODE -ne 0 -or -not ($d -match '体检通过')) { Fail "doctor smok
 Write-Host "  doctor passed with no network probes"
 Remove-Item Env:DH_DATA_DIR
 
+# Mirror of the bash gate: every httpapi test drives the handler through httptest,
+# so nothing but this step runs Serve() - the bind, the enabled gate, the public-bind
+# rule and the -hold shutdown path. Native commands write stderr on purpose, which
+# Stop would turn into a terminating error, so the preference is lowered here only.
+Step "served panel: the real listener answers, then exits on its own"
+$serveDir = Join-Path ([System.IO.Path]::GetTempPath()) ("dh-serve-" + [guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Force -Path $serveDir | Out-Null
+$serveLog = Join-Path $serveDir "serve.log"
+$serveCfg = Join-Path $serveDir "config.json"
+$publicCfg = Join-Path $serveDir "public.json"
+Set-Content -LiteralPath $serveCfg -Value '{"sources":[],"server":{"enabled":true,"bind":"127.0.0.1:0"}}' -Encoding ascii
+Set-Content -LiteralPath $publicCfg -Value '{"sources":[],"server":{"enabled":true,"bind":"0.0.0.0:0"}}' -Encoding ascii
+$serveExe = Join-Path (Get-Location) "dist/dealhunter.exe"
+
+$ErrorActionPreference = "Continue"
+$env:DH_DATA_DIR = $serveDir
+$serveProc = Start-Process -FilePath $serveExe `
+    -ArgumentList @("-config", $serveCfg, "once", "-serve", "-hold", "20s") `
+    -RedirectStandardOutput $serveLog -RedirectStandardError (Join-Path $serveDir "serve.err") `
+    -PassThru -NoNewWindow -ErrorAction SilentlyContinue
+if (-not $serveProc) {
+    $ErrorActionPreference = "Stop"
+    Remove-Item -Recurse -Force $serveDir
+    Fail "could not start $serveExe (built yet? the build step writes dist/dealhunter.exe)"
+}
+$serveUrl = ""
+for ($try = 0; $try -lt 200; $try++) {
+    $hit = Select-String -Path $serveLog -Pattern 'url=http://127\.0\.0\.1:\d+' | Select-Object -First 1
+    if ($hit) { $serveUrl = $hit.Matches[0].Value.Substring(4); break }
+    if ($serveProc.HasExited) { break }
+    Start-Sleep -Milliseconds 100
+}
+if (-not $serveUrl) {
+    Get-Content $serveLog | Out-Host
+    Stop-Process -Id $serveProc.Id -Force -ErrorAction SilentlyContinue
+    $ErrorActionPreference = "Stop"
+    Remove-Item -Recurse -Force $serveDir
+    Fail "the panel never reported a listening URL"
+}
+Write-Host "  listening on $serveUrl"
+
+foreach ($path in @('/healthz', '/', '/api/v1/status', '/api/v1/sources')) {
+    $code = (& curl.exe -s -o NUL -w "%{http_code}" "$serveUrl$path")
+    if ($code -notmatch '^\d+$') { $ErrorActionPreference = "Stop"; Fail "GET $path returned no HTTP status at all" }
+    if ($code -ne "200") { $ErrorActionPreference = "Stop"; Fail "GET $path over the real listener = $code, want 200" }
+}
+Write-Host "  healthz, panel, status and sources all answered 200"
+
+$panelHtml = ((& curl.exe -sS "$serveUrl/") -join "`n")
+$themeHits = ([regex]::Matches($panelHtml, 'data-theme')).Count
+if ($themeHits -lt 1) { $ErrorActionPreference = "Stop"; Fail "the served panel lost its theme switch" }
+$statusJson = ((& curl.exe -sS "$serveUrl/api/v1/status") -join "")
+if ($statusJson -notmatch [regex]::Escape('"live_in_briefing"')) {
+    $ErrorActionPreference = "Stop"; Fail "status payload lost live_in_briefing"
+}
+Write-Host "  panel HTML carries the theme switch ($themeHits hits) and status carries the briefing count"
+
+$env:DH_DATA_DIR = $serveDir
+$publicOut = (& $serveExe -config $publicCfg once -serve -hold 2s 2>&1)
+$publicRc = $LASTEXITCODE
+Remove-Item Env:DH_DATA_DIR
+if ($publicRc -eq 0) { $ErrorActionPreference = "Stop"; Fail "a public bind started without complaint" }
+if (($publicOut -join "`n") -match 'listening') {
+    $ErrorActionPreference = "Stop"; Fail "a public bind reached the listener despite the guard"
+}
+Write-Host "  a public bind is refused before anything listens"
+
+# Start-Process -PassThru hands back an empty ExitCode on this host (verified: only
+# -Wait populates it, and -Wait cannot run while we probe). So the exit-code half of
+# "it shuts down cleanly" is asserted by the bash twin; here we assert the observable
+# half - it stopped answering once -hold expired, and nothing logged an error.
+$exited = $serveProc.WaitForExit(30000)
+if (-not $exited) {
+    $ErrorActionPreference = "Stop"
+    Stop-Process -Id $serveProc.Id -Force -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force $serveDir
+    Fail "still serving 30s after -hold 20s expired"
+}
+$afterCode = (& curl.exe -s -o NUL -w "%{http_code}" --max-time 3 "$serveUrl/healthz")
+if ($afterCode -match '^2') {
+    $ErrorActionPreference = "Stop"
+    Remove-Item -Recurse -Force $serveDir
+    Fail "the listener still answers after the hold expired"
+}
+if (Select-String -Path $serveLog -Pattern 'level=ERROR' -Quiet) {
+    $ErrorActionPreference = "Stop"
+    Remove-Item -Recurse -Force $serveDir
+    Fail "the served round logged an error"
+}
+$ErrorActionPreference = "Stop"
+Remove-Item -Recurse -Force $serveDir
+Write-Host "  stopped serving when -hold expired, with no ERROR in the log"
+
 if (-not $Quick) {
     Step "cross-compile (deploy targets)"
     foreach ($pair in @("linux/amd64", "linux/arm64", "windows/amd64")) {

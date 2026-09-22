@@ -75,6 +75,79 @@ fi
 echo "  doctor passed with no network probes"
 rm -rf "$SMOKE_DIR"
 
+# Every httpapi test drives the handler through httptest, so nothing but this step
+# ever runs Serve(): the bind, the enabled gate, and the -hold shutdown path.
+step "served panel: the real listener answers, then exits on its own"
+SERVE_DIR="$(mktemp -d)"
+printf '%s' '{"sources":[],"server":{"enabled":true,"bind":"127.0.0.1:0"}}' > "$SERVE_DIR/config.json"
+DH_DATA_DIR="$SERVE_DIR" ./dist/dealhunter -config "$SERVE_DIR/config.json" once -serve -hold 20s \
+	>"$SERVE_DIR/serve.log" 2>&1 &
+serve_pid=$!
+serve_done() {
+	kill "$serve_pid" 2>/dev/null || true
+	wait "$serve_pid" 2>/dev/null || true
+	rm -rf "$SERVE_DIR"
+}
+serve_fail() {
+	serve_done
+	fail "$@"
+}
+
+serve_url=""
+for _ in $(seq 1 200); do
+	line="$(grep -m1 -oE 'url=http://127\.0\.0\.1:[0-9]+' "$SERVE_DIR/serve.log" 2>/dev/null || true)"
+	if [[ -n "$line" ]]; then
+		serve_url="${line#url=}"
+		break
+	fi
+	kill -0 "$serve_pid" 2>/dev/null || break
+	sleep 0.1
+done
+[[ -n "$serve_url" ]] || {
+	cat "$SERVE_DIR/serve.log"
+	serve_fail "the panel never reported a listening URL"
+}
+echo "  listening on $serve_url"
+
+# A code that is not a number means the client never got a response at all;
+# treating that as "not 200" would hide a dead listener behind a wrong status.
+for path in /healthz / /api/v1/status /api/v1/sources; do
+	code="$(curl -s -o /dev/null -w '%{http_code}' "$serve_url$path" 2>/dev/null || true)"
+	case "$code" in
+	200) ;;
+	'' | *[!0-9]*) serve_fail "GET $path returned no HTTP status at all" ;;
+	*) serve_fail "GET $path over the real listener = $code, want 200" ;;
+	esac
+done
+echo "  healthz, panel, status and sources all answered 200"
+
+panel="$(curl -fsS "$serve_url/" 2>/dev/null || true)"
+theme_hits="$(grep -c 'data-theme' <<<"$panel" || true)"
+[[ "${theme_hits:-0}" -ge 1 ]] || serve_fail "the served panel lost its theme switch"
+status_body="$(curl -fsS "$serve_url/api/v1/status" 2>/dev/null || true)"
+[[ "$status_body" == *'"live_in_briefing"'* ]] || serve_fail "status payload lost live_in_briefing"
+echo "  panel HTML carries the theme switch ($theme_hits hits) and status carries the briefing count"
+
+# The loopback-only rule must hold on the real socket, not just in Validate's unit test.
+printf '%s' '{"sources":[],"server":{"enabled":true,"bind":"0.0.0.0:0"}}' > "$SERVE_DIR/public.json"
+if pub_out="$(DH_DATA_DIR="$SERVE_DIR" ./dist/dealhunter -config "$SERVE_DIR/public.json" once -serve -hold 2s 2>&1)"; then
+	printf '%s\n' "$pub_out"
+	serve_fail "a public bind started without complaint"
+fi
+if [[ "$pub_out" == *"listening"* ]]; then
+	serve_fail "a public bind reached the listener despite the guard"
+fi
+echo "  a public bind is refused before anything listens"
+
+rc=0
+wait "$serve_pid" || rc=$?
+[[ "$rc" == "0" ]] || serve_fail "the panel exited $rc instead of shutting down cleanly at -hold"
+if err_line="$(grep -m1 'level=ERROR' "$SERVE_DIR/serve.log")"; then
+	serve_fail "the served round logged an error: $err_line"
+fi
+serve_done
+echo "  exited 0 when -hold expired, with no ERROR in the log"
+
 if [[ "$QUICK" != "1" ]]; then
 	step "cross-compile (deploy targets)"
 	for pair in linux/amd64 linux/arm64 windows/amd64; do
