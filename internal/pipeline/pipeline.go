@@ -606,26 +606,32 @@ type dayCount struct {
 	N    int    `json:"n"`    // messages already sent that day
 }
 
-// loc resolves the configured timezone. The service often runs in UTC, so a
+// zoneOf resolves the configured timezone. The service often runs in UTC, so a
 // "09:00" briefing must be computed in the user's zone, not the host's.
-func (a *App) loc() *time.Location {
-	if a.cfg.Timezone != "" {
-		if l, err := time.LoadLocation(a.cfg.Timezone); err == nil {
+func zoneOf(cfg *config.Config) *time.Location {
+	if cfg.Timezone != "" {
+		if l, err := time.LoadLocation(cfg.Timezone); err == nil {
 			return l
 		}
 	}
 	return time.Local
 }
 
-// slotAt returns today's occurrence of "HH:MM" in the configured zone.
-func (a *App) slotAt(now time.Time, at string) (time.Time, error) {
+func (a *App) loc() *time.Location { return zoneOf(a.cfg) }
+
+// slotOf returns today's occurrence of "HH:MM" in loc.
+func slotOf(loc *time.Location, now time.Time, at string) (time.Time, error) {
 	hh, mm, err := config.ParseHHMM(at)
 	if err != nil {
 		return time.Time{}, err
 	}
-	l := a.loc()
-	n := now.In(l)
-	return time.Date(n.Year(), n.Month(), n.Day(), hh, mm, 0, 0, l), nil
+	n := now.In(loc)
+	return time.Date(n.Year(), n.Month(), n.Day(), hh, mm, 0, 0, loc), nil
+}
+
+// slotAt returns today's occurrence of "HH:MM" in the configured zone.
+func (a *App) slotAt(now time.Time, at string) (time.Time, error) {
+	return slotOf(a.loc(), now, at)
 }
 
 // DailyDue reports whether the morning briefing is due.
@@ -742,30 +748,44 @@ func (a *App) verifyForBriefing(ctx context.Context, live []model.Deal) {
 
 // DailyInfo describes the morning briefing for the status endpoint.
 type DailyInfo struct {
-	Enabled   bool      `json:"enabled"`
-	At        string    `json:"at"`
-	Last      time.Time `json:"last_sent,omitempty"`
-	Next      time.Time `json:"next_due,omitempty"`
-	SentToday bool      `json:"sent_today"`
+	Enabled bool      `json:"enabled"`
+	At      string    `json:"at"`
+	Last    time.Time `json:"last_sent,omitempty"`
+	Next    time.Time `json:"next_due,omitempty"`
+	// SlotPassed is today's slot already behind us. With SentToday false it means
+	// the day's briefing was missed and will not be backfilled - DailyOnly fires
+	// once the gate (the last send, or when this process started watching) falls
+	// behind the slot, so a service that came up at noon does not send 09:00's.
+	SlotPassed bool `json:"slot_passed"`
+	SentToday  bool `json:"sent_today"`
 }
 
-// Daily reports the briefing schedule and where it stands.
-func (a *App) Daily(now time.Time) DailyInfo {
-	d := a.cfg.Notify.Daily
+// BriefingState is App.Daily without an App. doctor runs on a broken host and must not
+// construct notifiers to answer a question, so the schedule math lives here and both
+// surfaces read the same one - two implementations of "sent today" is how a health
+// check starts lying.
+func BriefingState(cfg *config.Config, st *store.Store, now time.Time) DailyInfo {
+	d := cfg.Notify.Daily
+	loc := zoneOf(cfg)
 	info := DailyInfo{Enabled: d.Enabled, At: d.At}
-	if t, ok := a.stateTime(dailyCursor); ok {
+	if t, ok := stateTimeOf(st, dailyCursor); ok {
 		info.Last = t
-		info.SentToday = a.sameLocalDay(t, now)
+		info.SentToday = dayKey(loc, t) == dayKey(loc, now)
 	}
-	if sched, err := a.slotAt(now, d.At); err == nil {
-		next := sched
-		if !now.In(a.loc()).Before(sched) {
-			next = sched.AddDate(0, 0, 1)
-		}
-		info.Next = next
+	slot, err := slotOf(loc, now, d.At)
+	if err != nil {
+		return info
+	}
+	info.SlotPassed = now.In(loc).After(slot)
+	info.Next = slot
+	if info.SlotPassed {
+		info.Next = slot.AddDate(0, 0, 1)
 	}
 	return info
 }
+
+// Daily reports the briefing schedule and where it stands.
+func (a *App) Daily(now time.Time) DailyInfo { return BriefingState(a.cfg, a.st, now) }
 
 // UrgentInfo describes today's breakthrough budget for the status endpoint.
 type UrgentInfo struct {
@@ -847,10 +867,14 @@ func (a *App) spendBudget(key string, now time.Time) error {
 	return a.st.PutState(key, dayCount{Date: day, N: spent + 1})
 }
 
-// localDay is the calendar day in the configured zone, which is what "once a
-// day" has to mean for a service that usually runs in UTC.
+// dayKey is the calendar day in the configured zone, which is what "once a day"
+// has to mean for a service that usually runs in UTC.
+func dayKey(loc *time.Location, now time.Time) string {
+	return now.In(loc).Format("2006-01-02")
+}
+
 func (a *App) localDay(now time.Time) string {
-	return now.In(a.loc()).Format("2006-01-02")
+	return dayKey(a.loc(), now)
 }
 
 func (a *App) sameLocalDay(x, y time.Time) bool {
@@ -966,8 +990,10 @@ func SourceIdleness(cfg *config.Config, st *store.Store, now time.Time) []Source
 	return out
 }
 
-func (a *App) stateTime(key string) (time.Time, bool) {
-	b, ok := a.st.GetState(key)
+// stateTimeOf reads an RFC3339 timestamp stored under key, without needing an App -
+// see BriefingState for why doctor wants that.
+func stateTimeOf(st *store.Store, key string) (time.Time, bool) {
+	b, ok := st.GetState(key)
 	if !ok {
 		return time.Time{}, false
 	}
@@ -981,6 +1007,8 @@ func (a *App) stateTime(key string) (time.Time, bool) {
 	}
 	return t, true
 }
+
+func (a *App) stateTime(key string) (time.Time, bool) { return stateTimeOf(a.st, key) }
 
 func (a *App) setStateTime(key string, t time.Time) error {
 	return a.st.PutState(key, t.Format(time.RFC3339))

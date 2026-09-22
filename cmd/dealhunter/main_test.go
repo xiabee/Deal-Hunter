@@ -865,6 +865,119 @@ func rowScore(t *testing.T, dir, fp string) int {
 	return int(n)
 }
 
+// dailyRow pulls doctor's `daily` line out, and reports the status glyph with it.
+func dailyRow(t *testing.T, dir string, extra ...string) (string, string) {
+	t.Helper()
+	code, out := run(t, append([]string{"-data", dir, "doctor", "-net=false"}, extra...)...)
+	if code != 0 {
+		t.Fatalf("doctor failed: code=%d out=%s", code, out)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Fields(line)
+		if len(f) >= 2 && f[1] == "daily" {
+			return f[0], line
+		}
+	}
+	t.Fatalf("doctor printed no daily row:\n%s", out)
+	return "", ""
+}
+
+// writeDailyConfig aims the briefing slot at an hour either side of this instant, so
+// "the slot has passed" and "it has not" are both states the test constructs rather
+// than ones it hopes the wall clock happens to be in.
+func writeDailyConfig(t *testing.T, dir, at string, enabled bool) string {
+	t.Helper()
+	path := filepath.Join(dir, "config.json")
+	body := `{"timezone":"UTC","server":{"enabled":false},"notify":{"daily":{"enabled":` +
+		strbool(enabled) + `,"at":"` + at + `"}}}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	return path
+}
+
+func strbool(b bool) string { return map[bool]string{true: "true", false: "false"}[b] }
+
+// slotPassed recomputes, from the same "HH:MM" the config got, whether today's slot is
+// behind us. The test needs its own copy because "an hour from now" as a *clock* string
+// wraps across midnight, and a leg whose expectation depends on what hour CI happened
+// to run at is not an expectation.
+func slotPassed(t *testing.T, at string, now time.Time) bool {
+	t.Helper()
+	var hh, mm int
+	if _, err := fmt.Sscanf(at, "%d:%d", &hh, &mm); err != nil {
+		t.Fatalf("bad at %q: %v", at, err)
+	}
+	n := now.UTC()
+	return n.After(time.Date(n.Year(), n.Month(), n.Day(), hh, mm, 0, 0, time.UTC))
+}
+
+func TestDoctorReportsTheDailyBriefing(t *testing.T) {
+	// 00:00 and 23:59 put the two branches a fixed distance from any wall clock, and
+	// each leg still asserts against its own computation rather than a guess.
+	const passedAt, aheadAt = "00:00", "23:59"
+	now := time.Now().UTC()
+
+	t.Run("槽位两侧各报一次", func(t *testing.T) {
+		for _, at := range []string{passedAt, aheadAt} {
+			dir := t.TempDir()
+			cfg := writeDailyConfig(t, dir, at, true)
+			glyph, row := dailyRow(t, dir, "-config", cfg)
+			wantPassed := slotPassed(t, at, now)
+			if wantPassed {
+				if glyph != "!" || !strings.Contains(row, "没发出去") {
+					t.Fatalf("slot %s has passed with nothing sent; must warn: %s", at, row)
+				}
+				for _, want := range []string{"不会补发", "deal-hunter daily"} {
+					if !strings.Contains(row, want) {
+						t.Errorf("the missed-slot row must name %q: %s", want, row)
+					}
+				}
+			} else if glyph != "✓" || !strings.Contains(row, "还没到点") {
+				t.Fatalf("slot %s is ahead; must be calm: %s", at, row)
+			}
+			_, dry := run(t, "-data", dir, "-config", cfg, "daily", "-dry")
+			if got := strings.Contains(dry, "今日已发过"); got {
+				t.Fatalf("-dry on a store that never sent says it did: %s", dry)
+			}
+			if !strings.Contains(dry, "今日还没发") {
+				t.Fatalf("doctor and `daily -dry` disagree about today: %s", dry)
+			}
+		}
+	})
+
+	t.Run("今天已经发过", func(t *testing.T) {
+		dir := t.TempDir()
+		cfg := writeDailyConfig(t, dir, passedAt, true)
+		// The exact bytes the store writes on a real send (measured once against
+		// production; the writer itself is pinned by TestAppDailyIsBriefingState).
+		if err := os.WriteFile(filepath.Join(dir, "state.json"),
+			[]byte(`{"daily:last_sent":"`+time.Now().UTC().Format(time.RFC3339)+`"}`), 0o600); err != nil {
+			t.Fatalf("write state: %v", err)
+		}
+		glyph, row := dailyRow(t, dir, "-config", cfg)
+		if glyph != "✓" || !strings.Contains(row, "今天这份") {
+			t.Fatalf("a spent slot must be reported as spent: %s", row)
+		}
+		if strings.Contains(row, "没发出去") {
+			t.Fatalf("a day that already sent must not also be called missed: %s", row)
+		}
+		_, dry := run(t, "-data", dir, "-config", cfg, "daily", "-dry")
+		if !strings.Contains(dry, "今日已发过") {
+			t.Fatalf("doctor and `daily -dry` disagree about today: %s", dry)
+		}
+	})
+
+	t.Run("日报被关掉", func(t *testing.T) {
+		dir := t.TempDir()
+		cfg := writeDailyConfig(t, dir, passedAt, false)
+		glyph, row := dailyRow(t, dir, "-config", cfg)
+		if glyph != "!" || !strings.Contains(row, "不会来") {
+			t.Fatalf("disabling the product's only scheduled message must warn: %s", row)
+		}
+	})
+}
+
 // `dealhunter daily -dry` 是"今天这一份日报长什么样"唯一的人工入口，而覆盖率扫出来
 // 它一直是 0%：没有任何自动化执行过这条命令。不带 -dry 的那一半故意不在这里跑 —— 实测
 // 它会真的发送、把 daily:last_sent 写进 state.json，还会往落盘目录写文件。

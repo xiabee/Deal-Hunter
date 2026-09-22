@@ -580,6 +580,8 @@ func cmdDoctor(ctx context.Context, cfg *config.Config, log *slog.Logger, stdout
 		add("reparse drift", rStat, rDetail)
 		bStat, bDetail := backupFreshness(cfg.DataDir)
 		add("backup", bStat, bDetail)
+		dStat, dDetail := dailyState(cfg, st, time.Now())
+		add("daily", dStat, dDetail)
 		sStat, sDetail := sourceSilence(cfg, st, time.Now())
 		add("source silence", sStat, sDetail)
 		st.Close()
@@ -994,6 +996,30 @@ func backupArchiveHint(archive string) string {
 		return ""
 	}
 	return " · " + truncate(archive, 34)
+}
+
+// dailyState answers "今天那份日报到底发出去了没" - the first question when the feed
+// looks silent. The status endpoint has always answered it; doctor is what you run on a
+// host whose panel you no longer trust, and it must not have to build notifiers to say
+// this, so the schedule math is shared through pipeline.BriefingState rather than
+// restated here.
+func dailyState(cfg *config.Config, st *store.Store, now time.Time) (string, string) {
+	d := pipeline.BriefingState(cfg, st, now)
+	if !d.Enabled {
+		return "warn", "日报被关掉了（notify.daily.enabled=false），每天 " + d.At + " 那一份不会来"
+	}
+	next := "下一次 " + d.Next.Format("01-02 15:04")
+	switch {
+	case d.SentToday:
+		return "ok", "今天这份 " + humanDelta(now.Sub(d.Last)) + "前发过 · " + next
+	case d.SlotPassed:
+		// Two different causes land here, and naming only one of them sends the
+		// operator looking in the wrong place.
+		return "warn", "今天 " + d.At + " 那份没发出去，也不会补发（服务那时没在跑，或发送一直没成功）· " + next +
+			"；要现在补一份：deal-hunter daily"
+	default:
+		return "ok", "今天还没到点 · " + next
+	}
 }
 
 // compactionState reports when the store was last compacted. The scheduled trigger
