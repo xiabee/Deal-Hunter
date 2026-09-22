@@ -463,6 +463,11 @@ func (s *Store) adoptDiskStateLocked() {
 		return
 	}
 	for k, v := range disk {
+		// Retired namespaces are dropped at load; merging them back in here would
+		// undo that and write them to disk again - the two rules have to agree.
+		if isRetiredStateKey(k) {
+			continue
+		}
 		s.state[k] = v
 	}
 }

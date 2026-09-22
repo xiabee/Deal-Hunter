@@ -497,9 +497,17 @@ func TestOpenDropsRetiredStateNamespaces(t *testing.T) {
 			t.Errorf("%s should survive", k)
 		}
 	}
-	// 一次无关的写入不许把它写回来。
+	// 一次无关的写入不许把它写回来 —— 而且要看**文件**：只查内存视图的话，
+	// "装载时丢掉、下一次写入又从磁盘合并回来"这种自相矛盾会一路绿灯（生产就是这么露的）。
 	if err := s.PutState("maint:probe", "x"); err != nil {
 		t.Fatal(err)
+	}
+	onDisk, err := os.ReadFile(filepath.Join(dir, "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(onDisk), "digest:last_sent") {
+		t.Errorf("the merge-on-write pulled the retired key back onto disk:\n%s", string(onDisk))
 	}
 	again, err := Open(dir)
 	if err != nil {
@@ -508,6 +516,9 @@ func TestOpenDropsRetiredStateNamespaces(t *testing.T) {
 	defer again.Close()
 	if _, ok := again.GetState("digest:last_sent"); ok {
 		t.Error("a write resurrected the retired key")
+	}
+	if _, ok := again.GetState("maint:probe"); !ok {
+		t.Error("the unrelated write should still be there")
 	}
 }
 
