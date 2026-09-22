@@ -575,6 +575,8 @@ func cmdDoctor(ctx context.Context, cfg *config.Config, log *slog.Logger, stdout
 		add("store", "ok", fmt.Sprintf("已见 %d · 已推送 %d · 游标 %d · %d KB", stats.DealsSeen, stats.PushedSeen, stats.StateKeys, stats.DirSizeKB))
 		cStat, cDetail := compactionState(st)
 		add("compaction", cStat, cDetail)
+		rStat, rDetail := reparseDrift(cfg, st)
+		add("reparse drift", rStat, rDetail)
 		bStat, bDetail := backupFreshness(cfg.DataDir)
 		add("backup", bStat, bDetail)
 		sStat, sDetail := sourceSilence(cfg, st, time.Now())
@@ -769,7 +771,74 @@ func eventMark(it pipeline.EventItem, e config.Event) string {
 	}
 }
 
-// locOf resolves the display zone for the same clock the briefing uses.
+// reparseDiff is one clock field the current parser reads differently from what
+// the row carries.
+type reparseDiff struct {
+	Field string // 截止 / 开抢
+	From  string // what is stored now, "" when the row never had one
+	To    string // what this parser reads, already in the reader's zone
+}
+
+// reparseRow runs the current parser over one stored row and rewrites its meta in
+// place, returning what changed. An absent reading is not a correction: a row whose
+// stated deadline this parser can no longer read keeps it — dropping it would put a
+// finished offer back into the briefing, which is worse than the stale value.
+func reparseRow(dict *keywords.Dict, loc *time.Location, d *model.Deal, now time.Time) []reparseDiff {
+	if d.Meta["dup_of"] != "" {
+		return nil // 折叠掉的副本不进日报，也不进提醒
+	}
+	anchor := d.DiscoveredAt
+	if !d.PublishedAt.IsZero() {
+		anchor = d.PublishedAt
+	}
+	if anchor.IsZero() {
+		anchor = now
+	}
+	anchor = anchor.In(loc)
+	meta := d.Meta
+	if meta == nil {
+		meta = map[string]string{}
+	}
+	var diffs []reparseDiff
+	text := d.TextBlob()
+	if exp := dict.ExpiresAt(text, anchor); exp != nil {
+		if v := exp.Format(time.RFC3339); meta["expires_at"] != v {
+			diffs = append(diffs, reparseDiff{"截止", meta["expires_at"], exp.In(loc).Format("2006-01-02 15:04")})
+			meta["expires_at"] = v
+		}
+	}
+	if starts := dict.StartsAt(text, anchor); starts != nil {
+		if v := starts.Format(time.RFC3339); meta["starts_at"] != v {
+			diffs = append(diffs, reparseDiff{"开抢", meta["starts_at"], starts.In(loc).Format("2006-01-02 15:04")})
+			meta["starts_at"] = v
+		}
+	}
+	d.Meta = meta
+	return diffs
+}
+
+// reparseDrift answers "would reparse change anything today", which is the only way
+// a parser improvement shows up as work: the rows are already in the store, and
+// nothing else ever reads them again. It only counts — writing stays a decision,
+// because unlike pruning a stale row, overwriting a *stated* deadline can be wrong.
+func reparseDrift(cfg *config.Config, st *store.Store) (string, string) {
+	dict := keywords.Default()
+	loc := locOf(cfg)
+	now := time.Now()
+	rows, drift := 0, 0
+	for _, d := range st.Recent(0) {
+		rows++
+		deal := d
+		if len(reparseRow(dict, loc, &deal, now)) > 0 {
+			drift++
+		}
+	}
+	if drift == 0 {
+		return "ok", fmt.Sprintf("解析器与库一致（%d 行）", rows)
+	}
+	return "warn", fmt.Sprintf("%d 行能补出/纠正时刻，先看 deal-hunter reparse 的差异再 -write", drift)
+}
+
 // cmdReparse re-reads the clock fields of rows already in the store.
 //
 // A source's cursor only moves forward, so an announcement that was mis-parsed when
@@ -800,47 +869,19 @@ func cmdReparse(cfg *config.Config, stdout io.Writer, args []string) int {
 	tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(tw, "  标题\t改动")
 	for _, d := range st.Recent(*limit) {
-		if d.Meta["dup_of"] != "" {
-			continue // 折叠掉的副本不进日报，也不进提醒
-		}
-		anchor := d.DiscoveredAt
-		if !d.PublishedAt.IsZero() {
-			anchor = d.PublishedAt
-		}
-		if anchor.IsZero() {
-			anchor = now
-		}
-		anchor = anchor.In(loc)
-		text := d.TextBlob()
-		// An absent reading is not a correction: a row whose stored deadline this
-		// parser can no longer read keeps it. Dropping it would put a finished
-		// offer back into the briefing, which is worse than the stale value.
-		var diffs []string
-		meta := d.Meta
-		if meta == nil {
-			meta = map[string]string{}
-		}
-		if exp := dict.ExpiresAt(text, anchor); exp != nil {
-			if v := exp.Format(time.RFC3339); meta["expires_at"] != v {
-				diffs = append(diffs, "截止 "+humanMetaTime(meta["expires_at"], loc)+" → "+exp.In(loc).Format("2006-01-02 15:04"))
-				meta["expires_at"] = v
-			}
-		}
-		if starts := dict.StartsAt(text, anchor); starts != nil {
-			if v := starts.Format(time.RFC3339); meta["starts_at"] != v {
-				diffs = append(diffs, "开抢 "+humanMetaTime(meta["starts_at"], loc)+" → "+starts.In(loc).Format("2006-01-02 15:04"))
-				meta["starts_at"] = v
-			}
-		}
+		diffs := reparseRow(dict, loc, &d, now)
 		if len(diffs) == 0 {
 			continue
 		}
 		changed++
-		fmt.Fprintf(tw, "  %s\t%s\n", truncate(d.Title, 34), strings.Join(diffs, "；"))
+		var parts []string
+		for _, x := range diffs {
+			parts = append(parts, x.Field+" "+humanMetaTime(x.From, loc)+" → "+x.To)
+		}
+		fmt.Fprintf(tw, "  %s\t%s\n", truncate(d.Title, 34), strings.Join(parts, "；"))
 		if !*write {
 			continue
 		}
-		d.Meta = meta
 		if err := st.Save(&d); err != nil {
 			fmt.Fprintf(stdout, "写回失败：%v\n", err)
 			return 1

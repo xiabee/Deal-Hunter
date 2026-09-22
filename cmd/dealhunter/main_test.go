@@ -386,6 +386,60 @@ func backupMarker(t *testing.T, out string) (string, string) {
 // 压缩这件事必须单独报一行：排程曾经数的是**进程内**轮次（每 48 轮），天天部署的机器
 // 永远凑不满，而"代码里有排程"看起来一切正常。现在改成每轮检查、以盘上记号节流，
 // 这一行仍然要存在——它回答的是"上一次真剪过是什么时候"。
+// 解析器改进之后，历史行只有 reparse 会去读第二次 —— 而"该不该跑一次 reparse"
+// 这件事原本只能靠人记得。doctor 从此自己报漂移，且报的数必须与 reparse 的数一致。
+func TestDoctorReportsReparseDrift(t *testing.T) {
+	dir := t.TempDir()
+	seed(t, dir, `{"fingerprint":"d1","url":"https://nc.test/one","title":"消费券第一批",`+
+		`"summary":"领取后核销截止2026年9月10日","source":"nc","category":"voucher","score":78,`+
+		`"is_free":true,"published_at":"2026-08-05T09:00:00+08:00",`+
+		`"discovered_at":"2026-08-05T09:30:00+08:00","meta":{}}`)
+	seed(t, dir, `{"fingerprint":"d2","url":"https://nc.test/two","title":"没有时刻的一条",`+
+		`"summary":"长期有效","source":"nc","category":"voucher","score":70,`+
+		`"is_free":true,"published_at":"2026-08-05T09:00:00+08:00",`+
+		`"discovered_at":"2026-08-05T09:30:00+08:00","meta":{}}`)
+
+	row := func() string {
+		t.Helper()
+		code, out := run(t, "-data", dir, "doctor", "-net=false")
+		if code != 0 {
+			t.Fatalf("doctor: code=%d out=%s", code, out)
+		}
+		for _, line := range strings.Split(out, "\n") {
+			f := strings.Fields(line)
+			if len(f) >= 2 && f[1] == "reparse" {
+				return line
+			}
+		}
+		t.Fatalf("no reparse drift row in:\n%s", out)
+		return ""
+	}
+
+	// 阳性对照：reparse 自己看到的行数必须与 doctor 报的数一致，否则其中一个是空转。
+	_, dry := run(t, "-data", dir, "reparse")
+	if !strings.Contains(dry, "以上 1 行可补出时刻") {
+		t.Fatalf("reparse should list exactly the one stale row:\n%s", dry)
+	}
+	line := row()
+	if !strings.HasPrefix(line, "!") || !strings.Contains(line, "1 行") {
+		t.Errorf("one unread row should warn with that count: %s", line)
+	}
+	if strings.Contains(line, "d2") || strings.Contains(line, "0 行") {
+		t.Errorf("the row with nothing to read must not be counted: %s", line)
+	}
+
+	if code, out := run(t, "-data", dir, "reparse", "-write"); code != 0 {
+		t.Fatalf("write: code=%d out=%s", code, out)
+	}
+	after := row()
+	if !strings.HasPrefix(after, "✓") {
+		t.Errorf("after -write the drift should be gone: %s", after)
+	}
+	if !strings.Contains(after, "2 行") {
+		t.Errorf("the ok row should still say how many rows were checked: %s", after)
+	}
+}
+
 func TestDoctorReportsCompactionRecency(t *testing.T) {
 	dir := t.TempDir()
 	code, out := run(t, "-data", dir, "doctor", "-net=false")
