@@ -625,7 +625,7 @@ sudo systemctl enable --now deal-hunter-backup.timer            # 每晚 04:30�
 sudo systemctl stop deal-hunter
 sudo tar xzf deal-hunter-<stamp>.tar.gz -C /
 sudo chown -R dealhunter:dealhunter /var/lib/deal-hunter
-sudo systemctl start deal-hunter && sudo -u dealhunter /opt/deal-hunter/deal-hunter doctor -net=false
+sudo systemctl start deal-hunter && sudo -u dealhunter /opt/deal-hunter/deal-hunter doctor -data /var/lib/deal-hunter -net=false
 ```
 
 `doctor` 那一行的「已见 / 已推送 / 游标 / KB」四个数与备份前一致，才算恢复成功。

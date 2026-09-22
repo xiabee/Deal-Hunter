@@ -27,7 +27,7 @@
 
 | 项 | 结论 | 证据 |
 |---|---|---|
-| 排程压缩不再被重启清零（M19） | VERIFIED（测试） / NOT VERIFIED（生产） | 触发器原来数的是**进程内**轮次（`rounds%48`），天天部署的机器永远凑不满 —— 这就是 Known Risks 里"生产跑了一整天而 `maint:last_compact` 不存在"的成因。现在每轮都调 `compact()`，节流只看盘上记号（≥7 天）。`internal/scheduler/scheduler_test.go` 是这包的**第一份**测试（原来一行都没有）：剪得掉旧低分行且不动新行、24 小时内不重剪、**启动后第一轮就剪**（间隔设成 24 小时，所以旧代码必然凑不满 48 轮；轮询到记号出现为止，不是掐秒表）、记号读不出当作"该剪"而不是"刚剪过"。四条各配一次定向变异：去掉节流→只红第二条，去掉首轮检查→只红第三条，剪完不写记号→红第一三条与第四条，把"读不出"当刚剪过→只红第四条。生产侧只能等 `2026-09-28 16:45Z`（记号满 7 天）那一轮，见「现在在等什么」#3 |
+| 排程压缩不再被重启清零（M19） | VERIFIED（测试 + 生产的"该不该剪"那一半） / NOT VERIFIED（生产的"真剪"那一半） | 触发器原来数的是**进程内**轮次（`rounds%48`），天天部署的机器永远凑不满 —— 这就是 Known Risks 里"生产跑了一整天而 `maint:last_compact` 不存在"的成因。现在每轮都调 `compact()`，节流只看盘上记号（≥7 天）。`internal/scheduler/scheduler_test.go` 是这包的**第一份**测试（原来一行都没有）：剪得掉旧低分行且不动新行、24 小时内不重剪、**启动后第一轮就剪**（间隔设成 24 小时，所以旧代码必然凑不满 48 轮；轮询到记号出现为止，不是掐秒表）、记号读不出当作"该剪"而不是"刚剪过"。四条各配一次定向变异：去掉节流→只红第二条，去掉首轮检查→只红第三条，剪完不写记号→红第一三条与第四条，把"读不出"当刚剪过→只红第四条。生产 `124b2b6` 部署后的读数：`trigger=startup … errors=0` 之后**没有** `store compacted` 行，记号仍是 `2026-09-21T16:45:43Z`（未满 7 天，节流如期），`doctor` 那行 `✓ compaction 上次压缩 12.0小时前`。**"真的剪了一次"要等 `2026-09-28 16:45Z`（记号满 7 天）那一轮**，见「现在在等什么」#3 |
 | 资源占用（本轮实测） | VERIFIED（生产读数） | `systemctl show deal-hunter`：`MemoryCurrent=16,830,464`（16.8 MB）、`MemoryPeak=21,708,800`、`TasksCurrent=8`；状态目录 2.0 MB（`deals.jsonl` 868 行 / 1.38 MB、`state.json` 22.5 KB / 111 键），一夜 +119 行。面板轮询侧的开销先前已量过（`status` 0.118s、`deals` 0.039s/97KB，30 秒一轮 ≈ 0.4% 单核）。**结论：没有需要优化的东西**，磁盘增长由 M19 的排程兜住 |
 | 信源静默判据的语义（M16 补正） | VERIFIED（生产实测） | 上一版用 `found`（**过闸后**的行数）判断源是否还活着，会把"页面照常出条目、今天没有一条含关键词"误报成衰减。现在记的是闸门**之前**的条数（`SourceReport.Parsed`，由 `base.deal` 计数、`Source.RawSeen()` 暴露，八个采集器靠嵌入提升零改动）。生产 2026-09-22 的对照读数：`nc-vouchers-zf` 解析 54 → 命中 0、`nc-vouchers-swj` 143 → 1、`lowendtalk-latest` 97 → 80 —— 前两个在旧语义下都会在 36 小时后被点名，现在每轮刷新记号，安静源从 3 降到 2。第二天又补一刀：`openrouter`/`snapshot` 的计数还在**自己那层差分**
 之后（新增免费模型、价格事实有变），所以部署 `121a027` 后改成数"看到的行"（实测 parsed=443 与 8、
@@ -89,7 +89,7 @@ found 都是 0），没记号的源 **17 个里 0 个** —— 实时读数看 `
   `dealhunter probe -source nc-vouchers-swj` 的详情正文），而不是提醒通道坏了。
 
 ```bash
-ssh alienware-life 'sudo -u dealhunter /opt/deal-hunter/deal-hunter events -config /etc/deal-hunter/config.json'
+ssh alienware-life 'sudo -u dealhunter /opt/deal-hunter/deal-hunter events -config /etc/deal-hunter/config.json -data /var/lib/deal-hunter'
 # 面板地址只写在 root 可读的 env 里，别把字面量搬进仓库
 ssh alienware-life 'B=$(sudo grep -m1 "^DH_SERVER_BIND=" /etc/deal-hunter/deal-hunter.env | cut -d= -f2-); sudo curl -s "http://$B/api/v1/status" | grep -A11 "\"event\""'  # due_opening / due_expiry / sent_today
 ssh alienware-life 'sudo journalctl -u deal-hunter --since today | grep "kind=event"'               # 每个事件 2 行（两个通道）
@@ -205,6 +205,13 @@ config/deploy/dist）与 `/tmp/dh-wire-feishu.sh`（9-19，把服务接到租户
 上面的伪造输出。**未删除、未改动它们**，下次动这台机器前先确认来源。
 
 ## Notes for the next session
+
+- **手动跑 CLI 必须带 `-data /var/lib/deal-hunter`**（2026-09-22 我自己踩的）：数据目录来自
+  `DH_DATA_DIR`，而它写在 `/etc/deal-hunter/deal-hunter.env` 里 —— `sudo -u dealhunter` 不加载
+  那个文件，systemd 才加载。漏掉 `-data` 时 CLI 退回相对路径 `./data`，在 `/home/life` 下就是
+  `mkdir /home/life/data: permission denied`，`doctor` 于是报 `✗ data_dir / ✗ store` 三项失败并
+  `exit=1` —— 看着像生产坏了，其实探测根本没碰到状态目录。判据：`doctor` 那三行必须是 `✓` 且
+  `compaction` 有"上次压缩 X 前"，才算它真读到了库。
 
 - **在这台机器上跑 CLI 一律 `sudo -u dealhunter`**，不要 `sudo dealhunter`。今晚以 root 跑过一次
   `events`，`state.json` 变成 root 所有，服务立刻崩溃循环（`permission denied`），恢复要把文件
