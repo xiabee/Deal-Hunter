@@ -32,7 +32,7 @@ ETC="$ROOT/etc/deal-hunter"
 DIR="${DH_BACKUP_DIR:-$ROOT/var/backups/deal-hunter}"
 KEEP="${DH_BACKUP_KEEP:-14}"
 PUSH="${DH_BACKUP_PUSH:-}"
-STAMP="$(date -u +%Y-%m%d-%H%M%S)"
+STAMP="$(date -u +%Y%m%d-%H%M%S)"
 NAME="deal-hunter-$STAMP"
 
 log() { printf '\033[1;36m▸\033[0m %s\n' "$*"; }
@@ -97,8 +97,11 @@ if [[ -n $PUSH ]]; then
 		|| die "推送到 $PUSH 失败（本机这份仍在）"
 fi
 
-# Prune by name stamp, oldest first, keeping the newest $KEEP pairs.
-mapfile -t old < <(cd "$DIR" && ls -1 deal-hunter-*.tar.gz 2>/dev/null | sort | head -n -"$KEEP")
+# Prune by modification time, keeping the newest $KEEP pairs. Deliberately not by
+# name: the name is a convenience, and the moment the stamp format differs from what
+# is already on disk, a name-sorted list puts the *newest* archive first and
+# retention deletes the one backup we can actually trust.
+mapfile -t old < <(cd "$DIR" && ls -1t deal-hunter-*.tar.gz 2>/dev/null | tail -n +"$((KEEP + 1))")
 for f in "${old[@]:-}"; do
 	[[ -n $f ]] || continue
 	rm -f "$DIR/$f" "$DIR/$f.sha256"

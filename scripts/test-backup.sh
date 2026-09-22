@@ -58,15 +58,27 @@ grep -q "归档可解开" <<<"$out" && ok "自校验通过（解得开、config.
 # the sleep is what makes retention observable at all (not a timing assertion).
 for n in 2 3; do
 	sleep 1.2
-	DH_BACKUP_ROOT="$ROOT" DH_BACKUP_KEEP=2 bash deploy/backup.sh >/dev/null 2>&1 || { bad "第 $n 次备份失败"; }
+	out=$(DH_BACKUP_ROOT="$ROOT" DH_BACKUP_KEEP=2 bash deploy/backup.sh 2>&1) || { bad "第 $n 次备份失败：$out"; }
 done
 have=$(ls -1 "$ROOT/var/backups/deal-hunter"/*.tar.gz 2>/dev/null | wc -l | tr -d ' ')
 [[ $have == "2" ]] && ok "KEEP=2 跑三次后只剩 2 份归档" || bad "KEEP=2 应剩 2 份，实际 $have 份"
 sides=$(ls -1 "$ROOT/var/backups/deal-hunter"/*.sha256 2>/dev/null | wc -l | tr -d ' ')
 [[ $sides == "2" ]] && ok "校验和随归档一起轮换（2 个 sidecar）" || bad "sidecar 数应为 2，实际 $sides"
 
-newest=$(ls -1 "$ROOT/var/backups/deal-hunter"/deal-hunter-*.tar.gz | sort | tail -1)
-oldest_kept=$(ls -1 "$ROOT/var/backups/deal-hunter"/deal-hunter-*.tar.gz | sort | head -1)
+# "Which one is newest" comes from the script's own completion line rather than from
+# an ordering this file shares with the thing under test.
+newest=$(grep '备份完成' <<<"$out" | grep -o '/[^ ]*\.tar\.gz' | head -1)
+[[ -f $newest ]] && ok "报出来的归档确实在盘上（$(basename "$newest")）" || bad "完成行指的文件不存在：「$out」"
+# Keep going from whatever is really there even if that line moved, so a failure
+# above reports the missing file instead of crashing the rest of the drill.
+[[ -f $newest ]] || newest=$(ls -1t "$ROOT/var/backups/deal-hunter"/deal-hunter-*.tar.gz 2>/dev/null | head -1)
+# Retention reads names only to match the glob, but operators (and this file) read
+# them to tell recency apart, so the shape is a contract.
+base=$(basename "${newest:-none}")
+[[ $base =~ ^deal-hunter-[0-9]{8}-[0-9]{6}\.tar\.gz$ ]] \
+	&& ok "归档名是 deal-hunter-<UTC日期>-<时刻> 的形状" \
+	|| bad "归档名形状变了：「$base」（日期里多出的分隔符会让按名字排序的轮换认错最新那份）"
+oldest_kept=$(ls -1t "$ROOT/var/backups/deal-hunter"/deal-hunter-*.tar.gz | tail -1)
 [[ $newest != "$oldest_kept" ]] && ok "留下的是两份不同的（即最新的两个），不是同一份被数两次"
 
 echo "▸ 校验和与恢复"
@@ -113,7 +125,27 @@ else
 fi
 printf '%s' '{"sources":[],"server":{"enabled":false,"bind":"127.0.0.1:0"}}' > "$ETC/config.json"
 
+echo "▸ 轮换认的是「谁新」，不是「名字排在后面」"
+# A decoy whose name sorts after every real archive but which is three days old.
+# Name-sorted retention calls the fresh archive the oldest thing in the directory and
+# deletes the one backup we can restore from, so recency has to be measured, not read.
+decoy="$bdir/deal-hunter-99999999-999999.tar.gz"
+: > "$decoy"
+printf '%s' 'deadbeef  deal-hunter-99999999-999999.tar.gz' > "$decoy.sha256"
+touch -d '3 days ago' "$decoy" "$decoy.sha256"
+sleep 1.2
+DH_BACKUP_ROOT="$ROOT" DH_BACKUP_KEEP=1 bash deploy/backup.sh >/dev/null 2>&1 || bad "带诱饵的那次备份失败了"
+[[ ! -e $decoy ]] && ok "三天前那份被轮换掉了，尽管它的名字排在最后" \
+	|| bad "诱饵还在：轮换在按名字排新旧，最新那份会被当成最旧的删掉"
+survivor=$(ls -1 "$bdir"/deal-hunter-*.tar.gz 2>/dev/null | head -1)
+n_surv=$(ls -1 "$bdir"/deal-hunter-*.tar.gz 2>/dev/null | wc -l | tr -d ' ')
+[[ $n_surv == "1" && -n $survivor ]] && ok "KEEP=1 只剩 1 份归档" || bad "KEEP=1 应剩 1 份，实际 $n_surv"
+( cd "$bdir" && sha256sum --quiet --check "$(basename "$survivor").sha256" ) \
+	&& ok "活下来的那份校验得过（是刚做的备份，不是诱饵）" \
+	|| bad "活下来的那份校验不过——留下的可能是诱饵"
+
 echo
+
 if (( fails > 0 )); then
 	printf '\033[1;31m✗ backup drill: %d 条不通过\033[0m\n' "$fails"
 	exit 1
