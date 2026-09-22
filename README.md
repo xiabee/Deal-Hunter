@@ -549,6 +549,7 @@ git config core.hooksPath .githooks      # 可选：提交前自动跑快门禁
 | 🔌 接口 | 只读性（非 GET 一律 405）、安全响应头、筛选参数、面板内联、**凭据不外泄**（接口与 CLI 各一条测试） |
 | 🖥 真监听 | 门禁会**真的启动一次进程**跑 `Serve()`：绑定 → `/healthz` `/` `/api/v1/status` `/api/v1/sources` 全 200 → 面板 HTML 与状态字段在位 → 公网绑定在监听之前就被拒 → `-hold` 到点自行停止。上面的接口测试走 `httptest`，只到 handler 为止，绑定与退出路径没有别的步骤覆盖 |
 | 🔐 安全 | SSRF 阻断（云元数据/内网）、公网绑定拒绝、路径收敛、日志脱敏、仓库敏感信息扫描 |
+| 💾 备份 | 沙箱里真跑 `deploy/backup.sh`：解得开、行数对得上、归档本身 0600、轮换只留最新 N 份且 sidecar 跟着删、`backup.stamp` 能被 `doctor` 读出来；`KEEP=0`/非数字必须被拒绝而不是清空目录 |
 | 📦 构建 | `CGO_ENABLED=0` 交叉编译 linux/amd64、linux/arm64、windows/amd64 |
 
 ---
@@ -610,12 +611,15 @@ sudo ./deploy/openclaw/install-openclaw-relay.sh --target <feishu 用户或群 i
 ```bash
 sudo ./deploy/backup.sh                          # 写到 /var/backups/deal-hunter，默认留 14 份
 DH_BACKUP_PUSH=other-host:/backups/dh sudo ./deploy/backup.sh   # 顺手另存一份到别的磁盘
+DH_BACKUP_ROOT=/tmp/sandbox ./deploy/backup.sh   # 假根演练，不需要 root（CI 就这么跑）
 sudo systemctl enable --now deal-hunter-backup.timer            # 每晚 04:30，错过开机就补跑
 ```
 
 脚本不只会打包，还会**把刚写出来的归档解到临时目录再对比一遍**：`deals.jsonl` 行数、
 `config.json` 是否在位、校验和是否对得上，任一不过就不报成功——没被打开过的备份只是个愿望。
 归档里含 `deal-hunter.env`（webhook 与签名密钥），所以整个脚本以 `umask 077` 运行，落盘 0600、目录 0750。
+`DH_BACKUP_KEEP` 必须是 ≥1 的整数：0 会让轮换把目录里所有归档删光，非数字则会让它静默地一份都不删。两种都在动手之前被拒绝。
+
 脚本跑完会在状态目录留一个
 `backup.stamp`（只有时刻和归档名，0640 归服务账户），让 `dealhunter doctor` 能回答
 **"上一次真正备份成功是多久前"** —— 定时器挂在 systemd 上，失败只进 journal，

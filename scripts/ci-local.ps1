@@ -167,6 +167,17 @@ $ErrorActionPreference = "Stop"
 Remove-Item -Recurse -Force $serveDir
 Write-Host "  stopped serving when -hold expired, with no ERROR in the log"
 
+# Same step as the bash gate. The drill itself exits 0 with a visible "skipped"
+# message when the host cannot set POSIX modes, so running it here is informative
+# either way - but only if bash is on PATH at all.
+Step "backup drill: sandbox restore, retention and refusals"
+if (Get-Command bash -ErrorAction SilentlyContinue) {
+    & bash scripts/test-backup.sh
+    if ($LASTEXITCODE -ne 0) { Fail "backup drill" }
+} else {
+    Write-Host "  ! 本机没有 bash，跳过（Linux 侧由 ci-office.sh 执行同一条）" -ForegroundColor Yellow
+}
+
 if (-not $Quick) {
     Step "cross-compile (deploy targets)"
     foreach ($pair in @("linux/amd64", "linux/arm64", "windows/amd64")) {

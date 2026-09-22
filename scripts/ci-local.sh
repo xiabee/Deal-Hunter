@@ -148,6 +148,12 @@ fi
 serve_done
 echo "  exited 0 when -hold expired, with no ERROR in the log"
 
+# The scheduled sweep refuses to prune unless a backup succeeded within 36 hours, so
+# deploy/backup.sh sits on the critical path of a data-deleting feature. It had never
+# been run by anything but production.
+step "backup drill: sandbox restore, retention and refusals"
+bash scripts/test-backup.sh || fail "backup drill"
+
 if [[ "$QUICK" != "1" ]]; then
 	step "cross-compile (deploy targets)"
 	for pair in linux/amd64 linux/arm64 windows/amd64; do

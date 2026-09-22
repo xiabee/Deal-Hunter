@@ -5,6 +5,7 @@
 #   DH_BACKUP_DIR=/mnt/nas/dh sudo ./deploy/backup.sh
 #   DH_BACKUP_PUSH=other-host:/backups/dh sudo ./deploy/backup.sh   # copy off this disk
 #   DH_BACKUP_KEEP=14 sudo ./deploy/backup.sh
+#   DH_BACKUP_ROOT=/tmp/sandbox ./deploy/backup.sh   # 假根目录演练用；不需要 root
 #
 # The archive is a plain tar of /var/lib/deal-hunter and /etc/deal-hunter, so
 # restoring needs no tooling:
@@ -19,26 +20,44 @@
 # reports success.
 set -euo pipefail
 
-STATE=/var/lib/deal-hunter
-ETC=/etc/deal-hunter
-DIR="${DH_BACKUP_DIR:-/var/backups/deal-hunter}"
+# Everything hangs off one root so the same script can be pointed at a sandbox tree
+# with the production layout intact - the archive keeps containing var/lib/... and
+# etc/..., which is what makes the drill worth running.
+ROOT="${DH_BACKUP_ROOT:-/}"
+STATE="$ROOT/var/lib/deal-hunter"
+ETC="$ROOT/etc/deal-hunter"
+DIR="${DH_BACKUP_DIR:-$ROOT/var/backups/deal-hunter}"
 KEEP="${DH_BACKUP_KEEP:-14}"
 PUSH="${DH_BACKUP_PUSH:-}"
-STAMP="$(date -u +%Y%m%d-%H%M%S)"
+STAMP="$(date -u +%Y-%m%d-%H%M%S)"
 NAME="deal-hunter-$STAMP"
 
 log() { printf '\033[1;36m▸\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31m✗\033[0m %s\n' "$*" >&2; exit 1; }
 
-[[ $EUID -eq 0 ]] || die "需要 root（状态目录是 0750 dealhunter）：sudo $0"
+# Retention prunes by deleting. A KEEP of 0 makes `head -n -0` list *every* archive,
+# so a mistyped unit would empty the backup directory in one run; a non-number just
+# silently stops pruning. Refuse both instead.
+[[ $KEEP =~ ^[0-9]+$ ]] || die "DH_BACKUP_KEEP 必须是非负整数，收到的是「$KEEP」"
+(( KEEP >= 1 )) || die "DH_BACKUP_KEEP=0 会把 $DIR 里的归档全删光；至少留 1 份"
+
+if [[ $ROOT == "/" ]]; then
+	[[ $EUID -eq 0 ]] || die "需要 root（状态目录是 0750 dealhunter）：sudo $0"
+else
+	[[ $EUID -eq 0 ]] || log "以非 root 身份跑在假根 $ROOT 下（演练模式）"
+fi
 [[ -d $STATE ]] || die "找不到 $STATE"
 
 # The archive contains /etc/deal-hunter/deal-hunter.env, i.e. the webhook and its
 # signing secret. Default permissions on those files are 0600/0640 and a tarball
 # must not be the one place that widens them.
 umask 077
-install -d -m 0750 -o root -g root "$DIR"
+if [[ $EUID -eq 0 ]]; then
+	install -d -m 0750 -o root -g root "$DIR"
+else
+	install -d -m 0750 "$DIR"
+fi
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -46,7 +65,7 @@ trap 'rm -rf "$TMP"' EXIT
 # changed, and keeping them makes every archive grow without adding recovery
 # value beyond the last one.
 tar --create --gzip --file "$DIR/$NAME.tar.gz" \
-	--exclude='*.bak-*' --directory=/ var/lib/deal-hunter etc/deal-hunter \
+	--exclude='*.bak-*' --directory="$ROOT" var/lib/deal-hunter etc/deal-hunter \
 	2> >(grep -v 'file changed as we read it' >&2 || true)
 # A collection round may write while we read; tar warns rather than fails, and
 # the restore check below is what decides whether the archive is usable.
