@@ -231,7 +231,7 @@ func cmdRun(ctx context.Context, cfg *config.Config, log *slog.Logger, stdout io
 func cmdOnce(ctx context.Context, cfg *config.Config, log *slog.Logger, stdout io.Writer, args []string) int {
 	fs := flag.NewFlagSet("once", flag.ContinueOnError)
 	fs.SetOutput(stdout)
-	serve := fs.Bool("serve", false, "采集后保持 API 常驻")
+	serve := fs.Bool("serve", false, "保持 API 常驻（与这一轮采集同时进行）")
 	hold := fs.Duration("hold", 0, "配合 -serve 保持运行的时长，0 表示直到收到信号")
 	_ = fs.Parse(args)
 
@@ -242,20 +242,29 @@ func cmdOnce(ctx context.Context, cfg *config.Config, log *slog.Logger, stdout i
 	}
 	defer app.Close()
 
-	run, _ := app.RunOnce(ctx, "once")
-	printRun(stdout, run)
-
 	if !*serve {
+		run, _ := app.RunOnce(ctx, "once")
+		printRun(stdout, run)
 		return 0
 	}
-	api := httpapi.New(cfg, app, log)
-	log.Info("serving read-only API", "addr", api.Addr())
+	// With -serve the listener comes up *before* the round, the way `run` already
+	// does: a read-only panel should answer while the first collection is still
+	// going, and a gate step that waits for this process to start listening must
+	// not have to outlast a network round - one slow source is enough to make it
+	// look like the panel never came up. -hold still bounds only the serving tail,
+	// so the round keeps the time it always had.
+	sctx := ctx
 	if *hold > 0 {
-		c, cancel := context.WithTimeout(ctx, *hold)
+		var cancel context.CancelFunc
+		sctx, cancel = context.WithTimeout(ctx, *hold)
 		defer cancel()
-		ctx = c
 	}
-	return exitFromError(api.Serve(ctx))
+	api := httpapi.New(cfg, app, log)
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- api.Serve(sctx) }()
+	run, _ := app.RunOnce(ctx, "once")
+	printRun(stdout, run)
+	return exitFromError(<-serveErr)
 }
 
 func cmdServe(ctx context.Context, cfg *config.Config, log *slog.Logger, stdout io.Writer, args []string) int {
