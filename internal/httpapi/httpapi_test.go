@@ -663,3 +663,77 @@ func TestDashboardSplitsOpeningAndClosingReminders(t *testing.T) {
 		t.Errorf("the hint must name both kinds, got %q", hint)
 	}
 }
+
+// 面板把采集来的字符串塞进 innerHTML。挡在两处的东西各有一样：服务端 JSON 编码器把
+// < > & 转成 \u003c 之类（Go 的默认，一旦被 SetEscapeHTML(false) 这种"性能优化"关掉，
+// 面板就只剩自己那层），以及页面里 esc() 与 isHTTPS()。浏览器实测过一遍（投毒标题、
+// 正文里的 <script>、javascript: 与 data: 链接：标题未被改写、0 个活的 img/svg、
+// 0 个 javascript:/data: 锚点），但那条上不了构建机，所以这里钉住能被静态检查的两半。
+func TestHostileStringsStayInertOnTheWayOut(t *testing.T) {
+	hostile := `<img src=x onerror=document.title="PWNED"> 投毒标题`
+	dir := filepath.Join(t.TempDir(), "data")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	// 检材走真实的落盘格式：deals.jsonl 里的一行就是 store 原样读回来的那一条。
+	line := `{"fingerprint":"xss1","url":"javascript:document.title=PWNED","title":"` +
+		strings.ReplaceAll(hostile, `"`, `\"`) +
+		`","source":"xss","category":"ai_free","score":90,"is_free":true,` +
+		`"published_at":"2026-09-22T10:00:00Z","discovered_at":"2026-09-22T10:00:00Z","meta":{}}`
+	if err := os.WriteFile(filepath.Join(dir, "deals.jsonl"), []byte(line+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.DataDir = dir
+	cfg.Sources = nil
+	app, err := pipeline.New(cfg, nil)
+	if err != nil {
+		t.Fatalf("pipeline.New: %v", err)
+	}
+	t.Cleanup(func() { app.Close() })
+	ts := httptest.NewServer(New(cfg, app, nil).Handler())
+	t.Cleanup(ts.Close)
+
+	resp, raw := get(t, ts, "/api/v1/deals?limit=5")
+	resp.Body.Close()
+	body := string(raw)
+	if strings.Contains(body, "<img") {
+		t.Errorf("the response carries a live <img - the encoder stopped escaping HTML:\n%s", body)
+	}
+	// 这条不查 `<img`（那正是要它被转义掉的），只查"投毒串确实进了载荷"，
+	// 所以上面那条红的时候这条还是绿的 - 一条红只对应一件事。
+	if !strings.Contains(body, `src=x onerror`) {
+		t.Errorf("the hostile title never reached the payload, so this test checked nothing:\n%s", body)
+	}
+	// 编码器的转义是给浏览器的兜底，不是让 API 替面板洗数据：解码后必须还是原串，
+	// 否则运营看到的标题已经被改过了。
+	got := mustJSON(t, raw)["deals"].([]any)
+	if len(got) != 1 {
+		t.Fatalf("the fixture holds one deal, got %d", len(got))
+	}
+	if title := got[0].(map[string]any)["title"]; title != hostile {
+		t.Errorf("title came back changed (%v) rather than merely escaped", title)
+	}
+
+	page := panelSource(t)
+	if !strings.Contains(page, `/[&<>"]/g`) {
+		t.Error(`esc() must replace all four of & < > " - the quote is what stops a breakout out of href="..."`)
+	}
+	hrefs := strings.Count(page, `href="' + `)
+	guards := strings.Count(page, `isHTTPS(`)
+	if hrefs < 3 {
+		t.Fatalf("only %d concatenated hrefs read back; the panel changed shape and this check is now vacuous", hrefs)
+	}
+	if guards < hrefs {
+		t.Errorf("%d hrefs are built from variables but only %d isHTTPS guards - a javascript: or data: URL can reach an anchor", hrefs, guards)
+	}
+}
+
+func panelSource(t *testing.T) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("web", "index.html"))
+	if err != nil {
+		t.Fatalf("read the panel: %v", err)
+	}
+	return string(b)
+}
