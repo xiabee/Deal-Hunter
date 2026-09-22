@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -871,5 +873,56 @@ func TestSearchReportsTheHumanCheckPageInsteadOfZeroHits(t *testing.T) {
 	}
 	if len(deals) == 0 {
 		t.Error("expected the normal fixture to still yield deals")
+	}
+}
+
+// 采集器种类这件事写在四处：config 里的 Kind* 常量（真来源）、sources.New 的 switch、
+// README 的表、以及 ROADMAP 里"采集器类型有 7 种"那句。上面那条 kind 测试用的是
+// 手抄的常量列表 —— 加一种不会有人报警。这里改成从 config.go 读回常量集合，
+// 然后要求每一处都跟得上：能构造、在表里、数目对得上。
+func TestEveryCollectorKindIsWiredDocumentedAndCounted(t *testing.T) {
+	cfg, err := os.ReadFile(filepath.Join("..", "config", "config.go"))
+	if err != nil {
+		t.Fatalf("read config.go: %v", err)
+	}
+	var kinds []string
+	for _, m := range regexp.MustCompile(`Kind(\w+)\s*=\s*"([a-z-]+)"`).FindAllStringSubmatch(string(cfg), -1) {
+		kinds = append(kinds, m[2])
+	}
+	if len(kinds) < 5 {
+		t.Fatalf("only %d Kind constants read back from config.go, so this check would pass vacuously", len(kinds))
+	}
+
+	for _, kind := range kinds {
+		src, err := New(Deps{Cfg: config.Source{Name: "k-" + kind, Kind: kind, URL: "https://example.com/x"}, HTTP: &stubFetcher{body: []byte("<html></html>")}})
+		if err != nil {
+			t.Errorf("kind %q 在 config 里有常量，但 sources.New 造不出来：%v", kind, err)
+			continue
+		}
+		if src.Kind() != kind {
+			t.Errorf("kind %q came back as %q", kind, src.Kind())
+		}
+	}
+
+	readme, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
+	if err != nil {
+		t.Fatalf("read README: %v", err)
+	}
+	for _, kind := range kinds {
+		if !strings.Contains(string(readme), "| `"+kind+"`") {
+			t.Errorf("kind %q 没有出现在 README 的采集器表里", kind)
+		}
+	}
+
+	roadmap, err := os.ReadFile(filepath.Join("..", "..", "docs", "ROADMAP.md"))
+	if err != nil {
+		t.Fatalf("read ROADMAP: %v", err)
+	}
+	m := regexp.MustCompile(`采集器类型有 (\d+) 种`).FindStringSubmatch(string(roadmap))
+	if m == nil {
+		t.Fatal("ROADMAP 里那句「采集器类型有 N 种」找不到了 —— 它要么该被改写，要么该被这条测试一起删掉")
+	}
+	if n, _ := strconv.Atoi(m[1]); n != len(kinds) {
+		t.Errorf("ROADMAP 说采集器有 %d 种，config 里实际有 %d 种：%v", n, len(kinds), kinds)
 	}
 }
