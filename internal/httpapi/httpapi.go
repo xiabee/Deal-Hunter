@@ -147,6 +147,15 @@ func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
+// entryStamp keeps "there was never a deal" empty instead of letting a zero
+// time.Time serialise into 0001-01-01, which the panel prints as a real date.
+func entryStamp(t time.Time) any {
+	if t.IsZero() {
+		return ""
+	}
+	return t
+}
+
 func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 	st := s.app.Store().Stats()
 	now := time.Now().UTC()
@@ -186,8 +195,8 @@ func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 			"pushed":     st.PushedSeen,
 			"cursors":    st.StateKeys,
 			"size_kb":    st.DirSizeKB,
-			"oldest":     st.OldestEntry,
-			"newest":     st.NewestEntry,
+			"oldest":     entryStamp(st.OldestEntry),
+			"newest":     entryStamp(st.NewestEntry),
 			// What the next briefing would carry, and how much of it we tied back
 			// to the vendor: under the daily model this is the only link quality
 			// the user is ever shown.

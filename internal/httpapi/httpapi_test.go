@@ -195,6 +195,49 @@ func TestStatusReportsOperationalState(t *testing.T) {
 	}
 }
 
+// 一次都没跑过的库里没有"最近"这件事：零值 time.Time 会序列化成 0001-01-01，
+// 面板照原样打印成"最近 1/1/1 08:05:43"，看着像一个真的日期。
+func TestStatusHasNoTimestampsBeforeTheFirstRound(t *testing.T) {
+	cfg := config.Default()
+	cfg.DataDir = filepath.Join(t.TempDir(), "data")
+	cfg.Sources = nil
+	app, err := pipeline.New(cfg, nil)
+	if err != nil {
+		t.Fatalf("pipeline.New: %v", err)
+	}
+	t.Cleanup(func() { app.Close() })
+	ts := httptest.NewServer(New(cfg, app, nil).Handler())
+	t.Cleanup(ts.Close)
+
+	_, body := get(t, ts, "/api/v1/status")
+	store := mustJSON(t, body)["store"].(map[string]any)
+	if store["deals_seen"] != float64(0) {
+		t.Fatalf("the fixture is supposed to be a store that never ran, deals_seen=%v", store["deals_seen"])
+	}
+	for _, key := range []string{"oldest", "newest"} {
+		if v := store[key]; v != "" {
+			t.Errorf("store.%s = %v on an empty log; the panel would print a 0001-01-01 date as if it were real", key, v)
+		}
+	}
+
+	// 接受侧：跑过一轮之后同一批字段必须是真时间戳，否则上面的"空"只是序列化坏了。
+	seeded, _, _ := newTestServer(t)
+	_, seededBody := get(t, seeded, "/api/v1/status")
+	ran := mustJSON(t, seededBody)["store"].(map[string]any)
+	if ran["deals_seen"] == float64(0) {
+		t.Fatalf("the seeded server stored nothing, so it proves nothing about timestamps")
+	}
+	for _, key := range []string{"oldest", "newest"} {
+		v, ok := ran[key].(string)
+		if !ok {
+			t.Fatalf("store.%s after a round = %T %v, want an RFC3339 string", key, ran[key], ran[key])
+		}
+		if _, err := time.Parse(time.RFC3339, v); err != nil {
+			t.Errorf("store.%s = %q after a round: %v", key, v, err)
+		}
+	}
+}
+
 func TestNoCredentialEverLeavesTheProcess(t *testing.T) {
 	ts, app, _ := newTestServer(t)
 	drop := app.OutreachDir()
@@ -494,6 +537,21 @@ func TestDashboardHasAReadableLightThemeAndAWayToSwitch(t *testing.T) {
 	for _, want := range []string{`data-theme`, `dh-theme`, `prefers-color-scheme`} {
 		if !strings.Contains(html, want) {
 			t.Errorf("theme switch missing %q", want)
+		}
+	}
+	// 三态而不是两态：显式点过一次就把"跟随系统"永久毁掉了，傍晚系统转深色而面板不动。
+	for _, tc := range []struct{ what, pat string }{
+		{"回到跟随系统（撤销显式选择）", `removeItem\(['"]dh-theme`},
+		{"系统换配色时当场跟着变", `addEventListener\(\s*['"]change`},
+		{"夜间再点一次回到跟随系统", `dark\s*:\s*['"]auto['"]`},
+		{"自动模式在落地时读系统偏好", `mode\s*===\s*['"]auto['"]\s*&&`},
+		{"首屏与点击共用同一条判定", `dhIsLight\(dhThemeMode\(\)\)[\s\S]*dhIsLight\(mode\)`},
+		{"按钮写的是当前所处模式，不是点下去会到哪", `textContent\s*=\s*ICON\[mode\]`},
+	} {
+		if matched, err := regexp.MatchString(tc.pat, html); err != nil {
+			t.Errorf("bad pattern %s: %v", tc.pat, err)
+		} else if !matched {
+			t.Errorf("theme switch cannot %s; look for %q", tc.what, tc.pat)
 		}
 	}
 	dark := cssVars(t, html, ":root")

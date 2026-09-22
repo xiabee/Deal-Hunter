@@ -7,12 +7,22 @@
 <link rel="icon" href="/favicon.ico">
 <meta name="color-scheme" content="dark light">
 <script>
-  // Decide before the first paint: a page that flips theme after rendering
-  // flashes white (or black) in the face of whoever just opened it.
+  // Three theme states live in one place: 跟随系统 (nothing stored, the OS decides),
+  // 日间 and 夜间 (explicit, stored in localStorage('dh-theme')). The rule is
+  // resolved before the first paint as well as on every click — a page that flips
+  // theme after rendering flashes white in the face of whoever just opened it, and
+  // two copies of the rule are how those two paths would start disagreeing.
+  var dhPrefersLight = matchMedia("(prefers-color-scheme: light)");
+  function dhThemeMode(){
+    var saved = null;
+    try { saved = localStorage.getItem("dh-theme"); } catch(e){}
+    return (saved === "light" || saved === "dark") ? saved : "auto";
+  }
+  function dhIsLight(mode){
+    return mode === "light" || (mode === "auto" && dhPrefersLight.matches);
+  }
   try{
-    var saved=localStorage.getItem("dh-theme");
-    var want=saved||(matchMedia("(prefers-color-scheme: light)").matches?"light":"dark");
-    if(want==="light")document.documentElement.setAttribute("data-theme","light");
+    if(dhIsLight(dhThemeMode()))document.documentElement.setAttribute("data-theme","light");
   }catch(e){}
 </script>
 <style>
@@ -191,7 +201,7 @@
       <div class="pill"><span class="dot" id="dot-run"></span>下一轮 <b id="next">—</b></div>
       <div class="pill" id="pill-daily" hidden>🌅 日报 <b id="daily">—</b></div>
       <div class="pill"><span class="dot ok" id="dot-sync"></span>最后同步 <b id="sync">—</b></div>
-      <button class="chip" id="theme" type="button" title="切换日间/夜间配色">☀ 日间</button>
+      <button class="chip" id="theme" type="button" title="配色：跟随系统 / 日间 / 夜间">◐ 跟随系统</button>
     </div>
   </header>
 
@@ -517,19 +527,36 @@ $('q').addEventListener('input', () => {
   timer = setTimeout(() => loadDeals().catch(() => {}), 220);
 });
 
-// The button only labels the *other* mode: what you see is what you'd get.
-function paintTheme(){
-  const light = document.documentElement.getAttribute('data-theme') === 'light';
-  $('theme').textContent = light ? '☾ 夜间' : '☀ 日间';
+// The button labels the mode you get by clicking, so the third label is 跟随系统
+// rather than a second colour swatch.
+const NEXT = {auto:'light', light:'dark', dark:'auto'};
+const NAME = {auto:'跟随系统', light:'日间', dark:'夜间'};
+const ICON = {auto:'◐', light:'☀', dark:'☾'};
+let mode = dhThemeMode();
+function applyTheme(){
+  if (dhIsLight(mode)) document.documentElement.setAttribute('data-theme','light');
+  else document.documentElement.removeAttribute('data-theme');
+  // The chip says where you are, not where you'd land: labelling the next mode
+  // made 跟随系统 look like a dead button whenever the OS already matched it.
+  const next = NAME[NEXT[mode]];
+  $('theme').textContent = ICON[mode] + ' ' + NAME[mode];
+  // Auto promises no visible flip: the first click pins the colour you're
+  // already looking at, and 日间 is only what you'd get from 夜间.
+  $('theme').title = mode === 'auto'
+    ? '跟随系统，现在是' + (dhIsLight(mode) ? '日间' : '夜间') + '配色，点击进入固定配色'
+    : '当前' + NAME[mode] + '，点击切到' + next;
 }
 $('theme').addEventListener('click', () => {
-  const light = document.documentElement.getAttribute('data-theme') === 'light';
-  if (light) document.documentElement.removeAttribute('data-theme');
-  else document.documentElement.setAttribute('data-theme', 'light');
-  try { localStorage.setItem('dh-theme', light ? 'dark' : 'light'); } catch (e) {}
-  paintTheme();
+  mode = NEXT[mode];
+  try {
+    if (mode === 'auto') localStorage.removeItem('dh-theme');
+    else localStorage.setItem('dh-theme', mode);
+  } catch (e) {}
+  applyTheme();
 });
-paintTheme();
+// Only auto defers to the system; a pinned mode ignores it until the next click.
+dhPrefersLight.addEventListener('change', () => { if (mode === 'auto') applyTheme(); });
+applyTheme();
 
 refresh();
 // A background tab has no reason to keep polling.
