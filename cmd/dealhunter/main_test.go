@@ -864,3 +864,94 @@ func rowScore(t *testing.T, dir, fp string) int {
 	n, _ := lastRow(t, dir, fp)["score"].(float64)
 	return int(n)
 }
+
+// `dealhunter daily -dry` 是"今天这一份日报长什么样"唯一的人工入口，而覆盖率扫出来
+// 它一直是 0%：没有任何自动化执行过这条命令。不带 -dry 的那一半故意不在这里跑 —— 实测
+// 它会真的发送、把 daily:last_sent 写进 state.json，还会往落盘目录写文件。
+func TestDailyDryRun(t *testing.T) {
+	dir := t.TempDir()
+	// 六行里应当只剩三行，三个被挡掉的理由各不相同：分数差 1、时刻已过、重复行。
+	// 所以"刚好 3 条"不是靠某一行凑出来的，任何一道门失效都会改变数目。
+	row := func(fp, title string, score int, meta string) string {
+		return `{"fingerprint":"` + fp + `","url":"https://dry.test/` + fp +
+			`","title":"` + title + `","source":"dry","category":"ai_free","score":` +
+			fmt.Sprintf("%d", score) + `,"is_free":true,` +
+			`"published_at":"2026-09-21T10:00:00Z","discovered_at":"2026-09-21T10:00:00Z","meta":` + meta + `}`
+	}
+	seed(t, dir, row("L1", "DryAlpha 每月免费额度", 80, `{}`))
+	seed(t, dir, row("L2", "DryBeta 到年底", 60, `{"expires_at":"2099-12-31T00:00:00Z"}`))
+	seed(t, dir, row("L3", "DryGamma 正卡在门槛上", 45, `{}`))
+	seed(t, dir, row("X1", "XrayLow 差一分进不来", 44, `{}`))
+	seed(t, dir, row("X2", "XrayExpired 时刻已过", 70, `{"expires_at":"2020-01-01T00:00:00Z"}`))
+	seed(t, dir, row("X3", "XrayDup 是重复行", 90, `{"dup_of":"L1"}`))
+
+	code, out := run(t, "-data", dir, "daily", "-dry")
+	if code != 0 {
+		t.Fatalf("daily -dry should succeed offline: code=%d out=%s", code, out)
+	}
+	m := regexp.MustCompile(`当前在效 (\d+) 条`).FindStringSubmatch(out)
+	if m == nil || m[1] != "3" {
+		t.Fatalf("the briefing should carry exactly the three claimable rows:\n%s", out)
+	}
+	shown := 0
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "https://dry.test/") {
+			shown++
+		}
+	}
+	if shown != 3 {
+		t.Fatalf("3 rows counted but %d rendered:\n%s", shown, out)
+	}
+	for _, want := range []string{"DryAlpha", "DryBeta", "DryGamma"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("live row %q missing from the briefing:\n%s", want, out)
+		}
+	}
+	for _, no := range []string{"XrayLow", "XrayExpired", "XrayDup"} {
+		if strings.Contains(out, no) {
+			t.Errorf("filtered row %q leaked into the briefing:\n%s", no, out)
+		}
+	}
+	// 报头的两个数是运维判断"什么时候会发、按哪个时区算"的依据。
+	if !strings.Contains(out, "09:00") || !strings.Contains(out, "Asia/Shanghai") {
+		t.Errorf("the header should name the configured slot and zone:\n%s", out)
+	}
+	if !strings.Contains(out, "今日还没发") {
+		t.Fatalf("a fresh store must report the slot as unused:\n%s", out)
+	}
+	// -dry 的全部意义：看完不等于用掉。写进 state.json 就是今天再也没有第二份。
+	if b, err := os.ReadFile(filepath.Join(dir, "state.json")); err == nil && strings.Contains(string(b), "daily:last_sent") {
+		t.Fatalf("-dry spent today's slot: %s", b)
+	}
+
+	// 反向的一半：名额真的用掉过的时候，必须说"已发过"。时刻取今天（配置时区）的正午，
+	// 免得测试正好跨过午夜就凭毫秒决定成败。
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Fatalf("LoadLocation: %v", err)
+	}
+	now := time.Now().In(loc)
+	at := time.Date(now.Year(), now.Month(), now.Day(), 12, 0, 0, 0, loc)
+	if err := os.WriteFile(filepath.Join(dir, "state.json"),
+		[]byte(`{"daily:last_sent":"`+at.UTC().Format(time.RFC3339)+`"}`), 0o600); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+	_, out = run(t, "-data", dir, "daily", "-dry")
+	if !strings.Contains(out, "今日已发过") {
+		t.Fatalf("a briefing already sent today must be reported as spent:\n%s", out)
+	}
+	// 同一份库、同一个 -dry，条数不能因为发过就变。
+	if m := regexp.MustCompile(`当前在效 (\d+) 条`).FindStringSubmatch(out); m == nil || m[1] != "3" {
+		t.Fatalf("the dry preview must not shrink after the slot is spent:\n%s", out)
+	}
+
+	// 空库那一条：0 条也要说清楚，而不是打印一个光秃秃的表头。
+	empty := t.TempDir()
+	code, out = run(t, "-data", empty, "daily", "-dry")
+	if code != 0 {
+		t.Fatalf("an empty store is not an error for -dry: code=%d out=%s", code, out)
+	}
+	if !strings.Contains(out, "当前在效 0 条") || !strings.Contains(out, "空报") {
+		t.Fatalf("a day with nothing live must say so:\n%s", out)
+	}
+}
