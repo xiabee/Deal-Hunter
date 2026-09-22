@@ -84,6 +84,20 @@ func Open(dir string) (*Store, error) {
 // Dir reports the on-disk location of the store.
 func (s *Store) Dir() string { return s.dir }
 
+// retiredStatePrefixes are namespaces whose producing code is gone: no reader
+// exists, and holding them in memory would write them back to disk on every
+// unrelated put - which is exactly how a pruned key came back in production.
+var retiredStatePrefixes = []string{"digest:"}
+
+func isRetiredStateKey(key string) bool {
+	for _, p := range retiredStatePrefixes {
+		if strings.HasPrefix(key, p) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Store) loadState() error {
 	b, err := os.ReadFile(filepath.Join(s.dir, "state.json"))
 	if errors.Is(err, os.ErrNotExist) {
@@ -97,6 +111,11 @@ func (s *Store) loadState() error {
 	}
 	if err := json.Unmarshal(b, &s.state); err != nil {
 		return fmt.Errorf("store: decode state: %w", err)
+	}
+	for k := range s.state {
+		if isRetiredStateKey(k) {
+			delete(s.state, k)
+		}
 	}
 	return nil
 }
@@ -537,12 +556,13 @@ func (s *Store) Compact(keepDays int) error {
 	}
 	// A cached vendor-entry verdict belongs to the row it was looked up for: once
 	// that row leaves the log, nothing can ever read the key again (it is keyed by
-	// fingerprint), and state.json is rewritten whole on every write. The retired
-	// 盘点通道 keys have no reader at all.
+	// fingerprint), and state.json is rewritten whole on every write. Retired
+	// namespaces go with it - see retiredStatePrefixes for why they must not stay
+	// in some process's memory, where one unrelated write brings them all back.
 	var drop []string
 	for k := range s.state {
 		switch {
-		case strings.HasPrefix(k, "digest:"):
+		case isRetiredStateKey(k):
 			drop = append(drop, k)
 		case strings.HasPrefix(k, "official:deal:"):
 			if !keptFP[k[len("official:deal:"):]] {

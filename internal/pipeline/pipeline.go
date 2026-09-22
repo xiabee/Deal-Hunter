@@ -28,9 +28,13 @@ import (
 
 // SourceReport is the per-source outcome of one round.
 type SourceReport struct {
-	Name   string `json:"name"`
-	Kind   string `json:"kind"`
+	Name string `json:"name"`
+	Kind string `json:"kind"`
+	// Found counts rows that survived the source's own keyword gate; Parsed counts
+	// everything the page yielded before that gate. Only Parsed distinguishes a
+	// redesigned page from a day with nothing in scope.
 	Found  int    `json:"found"`
+	Parsed int    `json:"parsed"`
 	Stored int    `json:"stored"`
 	Pushed int    `json:"pushed"`
 	Ms     int64  `json:"ms"`
@@ -239,10 +243,11 @@ func (a *App) RelayReady() bool { return a.relay != nil && a.relay.Ready() }
 func (a *App) Close() error { return a.st.Close() }
 
 type fetchOutcome struct {
-	cfg   config.Source
-	deals []*model.Deal
-	err   error
-	ms    int64
+	cfg    config.Source
+	deals  []*model.Deal
+	err    error
+	ms     int64
+	parsed int
 }
 
 // RunOnce performs one full round and returns its report.
@@ -272,7 +277,8 @@ func (a *App) RunOnce(ctx context.Context, trigger string) (*Run, error) {
 
 	var interrupts []*model.Deal
 	for _, oc := range outcomes {
-		rep := SourceReport{Name: oc.cfg.Name, Kind: oc.cfg.Kind, Found: len(oc.deals), Ms: oc.ms}
+		rep := SourceReport{Name: oc.cfg.Name, Kind: oc.cfg.Kind, Found: len(oc.deals),
+			Parsed: oc.parsed, Ms: oc.ms}
 		if oc.err != nil {
 			// Upstream errors can echo a URL with credentials in the query.
 			msg := redact.Text(oc.err.Error())
@@ -434,7 +440,8 @@ func (a *App) fetchAll(ctx context.Context, srcCfgs []config.Source) []fetchOutc
 			defer cancel()
 			start := time.Now()
 			deals, err := src.Fetch(perCall)
-			out[i] = fetchOutcome{cfg: sc, deals: deals, err: err, ms: time.Since(start).Milliseconds()}
+			out[i] = fetchOutcome{cfg: sc, deals: deals, err: err,
+				ms: time.Since(start).Milliseconds(), parsed: src.RawSeen()}
 		}(i, sc)
 	}
 	wg.Wait()
@@ -887,7 +894,10 @@ func (a *App) recordSourceHits(reports []SourceReport, now time.Time) {
 	stamp := now.UTC().Format(time.RFC3339)
 	changed := false
 	for _, r := range reports {
-		if r.Found == 0 || hits[r.Name] == stamp {
+		// Parsed, not Found: a source whose page still yields rows but none in
+		// scope today is healthy, and alarming on it would be a false alarm on
+		// exactly the quiet days this product is least interesting.
+		if r.Parsed == 0 || hits[r.Name] == stamp {
 			continue
 		}
 		hits[r.Name] = stamp

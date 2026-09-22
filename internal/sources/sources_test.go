@@ -92,6 +92,37 @@ func titles(deals []*model.Deal) string {
 	return strings.Join(out, " | ")
 }
 
+// 「一栏都没解析出来」和「解析出来了但都不含关键词」是两件事：前者是页面改版/被封，
+// 后者是这台机器今天确实没有新公告。健康度指标要的是前者，所以采集器得把闸门前的
+// 条数留一个计数。
+func TestRawSeenCountsRowsBeforeTheKeywordGate(t *testing.T) {
+	cfg := config.Source{Name: "rss-test", Kind: config.KindRSS,
+		URL: "https://www.example.com/latest.rss", Trust: 8, Keywords: []string{"绝不可能出现的词"}}
+	src := mustSource(t, Deps{Cfg: cfg, HTTP: newStub("rss", fixture(t, "rss_deals.xml")), State: newFakeState()})
+	deals, err := src.Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if len(deals) != 0 {
+		t.Fatalf("the gate should reject all 5 items, got %d", len(deals))
+	}
+	if got := src.RawSeen(); got != 5 {
+		t.Errorf("RawSeen = %d, want 5 (the page still parsed five rows)", got)
+	}
+
+	quiet := config.Source{Name: "rss-quiet", Kind: config.KindRSS, URL: "https://www.example.com/latest.rss", Trust: 8}
+	src2 := mustSource(t, Deps{Cfg: quiet, HTTP: newStub("rss",
+		[]byte(`<?xml version="1.0"?><rss><channel><title>改版</title></channel></rss>`)), State: newFakeState()})
+	// 空 feed 本身就被采集器当错误报（生产读数里见过那句 feed contains no items），
+	// 这里只关心：无论报不报错，闸门前的计数都是 0，健康度才不会把"没东西"记成"出声过"。
+	if _, err := src2.Fetch(context.Background()); err == nil {
+		t.Log("collector tolerated the empty channel")
+	}
+	if got := src2.RawSeen(); got != 0 {
+		t.Errorf("a page that yields no rows should read as 0, got %d", got)
+	}
+}
+
 func TestRSSParsesItemsLinksDatesAndEntities(t *testing.T) {
 	cfg := config.Source{Name: "rss-test", Kind: config.KindRSS, URL: "https://www.example.com/latest.rss", Trust: 8}
 	src := mustSource(t, Deps{Cfg: cfg, HTTP: newStub("rss", fixture(t, "rss_deals.xml")), State: newFakeState()})

@@ -316,7 +316,7 @@ func TestDashboardShowsHowLongASourceHasBeenSilent(t *testing.T) {
 	resp, body := get(t, ts, "/")
 	defer resp.Body.Close()
 	page := string(body)
-	for _, want := range []string{"idle_hours", "上次出声", "从没解析出内容"} {
+	for _, want := range []string{"idle_hours", "上次出声", "从没解析出内容", "解析 "} {
 		if !strings.Contains(page, want) {
 			t.Errorf("the sources card should mention %q", want)
 		}

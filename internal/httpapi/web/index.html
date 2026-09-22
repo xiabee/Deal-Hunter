@@ -467,7 +467,7 @@ async function loadSources(){
       '</div><div class="u">' + esc(s.kind) + ' · ' + esc(s.url) +
       (heard ? (' <span class="dot ' + stale + '"></span>' + esc(heard)) : '') +
       '</div></div>' +
-      '<div class="num">' + (last ? ('命中 ' + last.found + ' · 入库 ' + last.stored + ' · ' + last.ms + 'ms') : '—') + '</div>' +
+      '<div class="num">' + (last ? ('解析 ' + (last.parsed ?? '·') + ' · 命中 ' + last.found + ' · 入库 ' + last.stored + ' · ' + last.ms + 'ms') : '—') + '</div>' +
       '<div class="num">' + esc(state) + '</div></div>';
   });
   $('sources').innerHTML = rows.length ? rows.join('') : '<div class="empty">未配置信息源</div>';

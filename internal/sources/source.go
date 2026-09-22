@@ -62,6 +62,10 @@ type Source interface {
 	Name() string
 	Kind() string
 	Fetch(ctx context.Context) ([]*model.Deal, error)
+	// RawSeen reports how many rows the last Fetch parsed before the source's own
+	// keyword gate ran. Zero after a round that fetched fine means the page changed
+	// shape; a non-zero count with no deals means today simply had nothing in scope.
+	RawSeen() int
 }
 
 // New builds the collector named by cfg.Kind.
@@ -71,28 +75,36 @@ func New(d Deps) (Source, error) {
 	}
 	switch strings.ToLower(d.Cfg.Kind) {
 	case config.KindRSS:
-		return &RSS{base{d}}, nil
+		return &RSS{base{Deps: d}}, nil
 	case config.KindHTML:
-		return &HTML{base{d}}, nil
+		return &HTML{base{Deps: d}}, nil
 	case config.KindJSON:
-		return &JSON{base{d}}, nil
+		return &JSON{base{Deps: d}}, nil
 	case config.KindHN:
-		return &HN{base{d}}, nil
+		return &HN{base{Deps: d}}, nil
 	case config.KindSearch:
-		return &Search{base{d}}, nil
+		return &Search{base{Deps: d}}, nil
 	case config.KindSnapshot:
-		return &Snapshot{base{d}}, nil
+		return &Snapshot{base{Deps: d}}, nil
 	case config.KindOpenRouter:
-		return &OpenRouter{base{d}}, nil
+		return &OpenRouter{base{Deps: d}}, nil
 	default:
 		return nil, fmt.Errorf("sources: %s: unknown kind %q", d.Cfg.Name, d.Cfg.Kind)
 	}
 }
 
-type base struct{ Deps }
+type base struct {
+	Deps
+	// rawSeen counts rows the last Fetch parsed before the keyword gate. A fresh
+	// collector is built per round, so it never accumulates across rounds.
+	rawSeen int
+}
 
 func (b base) Name() string { return b.Cfg.Name }
 func (b base) Kind() string { return b.Cfg.Kind }
+
+// RawSeen satisfies Source for every collector through embedding.
+func (b base) RawSeen() int { return b.rawSeen }
 
 func (b base) fetch(ctx context.Context) (*httpx.Response, error) {
 	c, cancel := context.WithTimeout(ctx, b.Cfg.TimeoutOrDefault(b.Defaults.Timeout.D()))
@@ -109,11 +121,14 @@ func (b base) fetch(ctx context.Context) (*httpx.Response, error) {
 
 // deal normalizes one raw item and applies the source-level keyword gate. It
 // returns nil when the item is out of scope, which keeps collectors dumb.
-func (b base) deal(title, link, summary string, pub time.Time) *model.Deal {
+// Every attempt is counted, gated or not, so RawSeen can tell "the page yielded
+// nothing" apart from "nothing on the page was in scope".
+func (b *base) deal(title, link, summary string, pub time.Time) *model.Deal {
 	title = cleanText(title)
 	if title == "" {
 		return nil
 	}
+	b.rawSeen++
 	summary = truncate(cleanText(summary), 700)
 	abs, err := resolveURL(b.Cfg.URL, link)
 	if err != nil {

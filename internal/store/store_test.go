@@ -474,6 +474,43 @@ func TestConcurrentStoresDoNotEraceEachOthersKeys(t *testing.T) {
 	}
 }
 
+// 退役通道的键没有任何读者，但只要它还在某个进程的内存里，那次写入就会把它带回磁盘：
+// 生产上 `dealhunter compact` 剪掉 digest:last_sent 之后，服务下一次写游标又把它写回来了。
+// 所以在装载时就丢掉它，剪枝才真正有意义。
+func TestOpenDropsRetiredStateNamespaces(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "state.json"),
+		[]byte(`{"digest:last_sent":"2026-09-20T01:25:57Z","search:cursor:search-ai-free-cn":146,"daily:last_sent":"2026-09-22T01:03:23Z"}`),
+		0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, ok := s.GetState("digest:last_sent"); ok {
+		t.Error("the retired digest namespace should be gone on load")
+	}
+	for _, k := range []string{"search:cursor:search-ai-free-cn", "daily:last_sent"} {
+		if _, ok := s.GetState(k); !ok {
+			t.Errorf("%s should survive", k)
+		}
+	}
+	// 一次无关的写入不许把它写回来。
+	if err := s.PutState("maint:probe", "x"); err != nil {
+		t.Fatal(err)
+	}
+	again, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer again.Close()
+	if _, ok := again.GetState("digest:last_sent"); ok {
+		t.Error("a write resurrected the retired key")
+	}
+}
+
 func TestOpenRejectsEmptyDir(t *testing.T) {
 	if _, err := Open("   "); err == nil {
 		t.Fatal("expected an error for an empty dir")

@@ -176,6 +176,9 @@ func TestSourceIdlenessTracksTheLastRoundThatParsedAnything(t *testing.T) {
 		c.Sources = []config.Source{
 			{Name: "alive", Kind: config.KindRSS, URL: feedURL, Trust: 8},
 			{Name: "silent", Kind: config.KindRSS, URL: deadURL, Trust: 8},
+			// 页面照常出条目、只是今天没有一条在范围内的源：它是健康的，不能算衰减。
+			{Name: "off-topic", Kind: config.KindRSS, URL: feedURL, Trust: 8,
+				Keywords: []string{"绝不可能出现的词"}},
 		}
 	})
 	if _, err := app.RunOnce(context.Background(), "unit"); err != nil {
@@ -188,28 +191,33 @@ func TestSourceIdlenessTracksTheLastRoundThatParsedAnything(t *testing.T) {
 	for _, s := range app.SourceIdleness(time.Now()) {
 		byName[s.Name] = s
 	}
-	if len(byName) != 2 {
+	if len(byName) != 3 {
 		t.Fatalf("every enabled source must be reported, got %+v", byName)
 	}
 	alive, ok := byName["alive"]
 	if !ok || alive.Idle < 0 || alive.Idle > time.Minute {
 		t.Errorf("a source that just parsed rows should read as idle for minutes, got %+v", alive)
 	}
+	// 这一条是本指标的全部意义：它这轮一条都没交出来（全被关键词挡了），
+	// 但页面照样解析得出行，所以它是健康的，不是衰减。
+	if off := byName["off-topic"]; off.Last.IsZero() {
+		t.Error("a source that parsed rows but gated them all out must still count as heard from")
+	}
 	silent, ok := byName["silent"]
 	if !ok || silent.Idle >= 0 {
 		t.Errorf("a source that has never parsed anything must say 从未, got %+v", silent)
 	}
 
-	// 两天以后：抓到过的那个也变成衰减候选。
+	// 两天以后：抓到过的那两个也变成衰减候选，从没出声的仍在最前。
 	day := app.SourceIdleness(time.Now().Add(48 * time.Hour))
 	var flagged []string
 	for _, s := range day {
-		if s.Idle < 0 || s.Idle > 36*time.Hour {
+		if s.Last.IsZero() || s.Idle > 36*time.Hour {
 			flagged = append(flagged, s.Name)
 		}
 	}
-	if len(flagged) != 2 {
-		t.Errorf("after 48h both the silent and the gone-quiet source should surface, got %v", flagged)
+	if len(flagged) != 3 {
+		t.Errorf("after 48h every source should surface as stale, got %v", flagged)
 	}
 	// 按"最久没出声"排在前，运维看第一行就能抓到最坏的那个。
 	if day[0].Name != "silent" {
@@ -219,7 +227,8 @@ func TestSourceIdlenessTracksTheLastRoundThatParsedAnything(t *testing.T) {
 	// 时钟倒挂不能伪装成"从没出声"：读的一侧比写的一侧早几十秒是真实发生过的
 	// （服务刚重启就有人跑 doctor）。哨兵必须是 Last 为零，不是 Idle 为负。
 	future := time.Now().Add(2 * time.Hour).UTC().Format(time.RFC3339)
-	if err := app.st.PutState(srcLastHit, map[string]string{"alive": future, "silent": future}); err != nil {
+	if err := app.st.PutState(srcLastHit, map[string]string{
+		"alive": future, "silent": future, "off-topic": future}); err != nil {
 		t.Fatal(err)
 	}
 	for _, s := range app.SourceIdleness(time.Now()) {
