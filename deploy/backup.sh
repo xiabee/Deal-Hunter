@@ -24,6 +24,9 @@ set -euo pipefail
 # with the production layout intact - the archive keeps containing var/lib/... and
 # etc/..., which is what makes the drill worth running.
 ROOT="${DH_BACKUP_ROOT:-/}"
+PROD_ROOT=1
+[[ $ROOT == "/" ]] || PROD_ROOT=0
+ROOT="${ROOT%/}"
 STATE="$ROOT/var/lib/deal-hunter"
 ETC="$ROOT/etc/deal-hunter"
 DIR="${DH_BACKUP_DIR:-$ROOT/var/backups/deal-hunter}"
@@ -36,16 +39,18 @@ log() { printf '\033[1;36m▸\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31m✗\033[0m %s\n' "$*" >&2; exit 1; }
 
+[[ $STATE == /* && $ETC == /* && $DIR == /* ]] || die "路径必须是绝对路径（DH_BACKUP_ROOT=$ROOT）"
+
 # Retention prunes by deleting. A KEEP of 0 makes `head -n -0` list *every* archive,
 # so a mistyped unit would empty the backup directory in one run; a non-number just
 # silently stops pruning. Refuse both instead.
 [[ $KEEP =~ ^[0-9]+$ ]] || die "DH_BACKUP_KEEP 必须是非负整数，收到的是「$KEEP」"
 (( KEEP >= 1 )) || die "DH_BACKUP_KEEP=0 会把 $DIR 里的归档全删光；至少留 1 份"
 
-if [[ $ROOT == "/" ]]; then
+if [[ $PROD_ROOT == 1 ]]; then
 	[[ $EUID -eq 0 ]] || die "需要 root（状态目录是 0750 dealhunter）：sudo $0"
 else
-	[[ $EUID -eq 0 ]] || log "以非 root 身份跑在假根 $ROOT 下（演练模式）"
+	[[ $EUID -eq 0 ]] || log "以非 root 身份跑在假根 ${DH_BACKUP_ROOT} 下（演练模式）"
 fi
 [[ -d $STATE ]] || die "找不到 $STATE"
 
@@ -65,7 +70,7 @@ trap 'rm -rf "$TMP"' EXIT
 # changed, and keeping them makes every archive grow without adding recovery
 # value beyond the last one.
 tar --create --gzip --file "$DIR/$NAME.tar.gz" \
-	--exclude='*.bak-*' --directory="$ROOT" var/lib/deal-hunter etc/deal-hunter \
+	--exclude='*.bak-*' --directory="${ROOT:-/}" var/lib/deal-hunter etc/deal-hunter \
 	2> >(grep -v 'file changed as we read it' >&2 || true)
 # A collection round may write while we read; tar warns rather than fails, and
 # the restore check below is what decides whether the archive is usable.
