@@ -5,8 +5,9 @@
 #   sudo ./deploy/install.sh dist/dealhunter-linux-amd64
 #
 # The target needs no Go toolchain: build the binary with `make build-linux`
-# (locally or on the office CI builder) and ship it. Re-running is safe:
-# existing files are kept as timestamped backups and never overwritten blindly.
+# (locally or on the office CI builder) and ship it. Re-running is safe: the live
+# config is never overwritten, and what it replaces is moved aside first - one
+# previous binary, and one config snapshot per day.
 set -euo pipefail
 
 BIN_SRC="${1:-dist/dealhunter-linux-amd64}"
@@ -15,7 +16,7 @@ ETC=/etc/deal-hunter
 STATE=/var/lib/deal-hunter
 SERVICE=deal-hunter
 RUNUSER=dealhunter
-STAMP="$(date +%Y%m%d-%H%M%S)"
+DAY="$(date +%Y%m%d)"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 log() { printf '\033[1;36m▸\033[0m %s\n' "$*"; }
@@ -44,9 +45,16 @@ install -d -m 0755 -o root -g root "$PREFIX"
 install -d -m 0750 -o "$RUNUSER" -g "$RUNUSER" "$STATE"
 install -d -m 0755 -o root -g root "$ETC"
 
+# One previous binary under a fixed name. The old shape copied the running binary
+# aside under a fresh timestamp on every upgrade and nothing reclaimed them: 8.5 MB
+# each, 28 on the machine that runs this service, 227 MB for a rollback convenience
+# that is a lie anyway - further back than one version you would rebuild from git.
+# "Which version is this" does not need a filename, `./deal-hunter.bak-prev version`
+# answers it from the build stamp inside. The .bak- prefix is load-bearing: that is
+# what keeps these out of every archive backup.sh writes.
 if [[ -f "$PREFIX/deal-hunter" ]]; then
-	cp -a "$PREFIX/deal-hunter" "$PREFIX/deal-hunter.bak-$STAMP"
-	log "旧版本已备份为 deal-hunter.bak-$STAMP"
+	mv -f "$PREFIX/deal-hunter" "$PREFIX/deal-hunter.bak-prev"
+	log "旧版本已挪为 deal-hunter.bak-prev（只留上一版，再往前从 git 重建）"
 fi
 install -m 0755 "$BIN_SRC" "$PREFIX/deal-hunter"
 install -m 0755 "$REPO_ROOT/deploy/backup.sh" "$PREFIX/backup.sh"
@@ -63,9 +71,23 @@ if [[ ! -f "$ETC/config.json" ]]; then
 	install -m 0644 "$REPO_ROOT/config/deal-hunter.example.json" "$ETC/config.example.json"
 	log "已放置 $ETC/config.json（沿用内置 15 个信息源），参考 $ETC/config.example.json"
 else
-	cp -a "$ETC/config.json" "$ETC/config.json.bak-$STAMP"
-	log "保留现有配置，备份为 config.json.bak-$STAMP"
+	# A snapshot per day rather than per run. Deploys come in tens on a working day,
+	# and each one used to leave a file in the directory that also holds the webhook
+	# secret. Production config is deliberately not in git, so this history is the
+	# only copy of it - keep it, just not 28 copies of the same afternoon.
+	cp -a "$ETC/config.json" "$ETC/config.json.bak-$DAY"
+	log "保留现有配置，今天的旧副本已更新为 config.json.bak-$DAY"
 	log "注意：本版交付形态改为每天一份日报。旧配置里的 notify.digest、notify.feishu.{min_score,max_per_run,silent_hours} 已废弃——留着不报错，但不再生效；filter.min_score 与 DH_MIN_SCORE 从未参与过任何过滤，已一并删除。可对照仓库里的 config/deal-hunter.example.json 清理，原配置已备份。"
+fi
+
+# Hosts upgraded from the per-run scheme still have those files on disk. Deleting
+# them is whoever owns the host's call, but it should not be invisible.
+shopt -s nullglob
+legacy_bin=("$PREFIX"/deal-hunter.bak-[0-9]*)
+legacy_cfg=("$ETC"/config.json.bak-[0-9]*-[0-9]*)
+shopt -u nullglob
+if (( ${#legacy_bin[@]} + ${#legacy_cfg[@]} > 0 )); then
+	warn "盘上还有旧式逐次备份：$PREFIX 里 ${#legacy_bin[@]} 个二进制、$ETC 里 ${#legacy_cfg[@]} 个配置（新的排法不再产生它们）。要清就一条：sudo rm -f $PREFIX/deal-hunter.bak-[0-9]* $ETC/config.json.bak-[0-9]*-[0-9]*"
 fi
 
 if [[ ! -f "$ETC/deal-hunter.env" ]]; then
