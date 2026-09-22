@@ -178,6 +178,17 @@ if (Get-Command bash -ErrorAction SilentlyContinue) {
     Write-Host "  ! 本机没有 bash，跳过（Linux 侧由 ci-office.sh 执行同一条）" -ForegroundColor Yellow
 }
 
+# Same as the bash gate. The drill prints a visible "skipped" under MINGW (its
+# failure legs are built from POSIX permission bits), so this step is informative
+# rather than red on Windows.
+Step "openclaw installer drill: one previous copy, refusal when it cannot be written"
+if (Get-Command bash -ErrorAction SilentlyContinue) {
+    & bash scripts/test-openclaw-integration.sh
+    if ($LASTEXITCODE -ne 0) { Fail "openclaw installer drill" }
+} else {
+    Write-Host "  ! 本机没有 bash，跳过（Linux 侧由 ci-office.sh 执行同一条）" -ForegroundColor Yellow
+}
+
 if (-not $Quick) {
     Step "cross-compile (deploy targets)"
     foreach ($pair in @("linux/amd64", "linux/arm64", "windows/amd64")) {

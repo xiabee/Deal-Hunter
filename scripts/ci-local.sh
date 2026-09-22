@@ -154,6 +154,13 @@ echo "  exited 0 when -hold expired, with no ERROR in the log"
 step "backup drill: sandbox restore, retention and refusals"
 bash scripts/test-backup.sh || fail "backup drill"
 
+# The OpenClaw installer rewrites files it does not own. Same reason for a drill: it
+# had only ever been run by hand, and the guard it needs (keep one previous copy, and
+# refuse to overwrite when that copy could not be written) is the kind that silently
+# rots back into "copy aside with a fresh timestamp" if nothing checks it.
+step "openclaw installer drill: one previous copy, and refusal when it cannot be written"
+bash scripts/test-openclaw-integration.sh || fail "openclaw installer drill"
+
 if [[ "$QUICK" != "1" ]]; then
 	step "cross-compile (deploy targets)"
 	for pair in linux/amd64 linux/arm64 windows/amd64; do

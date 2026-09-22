@@ -17,17 +17,24 @@ WS="$OPENCLAW_HOME/workspace/deal-hunter"
 SKILLS_DIR="${OPENCLAW_SKILLS_DIR:-$OPENCLAW_HOME/skills}"
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKUP_ROOT="${BACKUP_ROOT:-$HOME/backups/deal-hunter}"
-STAMP="$(date +%Y%m%d-%H%M%S)"
 
 echo "[INFO] OpenClaw home: $OPENCLAW_HOME (user: $(id -un))"
 if [[ ! -d "$OPENCLAW_HOME" ]]; then
 	echo "[WARN] 未发现 OpenClaw 目录；仍会创建 workspace，装好 OpenClaw 后即可使用。"
 fi
 
+# One previous snapshot under a fixed name. These used to carry a fresh timestamp
+# on every run and nothing reclaimed them, so the pile grew by a whole workspace
+# each time this was re-installed. A backup exists to make the overwrite below
+# survivable; if it cannot be written, the overwrite must not happen.
 if [[ -d "$WS" ]]; then
 	mkdir -p "$BACKUP_ROOT"
-	tar -czf "$BACKUP_ROOT/workspace-deal-hunter-$STAMP.tgz" -C "$(dirname "$WS")" "$(basename "$WS")" \
-		&& echo "[INFO] 旧 workspace 已备份到 $BACKUP_ROOT/workspace-deal-hunter-$STAMP.tgz"
+	if tar -czf "$BACKUP_ROOT/workspace-deal-hunter.tgz" -C "$(dirname "$WS")" "$(basename "$WS")"; then
+		echo "[INFO] 旧 workspace 已备份到 $BACKUP_ROOT/workspace-deal-hunter.tgz（只留上一份）"
+	else
+		echo "[WARN] 旧 workspace 备份失败，先停在这里：不覆盖 $WS" >&2
+		exit 1
+	fi
 fi
 
 install -d -m 0755 "$WS"
@@ -41,7 +48,13 @@ echo "[OK] 已安装到 $WS"
 if [[ -d "$SKILLS_DIR" ]]; then
 	target="$SKILLS_DIR/deal-hunter.skill.md"
 	if [[ -e "$target" ]]; then
-		cp -f "$target" "$BACKUP_ROOT/deal-hunter.skill.md.$STAMP.bak" 2>/dev/null || true
+		mkdir -p "$BACKUP_ROOT"
+		if cp -f "$target" "$BACKUP_ROOT/deal-hunter.skill.md.bak"; then
+			echo "[INFO] 技能说明的上一份在 $BACKUP_ROOT/deal-hunter.skill.md.bak"
+		else
+			echo "[WARN] 备份 $target 失败，先停在这里：不覆盖它" >&2
+			exit 1
+		fi
 	fi
 	install -m 0644 "$SRC_DIR/deal-hunter.skill.md" "$target"
 	echo "[OK] 技能说明已放到 $target"
