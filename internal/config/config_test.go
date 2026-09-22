@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -437,5 +438,102 @@ func TestObsoleteFeishuTimezoneKeyIsInert(t *testing.T) {
 	}
 	if got := cfg.Timezone; got != "Asia/Shanghai" {
 		t.Errorf("obsolete feishu.timezone leaked into the reader clock: %s", got)
+	}
+}
+
+// acceptedKeys lists every JSON key path the Config struct actually reads, with
+// array indices folded to "[]". json:"-" fields are deliberately absent, so a
+// secret-shaped key (webhook_url) shows up as unknown.
+func acceptedKeys(t *testing.T) map[string]bool {
+	t.Helper()
+	out := map[string]bool{}
+	var walk func(typ reflect.Type, prefix string)
+	walk = func(typ reflect.Type, prefix string) {
+		for typ.Kind() == reflect.Ptr {
+			typ = typ.Elem()
+		}
+		switch typ.Kind() {
+		case reflect.Struct:
+			for i := 0; i < typ.NumField(); i++ {
+				f := typ.Field(i)
+				name := strings.Split(f.Tag.Get("json"), ",")[0]
+				if name == "" {
+					name = f.Name
+				}
+				if name == "-" {
+					continue
+				}
+				path := name
+				if prefix != "" {
+					path = prefix + "." + name
+				}
+				out[path] = true
+				walk(f.Type, path)
+			}
+		case reflect.Slice, reflect.Array, reflect.Map:
+			// Map keys are free-form (params, headers): anything below is allowed.
+			if typ.Kind() == reflect.Map {
+				out[prefix+".*"] = true
+				return
+			}
+			walk(typ.Elem(), prefix+"[]")
+			out[prefix+"[]"] = true
+		}
+	}
+	walk(reflect.TypeOf(Config{}), "")
+	return out
+}
+
+// 出厂配置是新用户抄的那一份：键名改了而它没跟，抄来的人得到一个"写了但不生效"的
+// 设置，而且没有任何一处会报错（ROADMAP 里就记着这个失败模式）。
+// 结构体是真来源，所以按路径逐键核对它。
+func TestShippedConfigsOnlyUseRealKeys(t *testing.T) {
+	accepted := acceptedKeys(t)
+	if len(accepted) < 40 {
+		t.Fatalf("only %d keys read back from Config, so this check would pass vacuously", len(accepted))
+	}
+	for _, name := range []string{"deal-hunter.example.json", "deal-hunter.starter.json"} {
+		path := filepath.Join("..", "..", "config", name)
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		var doc map[string]any
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		var walk func(v any, prefix string)
+		walk = func(v any, prefix string) {
+			switch node := v.(type) {
+			case map[string]any:
+				for k, child := range node {
+					path := k
+					if prefix != "" {
+						path = prefix + "." + k
+					}
+					if k == "_comment" {
+						continue
+					}
+					if !accepted[path] && !accepted[prefix+".*"] {
+						t.Errorf("%s: 键 %q 不是 Config 结构体认识的字段", name, path)
+						continue
+					}
+					walk(child, path)
+				}
+			case []any:
+				for _, item := range node {
+					walk(item, prefix+"[]")
+				}
+			}
+		}
+		walk(doc, "")
+
+		cfg := Default()
+		if err := json.Unmarshal(raw, cfg); err != nil {
+			t.Fatalf("%s does not decode into Config: %v", name, err)
+		}
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("%s would be refused by Validate: %v", name, err)
+		}
 	}
 }
