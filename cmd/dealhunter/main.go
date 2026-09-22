@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -974,28 +975,25 @@ func sourceSilence(cfg *config.Config, st *store.Store, now time.Time) (string, 
 // is the one recovery path that is not on the same disk as the data - so "we have
 // backups" has to be answered from a record, not from the unit existing.
 func backupFreshness(dataDir string) (string, string) {
-	b, err := os.ReadFile(filepath.Join(dataDir, "backup.stamp"))
+	age, archive, err := store.BackupAge(dataDir)
 	if err != nil {
-		return "warn", "数据目录里没有 backup.stamp：backup.sh 没成功跑过" +
-			"（未排程→systemctl enable --now deal-hunter-backup.timer；跑了就失败→journalctl -u 该 unit）"
+		if errors.Is(err, store.ErrNoBackupRecord) {
+			return "warn", "数据目录里没有 backup.stamp：backup.sh 没成功跑过" +
+				"（未排程→systemctl enable --now deal-hunter-backup.timer；跑了就失败→journalctl -u 该 unit）"
+		}
+		return "warn", err.Error()
 	}
-	fields := strings.Fields(string(b))
-	if len(fields) == 0 {
-		return "warn", "backup.stamp 是空的"
+	if age > store.BackupPatience {
+		return "warn", "上次成功备份已是 " + humanDelta(age) + "前，超过每晚一次的节奏" + backupArchiveHint(archive)
 	}
-	t, err := time.Parse("2006-01-02T15:04:05Z", fields[0])
-	if err != nil {
-		return "warn", "backup.stamp 的首字段不是 UTC 时刻: " + truncate(fields[0], 24)
+	return "ok", "上次成功备份 " + humanDelta(age) + "前" + backupArchiveHint(archive)
+}
+
+func backupArchiveHint(archive string) string {
+	if archive == "" {
+		return ""
 	}
-	age := time.Since(t)
-	archive := ""
-	if len(fields) > 1 {
-		archive = " · " + truncate(fields[1], 34)
-	}
-	if age > 36*time.Hour {
-		return "warn", "上次成功备份已是 " + humanDelta(age) + "前，超过每晚一次的节奏" + archive
-	}
-	return "ok", "上次成功备份 " + humanDelta(age) + "前" + archive
+	return " · " + truncate(archive, 34)
 }
 
 // compactionState reports when the store was last compacted. The scheduled trigger

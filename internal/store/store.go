@@ -46,6 +46,43 @@ type Stats struct {
 }
 
 // Open prepares dir, loads the existing log and returns a writable store.
+// ErrNoBackupRecord distinguishes "backup.sh never reported a success" from the
+// other unreadable-stamp cases, so doctor can name the two different next steps.
+var ErrNoBackupRecord = errors.New("数据目录里没有 backup.stamp")
+
+// BackupPatience is how old the last *successful* backup may be before readers stop
+// trusting it. One threshold for two consumers: doctor warns at it, and the scheduled
+// sweep refuses to delete rows past it.
+const BackupPatience = 36 * time.Hour
+
+// BackupAge reads deploy/backup.sh's own record of its last successful run. It reports
+// facts only - how long ago, which archive - and an error when the record is missing,
+// empty, or not a timestamp. Deciding what a stale or absent record means is the
+// caller's job, but the reading of it must not be written twice.
+func BackupAge(dataDir string) (time.Duration, string, error) {
+	b, err := os.ReadFile(filepath.Join(dataDir, "backup.stamp"))
+	if err != nil {
+		return 0, "", fmt.Errorf("%w: %v", ErrNoBackupRecord, err)
+	}
+	fields := strings.Fields(string(b))
+	if len(fields) == 0 {
+		return 0, "", fmt.Errorf("backup.stamp 是空的")
+	}
+	t, err := time.Parse("2006-01-02T15:04:05Z", fields[0])
+	if err != nil {
+		head := fields[0]
+		if len(head) > 24 {
+			head = head[:24]
+		}
+		return 0, "", fmt.Errorf("backup.stamp 的首字段不是 UTC 时刻: %s", head)
+	}
+	archive := ""
+	if len(fields) > 1 {
+		archive = fields[1]
+	}
+	return time.Since(t), archive, nil
+}
+
 // StateLastCompact records when the store was last compacted. Both writers mean the
 // same fact - the scheduled sweep and the operator's `dealhunter compact` - so the
 // scheduler must not re-run right after a manual one, and doctor must not keep

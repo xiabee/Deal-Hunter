@@ -107,6 +107,21 @@ func (b *syncBuf) String() string {
 	return b.buf.String()
 }
 
+// freshBackupStamp stands in for deploy/backup.sh having just succeeded: the sweep
+// refuses to delete rows without recent proof that a backup landed.
+func freshBackupStamp(t *testing.T, app *pipeline.App) {
+	t.Helper()
+	stamp := time.Now().UTC().Add(-2 * time.Hour).Format("2006-01-02T15:04:05Z")
+	writeStamp(t, app, stamp+" deal-hunter-test.tar.gz\n")
+}
+
+func writeStamp(t *testing.T, app *pipeline.App, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(app.Store().Dir(), "backup.stamp"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func setMarker(t *testing.T, app *pipeline.App, at time.Time) {
 	t.Helper()
 	if err := app.Store().PutState(store.StateLastCompact, at.UTC().Format(time.RFC3339)); err != nil {
@@ -116,6 +131,7 @@ func setMarker(t *testing.T, app *pipeline.App, at time.Time) {
 
 func TestSweepPrunesOldLowScoreRows(t *testing.T) {
 	app, cfg := newApp(t)
+	freshBackupStamp(t, app)
 	old := seed(t, app, 90, 30, "九十天前的低分条目")
 	fresh := seed(t, app, 1, 92, "昨天的条目")
 
@@ -150,6 +166,7 @@ func TestSweepWaitsSevenDaysBetweenRuns(t *testing.T) {
 // 永远凑不满 —— 记号已经在盘上了，判据却还在内存里。
 func TestSweepIsNotResetByARestart(t *testing.T) {
 	app, cfg := newApp(t)
+	freshBackupStamp(t, app)
 	old := seed(t, app, 90, 30, "九十天前的低分条目")
 	cfg.Interval = config.Duration(24 * time.Hour) // 一轮之后就该一直卡在等待里
 
@@ -190,6 +207,7 @@ func TestSweepIsNotResetByARestart(t *testing.T) {
 // 记号读不出来时必须当作"该剪"，而不是当作"刚剪过"——否则一个坏字节就把剪枝永久关掉。
 func TestSweepIgnoresAnUnreadableMarker(t *testing.T) {
 	app, cfg := newApp(t)
+	freshBackupStamp(t, app)
 	old := seed(t, app, 90, 30, "九十天前的低分条目")
 	if err := app.Store().PutState(store.StateLastCompact, "not-a-time"); err != nil {
 		t.Fatalf("PutState: %v", err)
@@ -210,5 +228,44 @@ func TestSweepIgnoresAnUnreadableMarker(t *testing.T) {
 	}
 	if _, perr := time.Parse(time.RFC3339, s); perr != nil {
 		t.Errorf("marker should now hold a real timestamp, got %q", s)
+	}
+}
+
+// 剪掉的行重启救不回来，所以排程只在"最近确实成功备份过"的证据下才动手。
+// 三种缺证据的情形必须是同一结果：什么都不删。
+func TestSweepRefusesWithoutProofOfABackup(t *testing.T) {
+	cases := []struct {
+		name  string
+		stamp func(t *testing.T, app *pipeline.App)
+		swept bool
+	}{
+		{"从来没有备份", func(t *testing.T, app *pipeline.App) {}, false},
+		{"上次成功备份已过期", func(t *testing.T, app *pipeline.App) {
+			writeStamp(t, app, time.Now().UTC().Add(-40*time.Hour).Format("2006-01-02T15:04:05Z")+" deal-hunter-old.tar.gz\n")
+		}, false},
+		{"记号读不出", func(t *testing.T, app *pipeline.App) {
+			writeStamp(t, app, "胡说八道\n")
+		}, false},
+		{"记号是空的", func(t *testing.T, app *pipeline.App) {
+			writeStamp(t, app, "")
+		}, false},
+		{"两小时前的成功备份（对照：这条必须剪）", func(t *testing.T, app *pipeline.App) {
+			freshBackupStamp(t, app)
+		}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			app, cfg := newApp(t)
+			old := seed(t, app, 90, 30, "九十天前的低分条目")
+			tc.stamp(t, app)
+			(&Loop{App: app, Cfg: cfg, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}).compact()
+			kept := strings.Contains(logLines(t, app), old.Fingerprint)
+			if kept == tc.swept {
+				t.Errorf("swept=%v but row kept=%v —— 两者必须相反", tc.swept, kept)
+			}
+			if !tc.swept && markerOnDisk(t, app) {
+				t.Error("a refused sweep must not leave a marker, or doctor would claim it pruned")
+			}
+		})
 	}
 }

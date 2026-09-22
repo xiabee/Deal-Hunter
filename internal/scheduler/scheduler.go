@@ -93,6 +93,18 @@ func (l *Loop) compact() {
 			}
 		}
 	}
+	// Deleting rows is the one thing here that a restart cannot undo, so it waits
+	// for proof that a backup actually succeeded recently. A host whose timer never
+	// fired, or whose record is missing or unreadable, keeps its rows: not pruning
+	// is recoverable, pruning without a net is not.
+	if age, archive, err := store.BackupAge(st.Dir()); err != nil {
+		l.Log.Warn("compaction skipped: no usable record of a successful backup", "err", err)
+		return
+	} else if age > store.BackupPatience {
+		l.Log.Warn("compaction skipped: the last successful backup is too old to lean on",
+			"backup_age_hours", int(age.Hours()), "archive", archive)
+		return
+	}
 	if err := st.Compact(compactKeepDays); err != nil {
 		l.Log.Warn("compact failed", "err", err)
 		return
