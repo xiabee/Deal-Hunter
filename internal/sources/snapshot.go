@@ -35,6 +35,9 @@ func (s *Snapshot) Fetch(ctx context.Context) ([]*model.Deal, error) {
 	if len(facts) == 0 {
 		return nil, fmt.Errorf("source %s: snapshot found no price facts (mode=%s)", s.Cfg.Name, mode)
 	}
+	// Count the facts the page yielded, not the ones that turned out to be new:
+	// a price list nobody touched is a healthy source, not a silent one.
+	s.countSeen(len(facts))
 
 	key := stateSnapshotPrefix + s.Cfg.Name
 	prev := map[string]bool{}

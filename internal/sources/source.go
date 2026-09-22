@@ -62,9 +62,10 @@ type Source interface {
 	Name() string
 	Kind() string
 	Fetch(ctx context.Context) ([]*model.Deal, error)
-	// RawSeen reports how many rows the last Fetch parsed before the source's own
-	// keyword gate ran. Zero after a round that fetched fine means the page changed
-	// shape; a non-zero count with no deals means today simply had nothing in scope.
+	// RawSeen reports how many rows the last Fetch found in the payload, before the
+	// source's own keyword gate, price filter or change-diff. Zero after a round that
+	// fetched fine means the page changed shape; a non-zero count with no deals means
+	// today simply had nothing worth reporting.
 	RawSeen() int
 }
 
@@ -105,6 +106,15 @@ func (b base) Kind() string { return b.Cfg.Kind }
 
 // RawSeen satisfies Source for every collector through embedding.
 func (b base) RawSeen() int { return b.rawSeen }
+
+// countSeen records rows a collector saw before its own diff or price filter, for
+// the kinds that only emit on change. Without it a healthy snapshot source reads
+// as silent on every round where the page simply has not moved.
+func (b *base) countSeen(n int) {
+	if n > 0 {
+		b.rawSeen += n
+	}
+}
 
 func (b base) fetch(ctx context.Context) (*httpx.Response, error) {
 	c, cancel := context.WithTimeout(ctx, b.Cfg.TimeoutOrDefault(b.Defaults.Timeout.D()))

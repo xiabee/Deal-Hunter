@@ -55,6 +55,9 @@ func (o *OpenRouter) Fetch(ctx context.Context) ([]*model.Deal, error) {
 	if len(catalog.Data) == 0 {
 		return nil, fmt.Errorf("source %s: empty catalogue", o.Cfg.Name)
 	}
+	// The catalogue itself is what this source sees: free-ness and the new-since-
+	// baseline diff come after, and neither may make a healthy source look silent.
+	o.countSeen(len(catalog.Data))
 
 	now := o.now()
 	graceDays := atoiOr(o.Cfg.Param("first_run_grace_days", "14"), 14)

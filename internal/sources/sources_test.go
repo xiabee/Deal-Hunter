@@ -471,6 +471,11 @@ func TestSnapshotSeedsBaselineThenReportsOnlyNewFacts(t *testing.T) {
 	if deals, err := again.Fetch(context.Background()); err != nil || len(deals) != 0 {
 		t.Fatalf("unchanged page must report nothing, deals=%d err=%v", len(deals), err)
 	}
+	// 页面照常解析出事实、只是没有新的 —— 这正是信源健康度要区分的东西：
+	// 差分之后 0 条不等于这个源安静了。
+	if again.RawSeen() == 0 {
+		t.Error("an unchanged page still yielded facts; RawSeen must count them before the diff")
+	}
 
 	changed := base + "\n<p>新上架：GLM-5.3-flash 免费额度 100 万 tokens 限时领取</p>\n"
 	third := mustSource(t, Deps{Cfg: cfg, HTTP: &stubFetcher{body: []byte(changed)}, State: state})
@@ -569,6 +574,10 @@ func TestOpenRouterTreatsMissingPricingAsPaid(t *testing.T) {
 	}
 	if len(deals) != 0 {
 		t.Fatalf("unparseable prices must never be reported as free: %s", titles(deals))
+	}
+	// 目录照常返回了一条模型，只是不免费：源是健康的，健康度计数不能记 0。
+	if src.RawSeen() != 1 {
+		t.Errorf("RawSeen = %d, want 1 (the payload had one row, whatever the price said)", src.RawSeen())
 	}
 }
 
