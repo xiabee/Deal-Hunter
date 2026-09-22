@@ -23,7 +23,9 @@
 
 | 项 | 结论 | 证据 |
 |---|---|---|
-| 信源静默判据的语义（M16 补正） | VERIFIED（生产实测） | 上一版用 `found`（**过闸后**的行数）判断源是否还活着，会把"页面照常出条目、今天没有一条含关键词"误报成衰减。现在记的是闸门**之前**的条数（`SourceReport.Parsed`，由 `base.deal` 计数、`Source.RawSeen()` 暴露，八个采集器靠嵌入提升零改动）。生产 2026-09-22 的对照读数：`nc-vouchers-zf` 解析 54 → 命中 0、`nc-vouchers-swj` 143 → 1、`lowendtalk-latest` 97 → 80 —— 前两个在旧语义下都会在 36 小时后被点名，现在每轮刷新记号，安静源从 3 降到 2。面板并排显示"解析 N · 命中 M"，这个区别可诊断而不是要靠读代码推 |
+| 信源静默判据的语义（M16 补正） | VERIFIED（生产实测） | 上一版用 `found`（**过闸后**的行数）判断源是否还活着，会把"页面照常出条目、今天没有一条含关键词"误报成衰减。现在记的是闸门**之前**的条数（`SourceReport.Parsed`，由 `base.deal` 计数、`Source.RawSeen()` 暴露，八个采集器靠嵌入提升零改动）。生产 2026-09-22 的对照读数：`nc-vouchers-zf` 解析 54 → 命中 0、`nc-vouchers-swj` 143 → 1、`lowendtalk-latest` 97 → 80 —— 前两个在旧语义下都会在 36 小时后被点名，现在每轮刷新记号，安静源从 3 降到 2。第二天又补一刀：`openrouter`/`snapshot` 的计数还在**自己那层差分**
+之后（新增免费模型、价格事实有变），所以部署 `121a027` 后改成数"看到的行"（实测 parsed=443 与 8、
+found 都是 0），没记号的源 **17 个里 0 个** —— 实时读数看 `/api/v1/sources` 的 `last_hit`，别抄这里。面板并排显示"解析 N · 命中 M"，这个区别可诊断而不是要靠读代码推 |
 | 退役状态键真的从盘上消失了 | VERIFIED（生产实测） | `digest:` 命名空间在装载与"以磁盘为底的合并"两侧都过滤（缺一侧就会被另一侧捞回来，各配一次变异）。部署 `b5c528a` 后 `grep -c 'digest:' state.json` = **0**，而键总数 110、`maint:last_compact` 仍在（9.6 小时前那次手动压缩的记号又活过一轮） |
 | 单元 + 集成测试 | VERIFIED | `go test -race ./...` 本地与 linux-ci 均全绿。测试函数数量不在这里抄数（抄一次就开始漂）：现算 `grep -rn "^func Test" --include=*_test.go . \| wc -l` |
 | 快速门禁 | VERIFIED | `bash scripts/ci-local.sh --quick` → `✓ CI PASSED e849a0b`（fmt/vet/build/secretscan/身份/离线冒烟） |
