@@ -14,7 +14,10 @@ QUICK=0
 [[ "${1:-}" == "--quick" ]] && QUICK=1
 export GOFLAGS="-mod=mod"
 VERSION="${VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo dev)}"
-COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo none)"
+# Overridable for the same reason VERSION is: scripts/ci-office.sh ships a tarball
+# with no .git in it, and an artifact whose stamp says "none" cannot be traced back
+# to the commit it was built from - which is the one thing the deploy check asks.
+COMMIT="${COMMIT:-$(git rev-parse --short HEAD 2>/dev/null || echo none)}"
 BUILT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 step() { printf '\n\033[1;36m▸ %s\033[0m\n' "$*"; }

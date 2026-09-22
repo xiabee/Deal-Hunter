@@ -66,7 +66,16 @@ ssh -o BatchMode=yes "$HOST" "test -f /tmp/$REMOTE_DIR/go.mod && test -f /tmp/$R
 	|| die "payload did not land intact"
 
 say "running scripts/ci-local.sh on $HOST ${MODE:+($MODE)}"
-if ssh -o BatchMode=yes "$HOST" "cd /tmp/$REMOTE_DIR && bash scripts/ci-local.sh $MODE"; then
+# The builder sees a tarball with no .git, so anything it stamps itself reads
+# "dev (none)" - and an artifact that cannot be traced to a commit defeats the
+# ancestry check that decides whether production is behind. The identity belongs to
+# the tree that was packed here, so it is computed here and passed over.
+SRC_VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
+SRC_COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo none)"
+[[ $SRC_VERSION =~ ^[A-Za-z0-9._+-]+$ && $SRC_COMMIT =~ ^[A-Za-z0-9._+-]+$ ]] \
+	|| die "版本戳里出现了不放心的字符：$SRC_VERSION / $SRC_COMMIT"
+say "stamping the builder's artifacts as $SRC_VERSION ($SRC_COMMIT)"
+if ssh -o BatchMode=yes "$HOST" "cd /tmp/$REMOTE_DIR && VERSION='$SRC_VERSION' COMMIT='$SRC_COMMIT' bash scripts/ci-local.sh $MODE"; then
 	RC=0
 else
 	RC=$?
