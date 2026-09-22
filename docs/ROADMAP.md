@@ -155,11 +155,19 @@
 - **升级后旧配置里的废弃键不报错也不生效**（`notify.digest`、`notify.feishu.{min_score,max_per_run,silent_hours}`、`filter.min_score`），`install.sh` 会打一行提示。
 
 ## Technical Debt
-- **`Store.Live` 每次都整体重读 JSONL —— 量过，不是债**：2026-09-21 生产实测 `daily -dry`
-  端到端 `0.09 s`（含进程启动、配置、整库解码、渲染），而真实采集轮次是 `2.8–6.0 s`（17 个源的
-  网络耗时占大头）。库 1.2 MB / 779 行。就算长到 10 倍也只是每次多几百毫秒，且轮次本来就是网络瓶颈。
-  **别为此加缓存**——那会引入"缓存与追加写不一致"这类新故障，而现在的成本是零。
-- `internal/scheduler` 没有测试文件：`Loop` 直接依赖 `*pipeline.App`，要测触发逻辑得先抽一个小接口（**故意没做**，避免为测试造抽象）。
+- **`Store.Live` 每次都整体重读 JSONL —— 量到 10 倍规模了，仍然不是债**：2026-09-21 生产实测
+  `daily -dry` 端到端 `0.09 s`（库 1.2 MB / 779 行）。2026-09-22 拿**合成到稳态大小**的库重测
+  （7200 行 / 2.5 MB ≈ M19 之后"60 天 × 一夜 120 行"的平衡点）：`/api/v1/status` `0.55–0.69 s`、
+  `/api/v1/deals?limit=24` `0.17–0.20 s`、`/api/v1/sources` 与 `/runs` `~2 ms`；同一份二进制换成
+  20 行的库，`status` 是 `3–6 ms` —— 所以成本是**每行约 0.08 ms × 每次请求 3 次全扫**
+  （`BriefingQuality` 的 `Live` + `Event` 的 `Upcoming` 与 `Expiring`），与行数线性。
+  面板 30 秒轮询一次 ≈ 单核 2%，且首屏是异步渲染。**仍然别为此加缓存**：
+  服务与 CLI 两个进程都会写这个文件（M17 整条就是为此），缓存一致性是新故障，而现在的成本是几百毫秒。
+  复测办法（一次命令）：造 7200 行 `deals.jsonl` → `serve` → `curl -w '%{time_total}'` 三次，
+  再拿 20 行的库跑同一条对照 —— 没有对照那一步，2 秒的"连接被拒"超时会被当成慢查询（我这次就先读到了它）。
+- ~~`internal/scheduler` 没有测试文件~~ —— **已不成立（M19）**：`scheduler_test.go` 四条守卫，
+  不需要抽接口：`Loop` 拿真的 `*pipeline.App`（`pipeline.New` + 桩 fetcher + `t.TempDir()` 数据目录）
+  就能跑，触发判断走真存储。原先"要测就得造抽象"的判断是错的。
 - 采集器类型有 7 种，`sources.New` 是一个 switch；再加两类以上时值得回到注册表写法。
 
 ## Non-Goals
