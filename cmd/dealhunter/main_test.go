@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -25,10 +26,10 @@ func run(t *testing.T, args ...string) (int, string) {
 	return code, buf.String()
 }
 
-// 同一件事写在三个地方：dispatch 表（真来源）、usage 文本、README 的命令清单。
-// 手抄的清单会绿着空转 —— 漏一个命令只有人翻 help 才发现。这里按真来源对表：
-// 从 AST 取 dispatch 的键，再要求 usage 与 README 各列出**同一批**名字，两个方向都查。
-func TestCommandListsAgreeWithTheDispatchTable(t *testing.T) {
+// dispatchCommandNames reads the command names straight out of main.go's dispatch
+// table - the only source of truth for "what is a command".
+func dispatchCommandNames(t *testing.T) map[string]bool {
+	t.Helper()
 	src, err := os.ReadFile("main.go")
 	if err != nil {
 		t.Fatalf("read main.go: %v", err)
@@ -37,7 +38,7 @@ func TestCommandListsAgreeWithTheDispatchTable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse main.go: %v", err)
 	}
-	var keys []string
+	out := map[string]bool{}
 	ast.Inspect(file, func(n ast.Node) bool {
 		as, ok := n.(*ast.AssignStmt)
 		if !ok || len(as.Lhs) != 1 {
@@ -49,7 +50,7 @@ func TestCommandListsAgreeWithTheDispatchTable(t *testing.T) {
 		}
 		lit, ok := as.Rhs[0].(*ast.CompositeLit)
 		if !ok {
-			t.Fatalf("dispatch is not a composite literal")
+			t.Fatal("dispatch is not a composite literal")
 		}
 		for _, el := range lit.Elts {
 			kv, ok := el.(*ast.KeyValueExpr)
@@ -60,24 +61,36 @@ func TestCommandListsAgreeWithTheDispatchTable(t *testing.T) {
 			if !ok {
 				continue
 			}
-			keys = append(keys, strings.Trim(k.Value, `"`))
+			out[strings.Trim(k.Value, `"`)] = true
 		}
 		return false
 	})
-	if len(keys) < 10 {
-		t.Fatalf("the dispatch table was not read back (got %d keys: %v)", len(keys), keys)
+	if len(out) < 10 {
+		t.Fatalf("the dispatch table was not read back (got %d names)", len(out))
 	}
+	return out
+}
 
-	inList := func(text string) map[string]bool {
+// listedCommands picks "  name   描述" out of a command list block.
+func listedCommands() func(string) map[string]bool {
+	re := regexp.MustCompile(`^  ([a-z][a-z-]{2,})\s{2,}[^ ]`)
+	return func(text string) map[string]bool {
 		out := map[string]bool{}
 		for _, line := range strings.Split(text, "\n") {
-			m := regexp.MustCompile(`^  ([a-z][a-z-]{2,})\s{2,}[^ ]`).FindStringSubmatch(line)
-			if m != nil {
+			if m := re.FindStringSubmatch(line); m != nil {
 				out[m[1]] = true
 			}
 		}
 		return out
 	}
+}
+
+// 同一件事写在三个地方：dispatch 表（真来源）、usage 文本、README 的命令清单。
+// 手抄的清单会绿着空转 —— 漏一个命令只有人翻 help 才发现。这里按真来源对表：
+// 从 AST 取 dispatch 的键，再要求 usage 与 README 各列出**同一批**名字，两个方向都查。
+func TestCommandListsAgreeWithTheDispatchTable(t *testing.T) {
+	cmds := dispatchCommandNames(t)
+	inList := listedCommands()
 	usageList := inList(usage)
 
 	readme, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
@@ -86,7 +99,7 @@ func TestCommandListsAgreeWithTheDispatchTable(t *testing.T) {
 	}
 	readmeList := inList(string(readme))
 
-	for _, name := range keys {
+	for name := range cmds {
 		if !usageList[name] {
 			t.Errorf("命令 %q 在 dispatch 表里，但 usage 没写它", name)
 		}
@@ -96,24 +109,110 @@ func TestCommandListsAgreeWithTheDispatchTable(t *testing.T) {
 	}
 	// 反方向：文档里不能有一个跑不通的名字。
 	for name := range usageList {
-		if !contains(keys, name) {
+		if !cmds[name] {
 			t.Errorf("usage documents %q, which is not a command", name)
 		}
 	}
 	for name := range readmeList {
-		if !contains(keys, name) {
+		if !cmds[name] {
 			t.Errorf("README documents %q, which is not a command", name)
 		}
 	}
 }
 
-func contains(hay []string, needle string) bool {
-	for _, h := range hay {
-		if h == needle {
-			return true
+// 文档与门禁脚本里写的 CLI 片段也是主张：一个不存在的旗标会让下一次会话照着跑一遍
+// 然后怀疑产品。这里把 main.go 里每个 FlagSet 声明的旗标读回来，再要求文档里
+// `dealhunter <命令> -旗标` 的每一个都真的存在（全局旗标也算）。
+func TestDocumentedCommandLineFlagsAreReal(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	declared := map[string]map[string]bool{} // FlagSet 名 -> 旗标名
+	lines := strings.Split(string(src), "\n")
+	setRe := regexp.MustCompile(`flag\.NewFlagSet\("([a-z-]+)"`)
+	flagRe := regexp.MustCompile(`\.(?:Bool|String|Int|Duration)\("([a-z][a-z-]*)"`)
+	for i, line := range lines {
+		set := setRe.FindStringSubmatch(line)
+		if set == nil {
+			continue
+		}
+		name := set[1]
+		if declared[name] == nil {
+			declared[name] = map[string]bool{}
+		}
+		// 往后扫到下一个函数头为止：这一段就是这个 FlagSet 的声明。
+		for j := i + 1; j < len(lines) && !strings.HasPrefix(lines[j], "func "); j++ {
+			if f := flagRe.FindStringSubmatch(lines[j]); f != nil {
+				declared[name][f[1]] = true
+			}
 		}
 	}
-	return false
+	if len(declared) < 8 {
+		t.Fatalf("only %d FlagSets read back from main.go: %v", len(declared), declared)
+	}
+	if len(declared["global"]) == 0 {
+		t.Fatal("the global FlagSet was not read back, so every per-command check would pass vacuously")
+	}
+	cmds := dispatchCommandNames(t)
+
+	paths := []string{"../../README.md", "../../docs/STATUS.md", "../../docs/ROADMAP.md",
+		"../../scripts/ci-local.sh", "../../deploy/install.sh"}
+	checked, problems := 0, 0
+	for _, p := range paths {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatalf("read %s: %v", p, err)
+		}
+		for _, line := range strings.Split(string(b), "\n") {
+			i := strings.LastIndex(line, "dealhunter")
+			if i < 0 {
+				i = strings.LastIndex(line, "deal-hunter")
+			}
+			if i < 0 {
+				continue
+			}
+			tail := line[i:]
+			for _, cut := range []string{"|", ">", ")", "\""} {
+				if j := strings.Index(tail, cut); j >= 0 {
+					tail = tail[:j]
+				}
+			}
+			cmd := ""
+			for _, tok := range strings.Fields(tail) {
+				if cmds[tok] {
+					cmd = tok
+					break
+				}
+			}
+			if cmd == "" {
+				continue
+			}
+			for _, f := range regexp.MustCompile(` -([a-z][a-z-]*)`).FindAllStringSubmatch(tail, -1) {
+				flag := f[1]
+				checked++
+				t.Logf("checked: %s -> dealhunter %s -%s", filepath.Base(p), cmd, flag)
+				if declared[cmd][flag] || declared["global"][flag] {
+					continue
+				}
+				problems++
+				t.Errorf("%s: `dealhunter %s -%s` 这个旗标不存在（该命令声明的：%v）", p, cmd, flag, keys(declared[cmd]))
+			}
+		}
+	}
+	if checked < 5 {
+		t.Fatalf("只有 %d 处文档旗标被检查到，这个测试基本等于没跑", checked)
+	}
+	t.Logf("checked %d documented flag usages across %d files, %d unknown", checked, len(paths), problems)
+}
+
+func keys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func TestVersionAndHelp(t *testing.T) {
