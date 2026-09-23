@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -79,4 +80,56 @@ func pipes(line string) int {
 		}
 	}
 	return n
+}
+
+// 两份门禁孪生各写一遍是本项目的既定形状（Windows 跑 ci-local.ps1，Linux 与构建机跑
+// ci-local.sh），代价就是"某条演练只接进一份"这种漂移：另一台上那一腿永远没人跑，
+// 而 office 那份全绿看起来像全套过了。M48 那条正好是两态不同的（systemctl 前提只在
+// Linux 成立），所以"两台上都接进"不是形式要求。
+//
+// 这里按真来源对表：`scripts/test-*.sh` 的清单是集合本身，两份脚本引用的名字必须
+// 与它相等，两个方向都查（漏接一条红，引用一条不存在的也红）。
+func TestEveryDrillIsWiredIntoBothGateTwins(t *testing.T) {
+	found, err := filepath.Glob(filepath.Join("..", "..", "scripts", "test-*.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	drills := map[string]bool{}
+	for _, p := range found {
+		drills[filepath.Base(p)] = true
+	}
+	if len(drills) < 4 {
+		t.Fatalf("only %d drill scripts were found in scripts/ - the glob is not seeing them", len(drills))
+	}
+
+	twins := map[string]string{
+		"bash": filepath.Join("..", "..", "scripts", "ci-local.sh"),
+		"pwsh": filepath.Join("..", "..", "scripts", "ci-local.ps1"),
+	}
+	seen := map[string]map[string]bool{"bash": {}, "pwsh": {}}
+	for which, path := range twins {
+		src, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s (%s): %v", path, which, err)
+		}
+		for _, m := range regexp.MustCompile(`test-[a-z0-9-]+\.sh`).FindAllString(string(src), -1) {
+			seen[which][m] = true
+			if !drills[m] {
+				t.Errorf("%s references %s, which is not a drill in scripts/", which, m)
+			}
+		}
+	}
+	for d := range drills {
+		for which := range twins {
+			if !seen[which][d] {
+				t.Errorf("%s is a drill but %s never runs it (that half of the gate would pass without it)", d, which)
+			}
+		}
+	}
+	// 反空转：两份孪生都得真的引用到东西，否则上面那个"两边都有"是拿空集合比空集合。
+	for which := range twins {
+		if len(seen[which]) == 0 {
+			t.Errorf("%s referenced no drill at all - the check above proves nothing", which)
+		}
+	}
 }
