@@ -241,6 +241,12 @@ config/deploy/dist）与 `/tmp/dh-wire-feishu.sh`（9-19，把服务接到租户
 - **在这台机器上跑 CLI 一律 `sudo -u dealhunter`**，不要 `sudo dealhunter`。今晚以 root 跑过一次
   `events`，`state.json` 变成 root 所有，服务立刻崩溃循环（`permission denied`），恢复要把文件
   chown 回去。`1209fe0` 之后只读命令不再写状态，但写类命令（`notify-test`、`compact`）仍会。
+- **`install.sh` 要的是仓库那套目录布局**（2026-09-23 我连踩两次）：它按自身位置算 `REPO_ROOT`，
+  再从 `$REPO_ROOT/deploy/` 取 `backup.sh` 与三个 unit/env 文件。把 `install.sh` 和二进制平铺进同一个
+  临时目录会在 `install: cannot stat .../deploy/xxx` 处 `set -e` 中断——而那时**新二进制已经装上**、
+  服务还没重启（重启是最后一步），看起来"失败"其实半程已生效。要么 `scp -r deploy` 保持 `deploy/` 子目录，
+  要么直接整个仓库快照过去。重跑一次会把 `deal-hunter.bak-prev` 换成刚装的那份，上一版就此丢掉：
+  想留住它，先 `cp -a` 走再在装完 `cp -a` 回来。
 - **不要把 `install.sh` 的输出接进 `| head`**：远端脚本被 SIGPIPE 打断后会在"备份完、没重启完"
   的地方停下，看起来装好了其实服务还跑着旧版（今晚 `9daa3d3` 就是这样落后了一次）。要截断就先
   `> /tmp/x.log 2>&1` 再 `tail`，并确认 `installer rc=0`。
