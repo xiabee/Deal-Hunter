@@ -1518,6 +1518,81 @@ func TestEventOverflowIsCarriedByTheNextRound(t *testing.T) {
 	}
 }
 
+// 2026-09-23 实测生产：同一时刻 `09-30 23:59` 挂着 6 条 60 分以上的截止（Qoder 80、
+// WorkBuddy 76、《我享云》四条 77），而 max_items=3、max_per_day=2 —— 两张卡正好装完。
+// 这条钉住"同刻谁先上卡"的规则：**到期提醒按标题字节序排，不按分数**（插队卡与日报
+// 都按分数排，见 Round 里那两处 sort.SliceStable）。今天这条规则无害——行数刚好等于
+// 槽位数；哪天同刻超过 6 条，被挤到第二天就等于不提醒（窗口已过），那时"谁被挤掉"
+// 由这条决定。所以最高分那条故意放在标题最后：把它改成按分数排，这条就红。
+func TestSameInstantDeadlinesGoOutInTitleOrderNotByScore(t *testing.T) {
+	f := &cannedFetcher{byURL: map[string][]byte{feedURL: []byte(`<rss><channel><item>
+		<title>本周行业新闻汇总</title><link>https://nc.test/news/1</link>
+		<description>技术动态，不涉及价格。</description></item></channel></rss>`)}}
+	spy := &spyNotifier{}
+	app := testApp(t, f, spy, func(c *config.Config) {
+		c.Timezone = "Asia/Shanghai"
+		c.Notify.Event.MinScore = 60
+		c.Notify.Event.ExpiryLead = config.Duration(3 * time.Hour)
+		c.Notify.Event.MaxItems = 3
+		c.Notify.Event.MaxPerDay = 2
+	})
+	due := time.Now().Add(2 * time.Hour).Format(time.RFC3339)
+	rows := []struct {
+		title string
+		score int
+	}{
+		{"Alpha 上线免费额度", 80},
+		{"Bravo 双模型限免", 76},
+		{"Charlie 限时三折", 77},
+		{"Delta 免费试用", 77},
+		{"Echo 月付优惠", 77},
+		{"Foxtrot 全场免费", 99}, // the best score, the last title
+	}
+	for i, r := range rows {
+		d := &model.Deal{Fingerprint: fmt.Sprintf("t%d", i), Title: r.title,
+			URL: fmt.Sprintf("https://nc.test/t%d", i), Score: r.score, IsFree: true,
+			Category: model.CatVoucher, Offers: []model.Offer{{Kind: model.KindFree}},
+			PublishedAt: time.Now().Add(-time.Hour), DiscoveredAt: time.Now().Add(-time.Hour),
+			Meta: map[string]string{"expires_at": due}}
+		if err := app.st.Save(d); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var cards [][]string
+	for round := 0; round < 2; round++ {
+		if _, err := app.RunOnce(context.Background(), "unit"); err != nil {
+			t.Fatalf("round %d: %v", round, err)
+		}
+		msgs := spy.byKind(notify.KindEvent)
+		if len(msgs) != round+1 {
+			t.Fatalf("round %d should have produced card %d, messages=%d", round, round+1, len(msgs))
+		}
+		var titles []string
+		for _, d := range msgs[len(msgs)-1].Deals {
+			titles = append(titles, d.Title)
+		}
+		cards = append(cards, titles)
+	}
+
+	want := [][]string{
+		{"Alpha 上线免费额度", "Bravo 双模型限免", "Charlie 限时三折"},
+		{"Delta 免费试用", "Echo 月付优惠", "Foxtrot 全场免费"},
+	}
+	if fmt.Sprint(cards) != fmt.Sprint(want) {
+		t.Fatalf("cards came out as %v / want %v", cards, want)
+	}
+	// 两张卡 = 当天全部预算，六条全被标记，所以今晚这个形状一条都不会漏。
+	if _, n := app.budgetSpent(eventCursor); n != 2 {
+		t.Errorf("the day's event budget should be exactly the two cards, n=%d", n)
+	}
+	for i := range rows {
+		if _, ok := app.stateTime(eventRemindedPrefix + fmt.Sprintf("t%d", i)); !ok {
+			t.Errorf("row %d was not marked as reminded", i)
+		}
+	}
+}
+
 // 运维问"在跟踪哪些"时，只有截止时刻、从没写开抢时刻的行也算在跟踪 —— 否则
 // "为什么没有提醒"这个问题只能靠猜。
 func TestUpcomingEventsIncludesDeadlineOnlyRows(t *testing.T) {
