@@ -3,6 +3,9 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"math"
 	"net/http"
@@ -10,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -736,4 +740,180 @@ func panelSource(t *testing.T) string {
 		t.Fatalf("read the panel: %v", err)
 	}
 	return string(b)
+}
+
+// The OpenClaw side of this project is three shell scripts and a skill document
+// that a chat assistant reads. They talk to this package by URL string, so every
+// "/api/v1/...?a=&b=" in them is a claim about a route and a query parameter this
+// server implements - and until now nothing compared them against the route table
+// (the same shape as the command-list and config-key gates: two places stating one
+// fact). A parameter that quietly stops being read is the nasty case: the request
+// still returns 200 and the assistant keeps answering with unfiltered data.
+func TestOpenClawScriptsAndDocMatchTheRoutesTheyUse(t *testing.T) {
+	src, err := os.ReadFile("httpapi.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes := servedRoutes(t, string(src))
+	if len(routes) < 5 {
+		t.Fatalf("only %d routes were read back from the mux table - the parser is not seeing the code", len(routes))
+	}
+	// The deals route is the one with parameters; if the body scan cannot find
+	// them, the parameter claims below would be checked against an empty set.
+	if got := len(routes["/api/v1/deals"]); got < 5 {
+		t.Fatalf("deals should read at least 5 query parameters, found %v", routes["/api/v1/deals"])
+	}
+
+	doc, err := os.ReadFile(filepath.Join("..", "..", "deploy", "openclaw", "deal-hunter.skill.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed := map[string]map[string]bool{}
+	note := func(where, path string, params []string) {
+		if claimed[path] == nil {
+			claimed[path] = map[string]bool{}
+		}
+		for _, p := range params {
+			if !routes[path][p] {
+				t.Errorf("%s: %s asks for ?%s= but that route reads %v", where, path, p, keysOf(routes[path]))
+			}
+			claimed[path][p] = true
+		}
+		if _, ok := routes[path]; !ok {
+			t.Errorf("%s: %s is not a route this server serves (%v)", where, path, keysOf(routes))
+		}
+	}
+
+	for _, m := range regexp.MustCompile("`(GET )?(/api/v1/[a-z/]+)([?][a-z=&]+)?`").FindAllStringSubmatch(string(doc), -1) {
+		note("技能说明", m[2], paramsOf(m[3]))
+	}
+	scripts, err := filepath.Glob(filepath.Join("..", "..", "deploy", "openclaw", "dealhunter-*.sh"))
+	if err != nil || len(scripts) != 3 {
+		t.Fatalf("expected the three query scripts, got %v (%v)", scripts, err)
+	}
+	for _, s := range scripts {
+		body, err := os.ReadFile(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range regexp.MustCompile(`/api/v1/[a-z/]+([?][A-Za-z0-9_=&$%{}.]*)?`).FindAllStringSubmatch(string(body), -1) {
+			path := m[0]
+			query := ""
+			if i := strings.IndexByte(path, '?'); i >= 0 {
+				query = path[i+1:]
+				path = path[:i]
+			}
+			var names []string
+			for _, seg := range strings.Split(query, "&") {
+				if k, _, ok := strings.Cut(seg, "="); ok && k != "" {
+					names = append(names, k)
+				}
+			}
+			note(filepath.Base(s), path, names)
+		}
+	}
+
+	// The other direction: an endpoint nobody is told about is an endpoint that
+	// will be deleted by accident. /api/v1/openclaw/latest is the retired name of
+	// /api/v1/digest, kept for the scripts already installed on the assistant -
+	// it is documented by that comment, not by the table.
+	for path := range routes {
+		if !strings.HasPrefix(path, "/api/v1/") || path == "/api/v1/openclaw/latest" {
+			continue
+		}
+		if !strings.Contains(string(doc), path) {
+			t.Errorf("%s is served but the skill document never mentions it", path)
+		}
+	}
+}
+
+// servedRoutes reads the mux table out of this file's own source: path -> the set
+// of query parameters that route's handler actually reads.
+func servedRoutes(t *testing.T, src string) map[string]map[string]bool {
+	t.Helper()
+	file, err := parser.ParseFile(token.NewFileSet(), "httpapi.go", src, parser.ParseComments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes := map[string]map[string]bool{}
+	handlers := map[string]string{} // path -> method name
+	for _, p := range file.Decls {
+		fn, ok := p.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+		if fn.Name.Name == "Handler" {
+			ast.Inspect(fn, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok || len(call.Args) != 2 {
+					return true
+				}
+				sel, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok || sel.Sel.Name != "HandleFunc" {
+					return true
+				}
+				lit, ok := call.Args[0].(*ast.BasicLit)
+				if !ok {
+					return true
+				}
+				spec := strings.Trim(lit.Value, `"`)
+				parts := strings.Fields(spec)
+				if len(parts) != 2 {
+					return true
+				}
+				recv, ok := call.Args[1].(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				handlers[parts[1]] = recv.Sel.Name
+				return true
+			})
+		}
+		body := map[string]bool{}
+		ast.Inspect(fn, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok || len(call.Args) != 1 {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "Get" {
+				return true
+			}
+			lit, ok := call.Args[0].(*ast.BasicLit)
+			if !ok {
+				return true
+			}
+			body[strings.Trim(lit.Value, `"`)] = true
+			return true
+		})
+		for path, name := range handlers {
+			if name == fn.Name.Name {
+				routes[path] = body
+			}
+		}
+	}
+	return routes
+}
+
+func paramsOf(q string) []string {
+	q = strings.TrimPrefix(q, "?")
+	if q == "" {
+		return nil
+	}
+	var out []string
+	for _, seg := range strings.Split(q, "&") {
+		if k, _, ok := strings.Cut(seg, "="); ok && k != "" {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+func keysOf[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }

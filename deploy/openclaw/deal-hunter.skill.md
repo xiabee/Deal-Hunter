@@ -24,9 +24,10 @@
 | 接口 | 说明 |
 |---|---|
 | `/api/v1/digest` | 最近一份消息的 Markdown（日报或插队），可直接朗读/转发 |
-| `/api/v1/deals?min=&limit=&category=&q=` | 结构化结果：`{count, deals:[{title,url,score,source,vendors,is_free,...}]}` |
+| `/api/v1/deals?min=&limit=&category=&q=&source=` | 结构化结果：`{count, deals:[{title,url,score,source,vendors,is_free,...}]}` |
 | `/api/v1/status` | 运行状态、日报排程与今日是否已发、突破预算余量、信息源统计、日报将收录的条数 |
 | `/api/v1/sources` | 各信息源最近一轮命中/耗时/错误 |
+| `/api/v1/runs?limit=` | 最近几轮的采集统计（新增/入库/各源耗时与错误），回答"雷达还在跑吗、哪一源在报错" |
 | `/healthz` | 存活探针 |
 
 ## 用法示例
