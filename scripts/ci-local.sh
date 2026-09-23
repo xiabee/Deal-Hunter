@@ -253,6 +253,12 @@ bash scripts/test-backup.sh || fail "backup drill"
 # had only ever been run by hand, and the guard it needs (keep one previous copy, and
 # refuse to overwrite when that copy could not be written) is the kind that silently
 # rots back into "copy aside with a fresh timestamp" if nothing checks it.
+# `run` is what the systemd unit executes, and until now no step had started it:
+# the served-panel check goes in through `once -serve`, so neither the scheduler
+# loop nor -no-first had ever been exercised before a deploy.
+step "run: the daemon command boots, serves, and honours -no-first"
+bash scripts/test-run-daemon.sh || fail "run drill"
+
 # install.sh now fails an upgrade when the panel does not answer, so the probe it
 # waits on is on the deploy path. It is drilled against a real listener and a dead
 # port; install.sh's own wiring is asserted from the script text (that file needs
