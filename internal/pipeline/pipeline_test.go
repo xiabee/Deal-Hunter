@@ -15,6 +15,7 @@ import (
 
 	"github.com/xiabee/deal-hunter/internal/config"
 	"github.com/xiabee/deal-hunter/internal/httpx"
+	"github.com/xiabee/deal-hunter/internal/keywords"
 	"github.com/xiabee/deal-hunter/internal/model"
 	"github.com/xiabee/deal-hunter/internal/notify"
 	"github.com/xiabee/deal-hunter/internal/official"
@@ -781,6 +782,109 @@ func TestStaleItemsAreDroppedByAge(t *testing.T) {
 	}
 	if run.Stored != 0 {
 		t.Errorf("everything in the fixture predates the last hour, stored=%d", run.Stored)
+	}
+}
+
+// Screen is what a round decides minus the state log. probe prints it verbatim,
+// so every row it drops has to come back named: "这个源答了 15 条、一条都进不了
+// 日报" is the answer an admission decision needs, and it was not obtainable
+// anywhere before, because the round only ever returned bare booleans.
+func TestScreenNamesTheReasonARowIsDroppedFor(t *testing.T) {
+	now := time.Date(2026, 9, 23, 3, 0, 0, 0, time.UTC)
+	fresh := now.Add(-2 * time.Hour)
+	row := func(title, summary, url string) *model.Deal {
+		return &model.Deal{URL: url, Title: title, Summary: summary,
+			Source: "fixture", PublishedAt: fresh, Meta: map[string]string{}}
+	}
+	live := row("智谱 GLM-5.3-flash 限时免费开放", "官方公告：GLM-5.3-flash 面向所有用户免费开放，API 调用 0 元。", "https://a.example/1")
+	cases := []struct {
+		name   string
+		mutate func(*config.Config)
+		trust  int
+		deal   *model.Deal
+		want   string
+	}{
+		{name: "在效的一行没有理由", trust: 8, deal: live},
+		{name: "拒绝词", mutate: func(c *config.Config) { c.Filter.DenyKeywords = []string{"GLM"} }, trust: 8, deal: live, want: "命中拒绝词 GLM"},
+		{name: "要求词", mutate: func(c *config.Config) { c.Filter.RequireKeywords = []string{"门票"} }, trust: 8, deal: live, want: "缺少要求词"},
+		{name: "超龄", mutate: func(c *config.Config) { c.Filter.MaxAgeHours = 1 }, trust: 8, deal: live, want: "发布已 2 小时"},
+		{name: "无优惠命中词", trust: 8, deal: row("某云发布新版本", "修复若干问题，性能提升", "https://a.example/2"), want: "无优惠命中词"},
+		{name: "噪音", trust: 8, deal: row("【招聘】后端工程师一名", "招聘免费内推", "https://a.example/3"), want: "噪音词"},
+		{
+			name: "截止已过", trust: 8,
+			deal: row("GLM-5.3-flash 免费活动", "限时免费，活动截止 2020-01-01", "https://a.example/4"),
+			want: "截止已过",
+		},
+		{name: "允许词", mutate: func(c *config.Config) { c.Filter.AllowKeywords = []string{"门票"} }, trust: 8, deal: live, want: "不在允许词内"},
+		{
+			// Freshness alone is enough to clear zero, so "信号太弱" is the verdict
+			// for a row that carries neither a date nor a single keyword.
+			name:   "零可信度又无信号",
+			mutate: func(c *config.Config) { c.Filter.RequireOffer = false },
+			deal: &model.Deal{URL: "https://a.example/5", Title: "本周例会议程", Summary: "讨论季度安排与值班",
+				Source: "fixture", Meta: map[string]string{}},
+			want: "信号太弱",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.Timezone = "Asia/Shanghai"
+			cfg.Filter.RequireOffer = true
+			if tc.mutate != nil {
+				tc.mutate(cfg)
+			}
+			reason := Screen(cfg, keywords.Default(), tc.deal, config.Source{Name: "fixture", Trust: tc.trust}, now)
+			if reason != tc.want {
+				t.Fatalf("reason = %q, want %q", reason, tc.want)
+			}
+		})
+	}
+}
+
+// The two rows that a round drops for reasons *about the text* still tell
+// something to whoever is deciding whether to admit a source: a deadline the
+// parser read and which turned out to have passed is a different fact from "no
+// date in this feed at all". So the clocks are recorded before the refusal.
+func TestScreenRecordsTheClocksOfTheRowsItRefuses(t *testing.T) {
+	now := time.Date(2026, 9, 23, 3, 0, 0, 0, time.UTC)
+	cfg := config.Default()
+	cfg.Timezone = "Asia/Shanghai"
+	expired := &model.Deal{URL: "https://a.example/4", Title: "GLM-5.3-flash 免费活动",
+		Summary: "限时免费，活动截止 2020-01-01", Source: "fixture",
+		PublishedAt: now.Add(-2 * time.Hour), Meta: map[string]string{}}
+	if reason := Screen(cfg, keywords.Default(), expired, config.Source{Trust: 8}, now); reason != "截止已过" {
+		t.Fatalf("reason = %q", reason)
+	}
+	if got := expired.Meta["expires_at"]; !strings.HasPrefix(got, "2020-01-01") {
+		t.Errorf("a row refused for a passed deadline must still carry it, got %q", got)
+	}
+	if expired.Score != 0 {
+		t.Errorf("a refused row must not be given a score to be stored by, got %d", expired.Score)
+	}
+}
+
+// An allow-list rejection used to be checked after the title-clash check, so a
+// row the reader had filtered out was still recorded whenever its title happened
+// to repeat one already in the log. The filter is a statement about what we care
+// about, so it now applies to every row. No shipped config sets allow_keywords.
+func TestARepeatThatFailsTheAllowListIsNotRecordedEither(t *testing.T) {
+	rss := func(link string) []byte {
+		return []byte(`<?xml version="1.0"?><rss version="2.0"><channel><title>t</title>` +
+			`<item><title>智谱 GLM-5.3-flash 限时免费开放</title><link>` + link +
+			`</link><description>官方公告：GLM-5.3-flash 免费开放，API 调用 0 元。</description>` +
+			`<pubDate>Mon, 14 Sep 2026 08:00:00 GMT</pubDate></item></channel></rss>`)
+	}
+	f := &cannedFetcher{byURL: map[string][]byte{feedURL: rss("https://feed-a.test/1")}}
+	app := testApp(t, f, &spyNotifier{}, func(c *config.Config) {
+		c.Filter.AllowKeywords = []string{"门票"}
+	})
+	run, err := app.RunOnce(context.Background(), "unit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Stored != 0 {
+		t.Fatalf("the allow-list should have dropped the row, stored=%d", run.Stored)
 	}
 }
 

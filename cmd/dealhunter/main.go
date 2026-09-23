@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -279,6 +280,11 @@ func cmdServe(ctx context.Context, cfg *config.Config, log *slog.Logger, stdout 
 	return exitFromError(api.Serve(ctx))
 }
 
+// probe fetches one configured source and reports, row by row, what a round
+// would do with it. It is the source-admission tool, so it has to speak with
+// the scorer's voice: an earlier version kept a second formula here and printed
+// scores production never assigns, which is the worst possible answer for a
+// command whose only job is to predict what the reader will see.
 func cmdProbe(ctx context.Context, cfg *config.Config, log *slog.Logger, stdout io.Writer, args []string) int {
 	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
 	fs.SetOutput(stdout)
@@ -317,16 +323,47 @@ func cmdProbe(ctx context.Context, cfg *config.Config, log *slog.Logger, stdout 
 	dict := keywords.Default()
 	fmt.Fprintf(stdout, "✓ %s (%s) 命中 %d 条，耗时 %s\n", found.Name, found.Kind, len(deals), time.Since(start).Round(time.Millisecond))
 	w := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "命中词\t分数\t标题\t链接")
+	fmt.Fprintln(w, "入库\t分数\t命中词\t时刻\t标题\t链接")
+	kept := 0
 	for i, d := range deals {
 		if i >= *limit {
 			break
 		}
-		annotate(d, dict)
-		fmt.Fprintf(w, "%s\t%d\t%s\t%s\n", strings.Join(kinds(d), ","), d.Score, truncate(d.Title, 46), truncate(d.URL, 52))
+		// The same decision a round makes, on the same text - see pipeline.Screen.
+		reason := pipeline.Screen(cfg, dict, d, *found, time.Now())
+		score := "-"
+		if reason == "" {
+			kept++
+			score = strconv.Itoa(d.Score)
+			reason = "收"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", reason, score,
+			d.Meta["offer_kinds"], clocks(d), truncate(d.Title, 46), truncate(d.URL, 52))
 	}
 	_ = w.Flush()
+	fmt.Fprintf(stdout, "其中 %d 条会入库；probe 不读状态库，所以\"这一条今天已经见过\"与\"标题被更早一行占位\"两条判据不在表内。\n", kept)
 	return 0
+}
+
+// clocks is what the parser read out of this row, which for a source under
+// trial is the point of the whole exercise: a voucher announcement nobody can
+// put a date on never becomes a reminder.
+func clocks(d *model.Deal) string {
+	var out []string
+	for _, p := range []struct{ key, label string }{{"starts_at", "开抢"}, {"expires_at", "截止"}} {
+		v := d.Meta[p.key]
+		if v == "" {
+			continue
+		}
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			v = t.Format("01-02 15:04")
+		}
+		out = append(out, p.label+" "+v)
+	}
+	if len(out) == 0 {
+		return "-"
+	}
+	return strings.Join(out, " ")
 }
 
 // presentedLink mirrors what the card and the panel point at: the verified
@@ -348,41 +385,6 @@ func newFetcher(cfg *config.Config) *httpx.Client {
 		Retries:      cfg.HTTP.Retries,
 		AllowPrivate: cfg.HTTP.AllowPrivateHosts,
 	})
-}
-
-// annotate mirrors the pipeline's scoring so probe output matches production.
-func annotate(d *model.Deal, dict *keywords.Dict) {
-	d.EnsureFingerprint()
-	text := d.TextBlob()
-	d.Offers = dict.Scan(text)
-	if res := dict.DiscountPct(text); res > 0 {
-		d.DiscountPct = res
-	}
-	d.Vendors = dict.Vendors(text)
-	for _, o := range d.Offers {
-		if o.Kind == model.KindFree {
-			d.IsFree = true
-		}
-	}
-	d.Score = 40 + len(d.Offers)*10 + 10*boolInt(len(d.Vendors) > 0) + boolInt(d.IsFree)*20
-	if d.Score > 100 {
-		d.Score = 100
-	}
-}
-
-func kinds(d *model.Deal) []string {
-	var out []string
-	for _, o := range d.Offers {
-		out = append(out, string(o.Kind))
-	}
-	return out
-}
-
-func boolInt(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
 }
 
 func cmdSources(cfg *config.Config, stdout io.Writer) int {

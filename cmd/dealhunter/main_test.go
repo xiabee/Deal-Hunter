@@ -4,19 +4,25 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/xiabee/deal-hunter/internal/config"
+	"github.com/xiabee/deal-hunter/internal/model"
 )
 
 func run(t *testing.T, args ...string) (int, string) {
@@ -257,6 +263,206 @@ func TestProbeRejectsUnknownSource(t *testing.T) {
 	if code == 0 || !strings.Contains(out, "未找到") {
 		t.Fatalf("code=%d out=%s", code, out)
 	}
+}
+
+// probe 是「信源准入」那道题的答题入口。它曾在自己文件里另抄一份评分公式，于是表格里
+// 的分数是生产永远不会给出的数——准入判断读的是一个假数，而且没有任何一处会报警。
+// 现在它调用排程用的同一个 pipeline.Screen。对表走的是真路径：真 HTTP（httptest 起的
+// 本地服务）、真采集、真入库，然后要求同一批字节在两边的读数逐条相同：probe 表格里的
+// 分数必须等于 once 写进 deals.jsonl 的分数，被挡下的行必须带着原因出现在表里、且不在库里。
+func TestProbeAgreesWithTheRoundOnTheSameRows(t *testing.T) {
+	body := rssFeed(t,
+		rssItem("https://feed.test/free", "智谱 GLM-5.3-flash 限时免费开放", "官方公告：面向所有用户免费开放，API 调用 0 元。"),
+		rssItem("https://feed.test/job", "【招聘】后端工程师一名", "招聘免费内推"),
+		rssItem("https://feed.test/news", "本周例会议程", "讨论季度安排与值班"),
+		rssItem("https://feed.test/old", "某模型限时开放", "免费开放，活动截止 2020-01-01"),
+	)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/feed.xml", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		_, _ = io.WriteString(w, body)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	dir := t.TempDir()
+	cfgPath := writeProbeConfig(t, dir, srv.URL+"/feed.xml")
+	data := filepath.Join(dir, "data")
+
+	code, out := run(t, "-config", cfgPath, "-data", data, "once")
+	if code != 0 {
+		t.Fatalf("once: code=%d out=%s", code, out)
+	}
+	stored := storedDeals(t, data)
+	// 阳性对照：这一轮必须真的往库里写了东西，否则下面"分数对得上"是在拿空表对空表。
+	if len(stored) != 1 {
+		t.Fatalf("exactly the live free offer should reach the store, got %d rows: %+v", len(stored), stored)
+	}
+
+	before := append([]byte(nil), readFileBytes(t, filepath.Join(data, "deals.jsonl"))...)
+	beforeState := append([]byte(nil), readFileBytes(t, filepath.Join(data, "state.json"))...)
+	code, out = run(t, "-config", cfgPath, "-data", data, "probe", "-source", "fixture")
+	if code != 0 {
+		t.Fatalf("probe: code=%d out=%s", code, out)
+	}
+	if got := readFileBytes(t, filepath.Join(data, "deals.jsonl")); string(got) != string(before) {
+		t.Error("probe wrote to the deal log")
+	}
+	if got := readFileBytes(t, filepath.Join(data, "state.json")); string(got) != string(beforeState) {
+		t.Error("probe advanced a cursor: probing must not consume the day's findings")
+	}
+
+	rows := probeRows(t, out)
+	if len(rows) != 4 {
+		t.Fatalf("probe should list every row it fetched, refused ones included, got:\n%s", out)
+	}
+	live := rows["https://feed.test/free"]
+	if live[0] != "收" {
+		t.Errorf("the live offer should be admitted, got %q", live[0])
+	}
+	if want := strconv.Itoa(stored["https://feed.test/free"]); live[1] != want {
+		t.Errorf("probe printed score %s where the round stored %s", live[1], want)
+	}
+	for url, reason := range map[string]string{
+		"https://feed.test/job":  "噪音词",
+		"https://feed.test/news": "无优惠命中词",
+		"https://feed.test/old":  "截止已过",
+	} {
+		row := rows[url]
+		if row[0] != reason {
+			t.Errorf("%s: refused for %q, probe says %q", url, reason, row[0])
+		}
+		if row[1] != "-" {
+			t.Errorf("%s: a refused row has no score to show, got %q", url, row[1])
+		}
+	}
+	// 被挡下的一行仍然要带出它读到的时刻："解析出了一个已经过去的截止"与
+	// "这一页根本没有日期"对准入是两种结论。
+	if !strings.Contains(strings.Join(rows["https://feed.test/old"], " "), "截止 ") {
+		t.Errorf("the expired row should still show the deadline that was read: %v", rows["https://feed.test/old"])
+	}
+	if !strings.Contains(out, "其中 1 条会入库") {
+		t.Errorf("the tally should say one row is admitted:\n%s", out)
+	}
+}
+
+// 分数的算法只准有一处。CLI 当年抄过一份，此后再没跟上过；这条闸拦的是"在命令里再算
+// 一遍"，不是某个手抄的期望值。反空转：同一个遍历必须还能数到 .Score 的**读**——
+// 字段被改名时读写会一起归零，那时要红的是这一半。
+func TestTheCLINeverComputesAScoreItself(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var writes, reads int
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		file, err := parser.ParseFile(token.NewFileSet(), name, src, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		ast.Inspect(file, func(n ast.Node) bool {
+			as, isAssign := n.(*ast.AssignStmt)
+			if isAssign {
+				for _, lhs := range as.Lhs {
+					if sel, ok := lhs.(*ast.SelectorExpr); ok && sel.Sel.Name == "Score" {
+						writes++
+					}
+				}
+				return true
+			}
+			if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == "Score" {
+				reads++
+			}
+			return true
+		})
+	}
+	if writes != 0 {
+		t.Errorf("the CLI assigns to a Score %d times: the scorer in internal/scoring is the only one allowed to", writes)
+	}
+	if reads == 0 {
+		t.Errorf("no read of any .Score found in %d files - the walk is not seeing the code it claims to check", len(files))
+	}
+}
+
+func rssItem(url, title, summary string) string {
+	return "<item><title>" + title + "</title><link>" + url + "</link><description>" + summary + "</description></item>"
+}
+
+// rssFeed stamps every item with a pubDate two hours old: inside the 24h freshness
+// band now and for the whole time a test may take, whereas a fixed date would walk
+// across a scoring band (or the max-age cutoff) depending on when CI ran.
+func rssFeed(t *testing.T, items ...string) string {
+	t.Helper()
+	date := time.Now().UTC().Add(-2 * time.Hour).Format(http.TimeFormat)
+	out := `<?xml version="1.0"?><rss version="2.0"><channel><title>准入测试源</title>`
+	for _, it := range items {
+		out += strings.TrimSuffix(it, "</item>") + "<pubDate>" + date + "</pubDate></item>"
+	}
+	return out + "</channel></rss>"
+}
+
+func writeProbeConfig(t *testing.T, dir, url string) string {
+	t.Helper()
+	path := filepath.Join(dir, "config.json")
+	body := `{"timezone":"Asia/Shanghai","server":{"enabled":false},` +
+		`"notify":{"console":false,"daily":{"enabled":false},"urgent":{"enabled":false},"event":{"enabled":false}},` +
+		`"http":{"allow_private_hosts":true},` +
+		`"sources":[{"name":"fixture","kind":"rss","url":"` + url + `","trust":8,"sites":["example.com"],"limit":10}]}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	return path
+}
+
+// storedDeals reads the log the round wrote, keyed by URL, valued by the score stored.
+func storedDeals(t *testing.T, data string) map[string]int {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(data, "deals.jsonl"))
+	if err != nil {
+		t.Fatalf("the round wrote no deal log: %v", err)
+	}
+	out := map[string]int{}
+	for _, line := range bytes.Split(bytes.TrimSpace(b), []byte("\n")) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		var d model.Deal
+		if err := json.Unmarshal(line, &d); err != nil {
+			t.Fatalf("parse stored row %q: %v", line, err)
+		}
+		out[d.URL] = d.Score
+	}
+	return out
+}
+
+func readFileBytes(t *testing.T, path string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return b
+}
+
+// probeRows keys each table row by its link (the last field on the line).
+func probeRows(t *testing.T, out string) map[string][]string {
+	t.Helper()
+	rows := map[string][]string{}
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 4 || !strings.HasPrefix(f[len(f)-1], "https://") {
+			continue
+		}
+		rows[f[len(f)-1]] = f
+	}
+	return rows
 }
 
 func TestDoctorWithoutNetworkPasses(t *testing.T) {

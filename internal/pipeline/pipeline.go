@@ -459,44 +459,88 @@ func (a *App) sourceBudget() time.Duration {
 
 // judge scores one candidate. kept=false means it never enters history;
 // urgent=true means it is strong enough to interrupt the day's briefing.
+// Everything that does not need the state log lives in Screen, because probe
+// has to answer the same question without a store to consult.
 func (a *App) judge(d *model.Deal, sc config.Source) (kept, urgent bool) {
-	f := a.cfg.Filter
 	d.EnsureFingerprint()
 	if a.st.Seen(d.Fingerprint) {
 		return false, false
 	}
+	now := time.Now()
+	if Screen(a.cfg, a.dict, d, sc, now) != "" {
+		return false, false
+	}
+	// Mark the free verdicts now, while the record is still being written: an
+	// unlabelled row later reads as "not checked", which is only true for deals
+	// whose vendor we know but could not verify.
+	official.LabelCheap(d)
+	// The same announcement reposted by a second feed is recorded but never
+	// pushed twice: the first finding seen owns the title.
+	if fp, clash := a.st.TitleClash(d.Title, d.Fingerprint); clash {
+		d.Meta["dup_of"] = fp
+		return true, false
+	}
+	return true, a.cfg.Notify.Urgent.Enabled && d.Score >= a.cfg.Notify.Urgent.MinScore
+}
+
+// Screen is the store-free half of the decision: the reader's filters, the
+// keyword evidence, the score, and whatever clocks the parser read out of the
+// text. It fills the deal in exactly the way a round does, then returns the
+// reason this row will not reach the reader - or "" when it will.
+//
+// probe reports this verdict because there is no second opinion to have: the
+// question a source has to answer before it is admitted is "what would the
+// reader see", and a formula copied next to the CLI starts disagreeing with the
+// real one the day either of them changes. Two facts stay invisible here on
+// purpose, since both need the state log: a row already seen in an earlier
+// round, and a title already owned by an earlier row.
+//
+// The allow-list used to be checked after the title clash, so a row failing it
+// was still recorded if its title happened to clash. It is a filter on what we
+// care about, so it now applies to every row; no shipped config sets it.
+func Screen(cfg *config.Config, dict *keywords.Dict, d *model.Deal, sc config.Source, now time.Time) string {
+	f := cfg.Filter
 	text := d.TextBlob()
 	lower := strings.ToLower(text)
 	for _, k := range f.DenyKeywords {
 		if k != "" && strings.Contains(lower, strings.ToLower(k)) {
-			return false, false
+			return "命中拒绝词 " + k
 		}
 	}
 	if len(f.RequireKeywords) > 0 && !anyContains(lower, f.RequireKeywords) {
-		return false, false
+		return "缺少要求词"
 	}
 	if f.MaxAgeHours > 0 && !d.PublishedAt.IsZero() {
-		if time.Since(d.PublishedAt) > time.Duration(f.MaxAgeHours)*time.Hour {
-			return false, false
+		if age := now.Sub(d.PublishedAt); age > time.Duration(f.MaxAgeHours)*time.Hour {
+			return fmt.Sprintf("发布已 %d 小时", int(age.Hours()))
 		}
 	}
-	offers := a.dict.Scan(text)
+	offers := dict.Scan(text)
 	if len(offers) == 0 {
 		offers = d.Offers
 	}
 	if f.RequireOffer && len(offers) == 0 {
-		return false, false
+		return "无优惠命中词"
 	}
 	res := scoring.Evaluate(scoring.Input{
 		Deal:           d,
 		Offers:         offers,
 		SourceTrust:    sc.Trust,
 		OfficialDomain: sources.IsOfficialURL(d.URL, sc.Sites),
-		Now:            time.Now(),
-		ReaderZone:     a.loc(),
-	}, a.dict)
+		Now:            now,
+		ReaderZone:     zoneOf(cfg),
+	}, dict)
+	// The clocks are recorded even when the row is dropped: "read a deadline that
+	// has already passed" and "read nothing at all" are different answers about a
+	// source, and only one of them is a reason not to admit it.
+	if res.Expires != nil {
+		d.Meta["expires_at"] = res.Expires.Format(time.RFC3339)
+	}
+	if res.Starts != nil {
+		d.Meta["starts_at"] = res.Starts.Format(time.RFC3339)
+	}
 	if res.Reject != "" {
-		return false, false
+		return rejected(res.Reject)
 	}
 	d.Offers = offers
 	d.Score = res.Score
@@ -508,12 +552,6 @@ func (a *App) judge(d *model.Deal, sc config.Source) (kept, urgent bool) {
 	if len(d.Tags) > 0 && res.Product != "" {
 		d.Tags = append(d.Tags, "model:"+res.Product)
 	}
-	if res.Expires != nil {
-		d.Meta["expires_at"] = res.Expires.Format(time.RFC3339)
-	}
-	if res.Starts != nil {
-		d.Meta["starts_at"] = res.Starts.Format(time.RFC3339)
-	}
 	if len(offers) > 0 {
 		var kinds []string
 		for _, o := range offers {
@@ -523,20 +561,23 @@ func (a *App) judge(d *model.Deal, sc config.Source) (kept, urgent bool) {
 	}
 	d.SortOffersAndTags()
 	d.EnsureFingerprint()
-	// Mark the free verdicts now, while the record is still being written: an
-	// unlabelled row later reads as "not checked", which is only true for deals
-	// whose vendor we know but could not verify.
-	official.LabelCheap(d)
-	// The same announcement reposted by a second feed is recorded but never
-	// pushed twice: the first finding seen owns the title.
-	if fp, clash := a.st.TitleClash(d.Title, d.Fingerprint); clash {
-		d.Meta["dup_of"] = fp
-		return true, false
-	}
 	if len(f.AllowKeywords) > 0 && !anyContains(lower, f.AllowKeywords) {
-		return false, false
+		return "不在允许词内"
 	}
-	return true, a.cfg.Notify.Urgent.Enabled && d.Score >= a.cfg.Notify.Urgent.MinScore
+	return ""
+}
+
+// rejected names a scorer's refusal the way the operator reads it.
+func rejected(reason string) string {
+	switch reason {
+	case "noise":
+		return "噪音词"
+	case "expired":
+		return "截止已过"
+	case "low_signal":
+		return "信号太弱"
+	}
+	return reason
 }
 
 func anyContains(hay string, needles []string) bool {
