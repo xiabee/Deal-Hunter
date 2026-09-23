@@ -33,6 +33,7 @@
 
 | 项 | 结论 | 证据 |
 |---|---|---|
+| 体检报告"解析过但零交付"的源（M47） | VERIFIED（生产实装 + 四次变异） | 部署后 `doctor` 第 13 行：`✓ delivery 5 个源解析过列表但一条都没交付过：copilot-plans-snapshot、hn-free-api、hn-ai-promo、nc-vouchers-swj、nc-vouchers-zf（观察记录 36.5 小时前开始，不足 7 天不算异常）`。满 7 天后同样内容会变成 `!` 并点名去跑 `probe`。计数走 `st.Recent(0)` 不限长、按指纹折叠视图；disabled 源不进表。变异：封顶成 1 行 / 让 disabled 漏进 / 耐心线永不报警 / 把"有一行"当零交付，各红该红那条。**两条取证自纠**：① 第一次探针 grep 不到这一行，是 `/tmp` 上撞了别的会话留下的同名旧二进制——远端临时产物从此一律带提交名（本次 `/tmp/dh-effec29-amd64/`）；② 读 `/api/v1/sources` 时我按猜的字段名取 `parsed`/`found` 拿到 None 还往下推，那些数嵌在 `last` 之下，先 dump 原文再读才对 |
 | `run` 被门禁执行，含 `-no-first` 与干净退出（M46） | VERIFIED（四次变异，其中一次是脚手架自己被抓） | 见 ROADMAP M46 那行。两条值得下次直接引用的事实：① 这套门禁夹具里**启动轮要 4.5 秒才落 `round complete`**（canary 源要先撞一次连接超时），任何"等一会儿再断言没有发生"的写法都必须比这个长，本轮用 10 秒并在注释里写下依据；② 演练的对象是 `dist/` 里的构建产物，**改完源码不重编就等于没改**——第一遍三条变异全部假"存活"就是这个原因。Linux 那一条（SIGTERM → 0）在构建机上跑过：还原后 `ok SIGTERM 之后以 0 退出`，把优雅停止当成错误时报 `run exited 1 on SIGTERM` |
 | 同刻到期提醒的先后规则有测试钉住，窗口预测换成实测（M45） | VERIFIED（两次变异各红该这条） | `dueEvents` 在同一时刻按**标题字节序**排（插队卡与日报按分数排），此前只断"每张卡装 3 条"、不问"哪 3 条"——把 tie-break 换成随机也不会红。新增测试把六行同刻的最高分故意放标题最后，断两张卡的成员与顺序、当天预算=2 张、六行全部标记。变异：tie-break 改按分数 → 红；反向按标题 → 红。同时把 09-27/09-30 的预测按 `events` 实测重钉（六条同刻、四条《我享云》、93→87），台账里那三个数是抄来的旧读数 |
 | 助手侧的 URL 契约钉回路由表（M44） | VERIFIED（四次变异各红一处，首跑抓到一条真漂移） | 三个查询脚本 + 技能说明里的每个 `/api/v1/...?a=` 都是断言，此前无人对表。现在从 `httpapi.go` 的 AST 读回"哪些路由在服务、每个处理函数真读哪些 `Get("x")`"，两个方向查。**真漂移**：`/api/v1/runs` 一直在服务、文档从未提及（已补）。反方向同样有牙：新增一条 `/api/v1/*` 路由而不写进文档即红；`/api/v1/openclaw/latest` 是退役别名，唯一的豁免且由代码注释说明理由。防空转：路由数 ≥5 / deals 参数 ≥5 / 脚本恰好 3 个。注意这条**不**是"参数行为有测试"——`min/limit/category/q/source/dupes` 的过滤语义早就有 httpapi 用例在测，本轮补的是"文档与脚本说的是同一批名字" |
@@ -213,7 +214,8 @@ ssh alienware-life 'echo -n "带时刻的行: "; sudo grep -c -e expires_at -e s
 所以判据不是"相等"，是**祖先关系**：
 
 ```bash
-code=$(git log -1 --format=%H -- '*.go' ':!*_test.go' go.mod)   # 只算进得了二进制的改动
+code=$(git log -1 --format=%H -- '*.go' ':(exclude)*_test.go' go.mod)   # 只算进得了二进制的改动
+test -n "$code" || { echo "取空了，别往下判"; exit 1; }
 stamp=$(ssh alienware-life "sudo -u dealhunter /opt/deal-hunter/deal-hunter version" | sed -n 's/.*commit=\([0-9a-f]*\).*/\1/p')
 git merge-base --is-ancestor "$code" "$stamp" && echo "生产不落后" || echo "生产缺代码改动"
 ```
@@ -261,6 +263,10 @@ config/deploy/dist）与 `/tmp/dh-wire-feishu.sh`（9-19，把服务接到租户
   服务还没重启（重启是最后一步），看起来"失败"其实半程已生效。要么 `scp -r deploy` 保持 `deploy/` 子目录，
   要么直接整个仓库快照过去。重跑一次会把 `deal-hunter.bak-prev` 换成刚装的那份，上一版就此丢掉：
   想留住它，先 `cp -a` 走再在装完 `cp -a` 回来。
+- **`生产落后了没有` 那段命令里的 pathspec 要写成 `":(exclude)*_test.go"`**（2026-09-23 实测）：
+  本文档给的 `':!*_test.go'` 形式在交互 shell 里能用，但我把它塞进 `$( … )` 的嵌套引号里跑时
+  变成字面 `\!`，`git log` 直接 fatal、`code` 取空，于是 `--is-ancestor` 报了个假的"生产缺代码改动"。
+  判据：跑完先看 `code` 非空再看结论；空值走掉的合并基判定不是证据。
 - **不要把 `install.sh` 的输出接进 `| head`**：远端脚本被 SIGPIPE 打断后会在"备份完、没重启完"
   的地方停下，看起来装好了其实服务还跑着旧版（今晚 `9daa3d3` 就是这样落后了一次）。要截断就先
   `> /tmp/x.log 2>&1` 再 `tail`，并确认 `installer rc=0`。
