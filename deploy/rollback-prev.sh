@@ -3,7 +3,9 @@
 # host running (or trying to run) the binary that just failed.
 #
 #   deploy/rollback-prev.sh            # /opt/deal-hunter, restarts the service
-#   DH_DEPLOY_PREFIX=/tmp/x deploy/rollback-prev.sh
+#   sudo deploy/rollback-prev.sh       # by hand: it moves root-owned files and
+#                                      # restarts a system unit, so it needs root
+#   DH_DEPLOY_PREFIX=/tmp/x deploy/rollback-prev.sh   # sandbox (what the drill uses)
 #
 # install.sh calls this when the panel never answers after a restart; it is also the
 # command an operator runs by hand after deciding a new build is the bad one. The

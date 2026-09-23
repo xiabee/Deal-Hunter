@@ -584,7 +584,8 @@ systemd 单元带 `ProtectSystem=strict`、`PrivateTmp`、`RestrictAddressFamili
 状态目录由 `StateDirectory=` 托管；升级只留上一版二进制（`deal-hunter.bak-prev`，它自己的 `version`
 就是"这是哪一版"），配置每天留一份快照，都不覆盖已有内容。装完 `install.sh` 会等到面板 `/healthz`
 答 200 才算成功（`deploy/wait-healthy.sh`，面板在配置里关着时明说跳过）——不健康就非零退出，
-而不是"systemd 刚才说 active"。
+而不是"systemd 刚才说 active"。检查不过时它会**先退回上一版并重启**（`sudo /opt/deal-hunter/rollback-prev.sh`
+也可以事后手跑），安装仍以非零退出：一份失败的产物不该留在 live 路径上。
 
 **OpenClaw 联动（可选）**：
 
