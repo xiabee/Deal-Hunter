@@ -1309,3 +1309,66 @@ func TestDailyDryRun(t *testing.T) {
 		t.Fatalf("a day with nothing live must say so:\n%s", out)
 	}
 }
+
+// The delivery row answers "这个源到底有没有用", which the silence row cannot: a
+// source that parses its list page every round is 出声 even when nothing it parsed
+// ever reached the store. Zero delivery is not automatically broken (a city's
+// voucher calendar can be empty for weeks), so the observation record decides
+// whether this is a note or a warning - the same discipline as source silence.
+func TestDoctorReportsDelivery(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"sources":[
+		{"name":"delivers","kind":"rss","url":"https://x.test/a.rss"},
+		{"name":"parses-nothing-usable","kind":"rss","url":"https://x.test/b.rss"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	data := filepath.Join(dir, "data")
+	if err := os.MkdirAll(data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	seed(t, data, `{"fingerprint":"d1","url":"https://x.test/one","title":"一条真的交付过",`+
+		`"source":"delivers","category":"ai_free","score":72,"is_free":true,`+
+		`"published_at":"2026-09-20T09:00:00+08:00","discovered_at":"2026-09-20T09:30:00+08:00","meta":{}}`)
+
+	row := func(since time.Duration) string {
+		t.Helper()
+		state := `{"src:last_hit":{"delivers":"` + time.Now().Add(-time.Hour).UTC().Format(time.RFC3339) +
+			`","parses-nothing-usable":"` + time.Now().Add(-time.Hour).UTC().Format(time.RFC3339) +
+			`"},"src:last_hit_since":"` + time.Now().Add(-since).UTC().Format(time.RFC3339) + `"}`
+		if err := os.WriteFile(filepath.Join(data, "state.json"), []byte(state), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		code, out := run(t, "-config", cfgPath, "-data", data, "doctor", "-net=false")
+		if code != 0 {
+			t.Fatalf("doctor: code=%d out=%s", code, out)
+		}
+		for _, line := range strings.Split(out, "\n") {
+			f := strings.Fields(line)
+			if len(f) >= 2 && f[1] == "delivery" {
+				return line
+			}
+		}
+		t.Fatalf("no delivery row in:\n%s", out)
+		return ""
+	}
+
+	fresh := row(2 * time.Hour)
+	if !strings.HasPrefix(fresh, "✓") {
+		t.Errorf("two hours of observation is not enough to call a quiet source broken: %s", fresh)
+	}
+	if !strings.Contains(fresh, "1 个源") || strings.Contains(fresh, "delivers（") {
+		t.Errorf("the count should name one empty source and never the delivered one: %s", fresh)
+	}
+
+	aged := row(8 * 24 * time.Hour)
+	if !strings.HasPrefix(aged, "!") {
+		t.Errorf("after a week of watching, zero delivery is worth a look: %s", aged)
+	}
+	if !strings.Contains(aged, "parses-nothing-usable") || strings.Contains(aged, "delivers、") {
+		t.Errorf("the aged row must name the empty source only: %s", aged)
+	}
+	if !strings.Contains(aged, "probe") {
+		t.Errorf("the warning should say what to run next: %s", aged)
+	}
+}

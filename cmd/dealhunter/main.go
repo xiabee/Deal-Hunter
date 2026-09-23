@@ -604,6 +604,8 @@ func cmdDoctor(ctx context.Context, cfg *config.Config, log *slog.Logger, stdout
 		add("daily", dStat, dDetail)
 		sStat, sDetail := sourceSilence(cfg, st, time.Now())
 		add("source silence", sStat, sDetail)
+		dvStat, dvDetail := sourceDelivery(cfg, st, time.Now())
+		add("delivery", dvStat, dvDetail)
 		st.Close()
 	}
 
@@ -990,6 +992,39 @@ func sourceSilence(cfg *config.Config, st *store.Store, now time.Time) (string, 
 		return "warn", fmt.Sprintf("%d 个信源安静过头：%s", len(quiet), truncate(strings.Join(quiet, "、"), 78))
 	}
 	return "ok", headline
+}
+
+// sourceDelivery answers "这个源到底有没有用" - the reading the silence row cannot
+// give, because a list page that parses 143 rows a round is 出声 no matter how many
+// of them ever reach the store. Zero delivery is not automatically a failure (a
+// city's voucher calendar can be empty for weeks), so the patience line decides
+// warn vs ok the same way source silence does, and the detail says what to run next.
+func sourceDelivery(cfg *config.Config, st *store.Store, now time.Time) (string, string) {
+	const patience = 7 * 24 * time.Hour
+	counts := pipeline.SourceDelivery(cfg, st)
+	var none []string
+	total := 0
+	for _, s := range cfg.EnabledSources() {
+		total += counts[s.Name]
+		if counts[s.Name] == 0 {
+			none = append(none, s.Name)
+		}
+	}
+	if len(none) == 0 {
+		return "ok", fmt.Sprintf("%d 个启用源都交付过内容（库内 %d 行）", len(counts), total)
+	}
+	epoch, epochKnown := pipeline.SourceRecordStart(st)
+	watchOnly := !epochKnown || now.Sub(epoch) <= patience
+	head := fmt.Sprintf("%d 个源解析过列表但一条都没交付过：%s", len(none), truncate(strings.Join(none, "、"), 70))
+	if watchOnly {
+		age := "还没有记录"
+		if epochKnown {
+			age = humanDelta(now.Sub(epoch)) + "前开始"
+		}
+		return "ok", head + fmt.Sprintf("（观察记录 %s，不足 7 天不算异常）", age)
+	}
+	return "warn", head + fmt.Sprintf("（已观察 %s）下一步：dealhunter probe -source <名> 看每一行为什么进不了日报",
+		humanDelta(now.Sub(epoch)))
 }
 
 // backupFreshness reports the last time deploy/backup.sh finished successfully.

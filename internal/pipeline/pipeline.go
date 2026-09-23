@@ -1027,6 +1027,27 @@ func SourceIdleness(cfg *config.Config, st *store.Store, now time.Time) []Source
 	return out
 }
 
+// SourceDelivery counts the rows currently in the log that came from each enabled
+// source. This is the number the silence row cannot see: a list page can keep
+// parsing 143 rows a round - which is what "出声" records - while every one of
+// them is refused downstream (no offer keywords, a detail body that is only a
+// WeChat placeholder), and nothing is ever delivered. Zero is not automatically
+// broken: a city's voucher calendar really can be empty for weeks. It is a fact
+// worth one line, because finding out by hand takes four commands.
+func SourceDelivery(cfg *config.Config, st *store.Store) map[string]int {
+	// n=0 means uncapped here, and it matters: a capped read would undercount the
+	// quiet sources, which is the only thing this function can get wrong.
+	counts := map[string]int{}
+	for _, d := range st.Recent(0) {
+		counts[d.Source]++
+	}
+	out := map[string]int{}
+	for _, s := range cfg.EnabledSources() {
+		out[s.Name] = counts[s.Name]
+	}
+	return out
+}
+
 // stateTimeOf reads an RFC3339 timestamp stored under key, without needing an App -
 // see BriefingState for why doctor wants that.
 func stateTimeOf(st *store.Store, key string) (time.Time, bool) {

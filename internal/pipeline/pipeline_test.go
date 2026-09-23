@@ -1806,3 +1806,52 @@ func TestReminderWindowsIncludeTheirOwnEdges(t *testing.T) {
 		t.Errorf("one second beyond the expiry lead should be silent, got %d", len(got))
 	}
 }
+
+// SourceDelivery is the reading the silence row structurally cannot give: a list
+// page may parse 143 rows every round (which is what "出声" records) and still
+// never deliver one. The counts must come from the same collapsed view the briefing
+// reads, not from raw lines in the file - one deal rewritten by MarkPushed is two
+// lines and one row.
+func TestSourceDeliveryCountsRowsNotFileLines(t *testing.T) {
+	f := &cannedFetcher{byURL: map[string][]byte{feedURL: feedBody(t)}}
+	app := testApp(t, f, &spyNotifier{}, func(c *config.Config) {
+		c.Sources = []config.Source{
+			{Name: "talkative", Kind: config.KindRSS, URL: feedURL, Trust: 8},
+			{Name: "one-row", Kind: config.KindRSS, URL: feedURL, Trust: 8},
+			{Name: "silent", Kind: config.KindRSS, URL: feedURL, Trust: 8},
+			{Name: "retired", Kind: config.KindRSS, URL: feedURL, Trust: 8, Disabled: true},
+		}
+	})
+	save := func(source, fp, title string) {
+		t.Helper()
+		d := &model.Deal{Fingerprint: fp, URL: "https://d.test/" + fp, Title: title,
+			Source: source, Category: model.CatAIFree, Score: 70, IsFree: true,
+			Offers:      []model.Offer{{Kind: model.KindFree}},
+			PublishedAt: time.Now().Add(-time.Hour), DiscoveredAt: time.Now().Add(-time.Hour),
+			Meta: map[string]string{}}
+		if err := app.st.Save(d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	save("talkative", "t1", "第一条免费额度")
+	save("talkative", "t2", "第二条免费额度")
+	save("one-row", "o1", "只交付过一条")
+	save("retired", "r1", "退役源也有历史行")
+	// Two lines, one deal: the rewrite is what would inflate a raw line count.
+	if err := app.st.MarkPushed("t1"); err != nil {
+		t.Fatal(err)
+	}
+
+	got := SourceDelivery(app.cfg, app.st)
+	if got["talkative"] != 2 {
+		t.Errorf("talkative should count 2 rows across 3 log lines, got %d", got["talkative"])
+	}
+	if got["one-row"] != 1 || got["silent"] != 0 {
+		t.Errorf("per-source counts wrong: %+v", got)
+	}
+	// A disabled source is not something an operator can act on, and its history
+	// would otherwise be counted as a delivered source forever.
+	if _, ok := got["retired"]; ok {
+		t.Errorf("a disabled source must not appear in the delivery report: %+v", got)
+	}
+}
