@@ -253,6 +253,13 @@ bash scripts/test-backup.sh || fail "backup drill"
 # had only ever been run by hand, and the guard it needs (keep one previous copy, and
 # refuse to overwrite when that copy could not be written) is the kind that silently
 # rots back into "copy aside with a fresh timestamp" if nothing checks it.
+# install.sh now fails an upgrade when the panel does not answer, so the probe it
+# waits on is on the deploy path. It is drilled against a real listener and a dead
+# port; install.sh's own wiring is asserted from the script text (that file needs
+# root and systemd and cannot run in a gate).
+step "install readiness: the probe the installer waits on"
+bash scripts/test-install-readiness.sh || fail "install readiness drill"
+
 step "openclaw installer drill: one previous copy, and refusal when it cannot be written"
 bash scripts/test-openclaw-integration.sh || fail "openclaw installer drill"
 

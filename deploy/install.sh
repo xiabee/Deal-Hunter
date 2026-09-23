@@ -58,6 +58,7 @@ if [[ -f "$PREFIX/deal-hunter" ]]; then
 fi
 install -m 0755 "$BIN_SRC" "$PREFIX/deal-hunter"
 install -m 0755 "$REPO_ROOT/deploy/backup.sh" "$PREFIX/backup.sh"
+install -m 0755 "$REPO_ROOT/deploy/wait-healthy.sh" "$PREFIX/wait-healthy.sh"
 install -m 0644 "$REPO_ROOT/deploy/deal-hunter-backup.service" "/etc/systemd/system/deal-hunter-backup.service"
 install -m 0644 "$REPO_ROOT/deploy/deal-hunter-backup.timer" "/etc/systemd/system/deal-hunter-backup.timer"
 # Deliberately not enabled: turning on a recurring job that writes outside the
@@ -103,12 +104,37 @@ systemctl daemon-reload
 systemctl enable "$SERVICE.service" >/dev/null 2>&1
 systemctl restart "$SERVICE.service"
 
-sleep 2
-if systemctl is-active --quiet "$SERVICE.service"; then
-	log "服务已运行"
+# "systemd said active" is not "the service works". The unit is hardened and the
+# state directory is root-owned, so the ways this can go wrong are the quiet ones:
+# a config that validates and then refuses to load, a bind another process holds,
+# a crash loop that is active for exactly one poll. So the acceptance check is the
+# panel answering /healthz, and a failure here fails the install.
+BIND=""
+PANEL_ON=1
+if [[ -f "$ETC/deal-hunter.env" ]]; then
+	# The env file is shell syntax sourced by systemd, so a quoted value has to be
+	# unquoted here too - and a trailing CR would end up inside the URL.
+	BIND="$(sed -n 's/^DH_SERVER_BIND=//p' "$ETC/deal-hunter.env" | tail -1 | tr -d '\r' | sed -e 's/^"//' -e 's/"$//')"
+fi
+if [[ -f "$ETC/config.json" ]]; then
+	config_bind="$(sed -n 's@.*"bind"[[:space:]]*:[[:space:]]*"\([^"]*\)".*@\1@p' "$ETC/config.json" | head -1)"
+	if grep -q '"enabled"[[:space:]]*:[[:space:]]*false' "$ETC/config.json"; then
+		PANEL_ON=0
+	fi
+	[[ -n "$BIND" ]] || BIND="$config_bind"
+fi
+if [[ "$PANEL_ON" != "1" ]]; then
+	warn "面板在配置里是关的，健康检查跳过（服务本身仍在跑采集）"
+elif [[ -z "$BIND" ]]; then
+	die "读不到面板监听地址（$ETC/deal-hunter.env 的 DH_SERVER_BIND 或 config.json 的 server.bind），无法确认服务是否真的在服务"
 else
-	warn "服务未就绪，最近的日志："
-	journalctl -u "$SERVICE" -n 25 --no-pager || true
+	# env wins over config.json at runtime, so the same precedence has to be probed.
+	if ! "$PREFIX/wait-healthy.sh" "http://$BIND" 30; then
+		warn "服务未就绪，最近的日志："
+		journalctl -u "$SERVICE" -n 25 --no-pager || true
+		die "重启后 $BIND/healthz 没有答 200：安装判为失败，而不是「装好了但没起来」"
+	fi
+	log "服务已运行，面板在 $BIND 上应答 200"
 fi
 
 echo

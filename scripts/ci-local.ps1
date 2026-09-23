@@ -280,6 +280,16 @@ if (Get-Command bash -ErrorAction SilentlyContinue) {
 
 # Same as the bash gate. The drill prints a visible "skipped" under MINGW (its
 # failure legs are built from POSIX permission bits), so this step is informative
+# Same drill as the bash gate: bash is required for it, and this is the only reason
+# the readiness probe is checked here at all rather than only on the Linux host.
+Step "install readiness: the probe the installer waits on"
+if (Get-Command bash -ErrorAction SilentlyContinue) {
+    & bash scripts/test-install-readiness.sh
+    if ($LASTEXITCODE -ne 0) { Fail "install readiness drill" }
+} else {
+    Write-Host "  ! 本机没有 bash，跳过（Linux 侧由 ci-office.sh 执行同一条）" -ForegroundColor Yellow
+}
+
 # rather than red on Windows.
 Step "openclaw installer drill: one previous copy, refusal when it cannot be written"
 if (Get-Command bash -ErrorAction SilentlyContinue) {

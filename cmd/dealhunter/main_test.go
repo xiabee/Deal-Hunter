@@ -465,6 +465,41 @@ func probeRows(t *testing.T, out string) map[string][]string {
 	return rows
 }
 
+// notify-test 是 README 与 install.sh 的"下一步"里都写着的那条命令：装完的人靠它
+// 判断推送链路通不通。它此前一行都没被执行过，而它最该说对的是两种相反的场合——
+// 只配了 console 时要成功（那是真送达，不是空话），一个通道都没有时必须失败。
+// 后者尤其要紧：全部关掉时构造就应当拒绝（"no notification backend enabled"），
+// 而不是带着零个出口跑一次自检、再对着空集合说"已送达所有通道"。
+func TestNotifyTestReachesTheConsoleAndRefusesAnEmptyFanOut(t *testing.T) {
+	dir := t.TempDir()
+	code, out := run(t, "-data", dir, "notify-test")
+	if code != 0 {
+		t.Fatalf("with the default console backend the self-test must pass: code=%d out=%s", code, out)
+	}
+	if !strings.Contains(out, "console") {
+		t.Errorf("the channels it will use should be named before sending: %s", out)
+	}
+	if !strings.Contains(out, "✓") {
+		t.Errorf("a delivered self-test should say so: %s", out)
+	}
+
+	quiet := filepath.Join(dir, "no-backends.json")
+	if err := os.WriteFile(quiet, []byte(`{"server":{"enabled":false},"notify":{"console":false,`+
+		`"feishu":{"enabled":false},"openclaw":{"enabled":false}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, out = run(t, "-config", quiet, "-data", dir, "notify-test")
+	// The refusal comes from construction, not from the send: an operator who turns
+	// every channel off gets told the configuration is empty rather than a self-test
+	// that "succeeded" against nothing.
+	if code == 0 || !strings.Contains(out, "no notification backend enabled") {
+		t.Fatalf("with every channel off it must refuse to start: code=%d out=%s", code, out)
+	}
+	if strings.Contains(out, "已送达") {
+		t.Errorf("it must not claim delivery to zero channels: %s", out)
+	}
+}
+
 func TestDoctorWithoutNetworkPasses(t *testing.T) {
 	code, out := run(t, "-data", t.TempDir(), "doctor", "-net=false")
 	if code != 0 {
