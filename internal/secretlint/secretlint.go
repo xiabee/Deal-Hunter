@@ -21,8 +21,11 @@ type Finding struct {
 	Snippet string `json:"snippet"`
 }
 
+// String is how a finding is read - by the secretscan command, and by the
+// gate test that fails when the repository is not clean. Two renderings of the
+// same fact drift apart, so there is one.
 func (f Finding) String() string {
-	return fmt.Sprintf("%s: %s:%d: %s", f.Rule, f.Path, f.Line, f.Snippet)
+	return fmt.Sprintf("%s  %s:%d  %s", f.Rule, f.Path, f.Line, f.Snippet)
 }
 
 // Options tune a scan.

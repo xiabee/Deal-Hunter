@@ -268,7 +268,14 @@ func cmdOnce(ctx context.Context, cfg *config.Config, log *slog.Logger, stdout i
 	return exitFromError(<-serveErr)
 }
 
+// cmdServe opens the panel and nothing else: no collector, no schedule. It is
+// the command for "let me read the state this box already has".
 func cmdServe(ctx context.Context, cfg *config.Config, log *slog.Logger, stdout io.Writer, args []string) int {
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	fs.SetOutput(stdout)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
 	app, err := pipeline.New(cfg, log)
 	if err != nil {
 		fmt.Fprintf(stdout, "启动失败：%v\n", err)
@@ -276,7 +283,9 @@ func cmdServe(ctx context.Context, cfg *config.Config, log *slog.Logger, stdout 
 	}
 	defer app.Close()
 	api := httpapi.New(cfg, app, log)
-	log.Info("serving read-only API", "addr", api.Addr())
+	// The bound address belongs to httpapi's own "httpapi: listening" line. A
+	// second line here could only print the configured bind, which for
+	// 127.0.0.1:0 is a port that never existed.
 	return exitFromError(api.Serve(ctx))
 }
 
@@ -666,7 +675,7 @@ func cmdSecretScan(stdout, stderr io.Writer, args []string) int {
 			fmt.Fprintf(stderr, "  … 另有 %d 处\n", len(findings)-*max)
 			break
 		}
-		fmt.Fprintf(stderr, "  %s  %s:%d  %s\n", f.Rule, f.Path, f.Line, f.Snippet)
+		fmt.Fprintf(stderr, "  %s\n", f)
 	}
 	fmt.Fprintln(stderr, "\n如为有意保留的示例值，请在该行末尾加 secretlint:ignore 并说明原因。")
 	return 1

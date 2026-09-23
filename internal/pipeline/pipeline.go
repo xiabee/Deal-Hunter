@@ -918,10 +918,6 @@ func (a *App) localDay(now time.Time) string {
 	return dayKey(a.loc(), now)
 }
 
-func (a *App) sameLocalDay(x, y time.Time) bool {
-	return a.localDay(x) == a.localDay(y)
-}
-
 // stateTime reads an RFC3339 timestamp stored under key.
 // srcLastHit records, per source, the last moment its page parsed into at least one
 // row. The failure this exists for is the quiet one: a page gets redesigned, the

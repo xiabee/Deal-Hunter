@@ -151,6 +151,98 @@ fi
 serve_done
 echo "  exited 0 when -hold expired, with no ERROR in the log"
 
+# `serve` is its own documented command ("只开面板不采集"), and until now no step had
+# ever run it: the check above goes in through `once -serve`. Two promises live in that
+# one command - it shows the store this box already has, and it does not collect - and
+# neither had ever been observed. The first is checked against a seeded row rather than
+# an empty file; the second against a log line, with a settle window because "no round
+# started" is a fact about this command, not a race to win.
+step "serve: the panel command answers from the store and never collects"
+SRV_DIR="$(mktemp -d)"
+mkdir -p "$SRV_DIR/data"
+printf '%s\n' '{"fingerprint":"gateserve1","url":"https://gate.test/serve","title":"gate fixture: a live free tier","summary":"open to all users","source":"gate","category":"ai_free","score":71,"is_free":true,"published_at":"2026-01-01T00:00:00Z","discovered_at":"2026-01-01T00:00:00Z","meta":{}}' > "$SRV_DIR/data/deals.jsonl"
+printf '%s' '{"sources":[{"name":"gate-canary","kind":"rss","url":"http://127.0.0.1:1/x.rss","trust":1}],"server":{"enabled":true,"bind":"127.0.0.1:0"},"timezone":"UTC"}' > "$SRV_DIR/config.json"
+DH_DATA_DIR="$SRV_DIR/data" ./dist/dealhunter -config "$SRV_DIR/config.json" serve \
+	>"$SRV_DIR/serve.log" 2>&1 &
+srv_pid=$!
+srv_done() {
+	kill "$srv_pid" 2>/dev/null || true
+	wait "$srv_pid" 2>/dev/null || true
+	rm -rf "$SRV_DIR"
+}
+srv_fail() {
+	[[ -f "$SRV_DIR/serve.log" ]] && cat "$SRV_DIR/serve.log"
+	srv_done
+	fail "$@"
+}
+
+srv_url=""
+for _ in $(seq 1 200); do
+	line="$(grep -m1 -oE 'url=http://127\.0\.0\.1:[0-9]+' "$SRV_DIR/serve.log" 2>/dev/null || true)"
+	if [[ -n "$line" ]]; then
+		srv_url="${line#url=}"
+		break
+	fi
+	kill -0 "$srv_pid" 2>/dev/null || break
+	sleep 0.1
+done
+[[ -n "$srv_url" ]] || srv_fail "serve never reported a listening URL"
+echo "  listening on $srv_url"
+
+for path in /healthz /api/v1/deals; do
+	code="$(curl -s -o /dev/null -w '%{http_code}' "$srv_url$path" 2>/dev/null || true)"
+	case "$code" in
+	200) ;;
+	'' | *[!0-9]*) srv_fail "GET $path returned no HTTP status at all" ;;
+	*) srv_fail "GET $path over the real listener = $code, want 200" ;;
+	esac
+done
+deals_body="$(curl -fsS "$srv_url/api/v1/deals" 2>/dev/null || true)"
+[[ "$deals_body" == *gateserve1* ]] || srv_fail "serve did not show the row already in the store it was pointed at"
+echo "  the seeded row is served back out of the store"
+
+sleep 1
+if grep -qE 'round complete|source failed' "$SRV_DIR/serve.log"; then
+	srv_fail "serve collected - the panel command is supposed to be read-only"
+fi
+echo "  no collection round was started"
+
+# A flag `serve` does not have must be refused rather than swallowed. The command used
+# to ignore its arguments entirely, so `serve -hold 5s` served forever while looking like
+# it had obeyed. `timeout` bounds the probe so a regression that goes back to ignoring
+# arguments reports "exited 124" instead of hanging the gate.
+rc=0
+timeout 10 env DH_DATA_DIR="$SRV_DIR/data" ./dist/dealhunter -config "$SRV_DIR/config.json" 	serve -hold 5s >"$SRV_DIR/reject.log" 2>&1 || rc=$?
+[[ "$rc" == "2" ]] || {
+	cat "$SRV_DIR/reject.log"
+	fail "serve accepted a flag it does not have (-hold): exited $rc, want 2"
+}
+if grep -q 'listening' "$SRV_DIR/reject.log"; then
+	cat "$SRV_DIR/reject.log"
+	fail "serve listened even though it was handed a flag it does not have"
+fi
+echo "  a flag it does not have is refused with exit 2, before anything listens"
+
+if err_line="$(grep -m1 'level=ERROR' "$SRV_DIR/serve.log")"; then
+	srv_fail "serve logged an error while serving: $err_line"
+fi
+
+# Stopping on a signal is the other half of the promise, but it cannot be asserted
+# where signals are not POSIX ones: Git Bash reports 143 for any kill regardless of
+# what the program did with it. So that leg runs on the Linux gate (and on the office
+# builder), and says plainly that it did not run here.
+if [[ "$(uname -s)" == "Linux" ]]; then
+	kill -TERM "$srv_pid" 2>/dev/null || srv_fail "could not signal the panel command"
+	rc=0
+	wait "$srv_pid" || rc=$?
+	srv_done
+	[[ "$rc" == "0" ]] || fail "serve exited $rc on SIGTERM; a handled stop must exit 0"
+	echo "  stopped on a signal with exit 0 and no ERROR in the log"
+else
+	srv_done
+	echo "  ! SIGTERM leg skipped: $(uname -s) 不传递 POSIX 信号（office 那份会跑）"
+fi
+
 # The scheduled sweep refuses to prune unless a backup succeeded within 36 hours, so
 # deploy/backup.sh sits on the critical path of a data-deleting feature. It had never
 # been run by anything but production.

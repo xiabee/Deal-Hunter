@@ -167,6 +167,106 @@ $ErrorActionPreference = "Stop"
 Remove-Item -Recurse -Force $serveDir
 Write-Host "  stopped serving when -hold expired, with no ERROR in the log"
 
+# The `serve` command on its own: see the bash twin for what the three promises are.
+# Stopping it on a signal is the fourth, and it cannot be observed on this host at all
+# (a kill here reports a number regardless of what the program did with it), so that
+# half is the Linux gate's. What runs below is the same listener, the same store read,
+# and the same "nothing was collected" check.
+Step "serve: the panel command answers from the store and never collects"
+$srvDir = Join-Path ([System.IO.Path]::GetTempPath()) ("dh-cmdserve-" + [guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Force -Path (Join-Path $srvDir "data") | Out-Null
+$srvRow = '{"fingerprint":"gateserve1","url":"https://gate.test/serve","title":"gate fixture: a live free tier","summary":"open to all users","source":"gate","category":"ai_free","score":71,"is_free":true,"published_at":"2026-01-01T00:00:00Z","discovered_at":"2026-01-01T00:00:00Z","meta":{}}'
+$srvCfgBody = '{"sources":[{"name":"gate-canary","kind":"rss","url":"http://127.0.0.1:1/x.rss","trust":1}],"server":{"enabled":true,"bind":"127.0.0.1:0"},"timezone":"UTC"}'
+Set-Content -LiteralPath (Join-Path $srvDir "data\deals.jsonl") -Value $srvRow -Encoding ascii
+Set-Content -LiteralPath (Join-Path $srvDir "config.json") -Value $srvCfgBody -Encoding ascii
+$srvLog = Join-Path $srvDir "serve.log"
+$srvExe = Join-Path (Get-Location) "dist/dealhunter.exe"
+$env:DH_DATA_DIR = (Join-Path $srvDir "data")
+$ErrorActionPreference = "Continue"
+$srvProc = Start-Process -FilePath $srvExe `
+    -ArgumentList @("-config", (Join-Path $srvDir "config.json"), "serve") `
+    -RedirectStandardOutput $srvLog -RedirectStandardError (Join-Path $srvDir "serve.err") `
+    -PassThru -NoNewWindow -ErrorAction SilentlyContinue
+if (-not $srvProc) {
+    $ErrorActionPreference = "Stop"
+    Remove-Item -Recurse -Force $srvDir
+    Fail "could not start $srvExe serve"
+}
+$srvUrl = ""
+for ($try = 0; $try -lt 200; $try++) {
+    $hit = Select-String -Path $srvLog -Pattern 'url=http://127\.0\.0\.1:\d+' | Select-Object -First 1
+    if ($hit) { $srvUrl = $hit.Matches[0].Value.Substring(4); break }
+    if ($srvProc.HasExited) { break }
+    Start-Sleep -Milliseconds 100
+}
+if (-not $srvUrl) {
+    Get-Content $srvLog | Out-Host
+    Stop-Process -Id $srvProc.Id -Force -ErrorAction SilentlyContinue
+    Remove-Item Env:DH_DATA_DIR
+    $ErrorActionPreference = "Stop"
+    Remove-Item -Recurse -Force $srvDir
+    Fail "serve never reported a listening URL"
+}
+Write-Host "  listening on $srvUrl"
+
+foreach ($path in @('/healthz', '/api/v1/deals')) {
+    $code = (& curl.exe -s -o NUL -w "%{http_code}" "$srvUrl$path")
+    if ($code -notmatch '^\d+$') { $ErrorActionPreference = "Stop"; Fail "GET $path returned no HTTP status at all" }
+    if ($code -ne "200") { $ErrorActionPreference = "Stop"; Fail "GET $path over the real listener = $code, want 200" }
+}
+$dealsBody = ((& curl.exe -sS "$srvUrl/api/v1/deals") -join "")
+if ($dealsBody -notmatch 'gateserve1') {
+    $ErrorActionPreference = "Stop"; Fail "serve did not show the row already in the store it was pointed at"
+}
+Write-Host "  the seeded row is served back out of the store"
+
+Start-Sleep -Seconds 1
+if (Select-String -Path $srvLog -Pattern 'round complete|source failed' -Quiet) {
+    Get-Content $srvLog | Out-Host
+    Stop-Process -Id $srvProc.Id -Force -ErrorAction SilentlyContinue
+    Remove-Item Env:DH_DATA_DIR
+    $ErrorActionPreference = "Stop"
+    Remove-Item -Recurse -Force $srvDir
+    Fail "serve collected - the panel command is supposed to be read-only"
+}
+if (Select-String -Path $srvLog -Pattern 'level=ERROR' -Quiet) {
+    Stop-Process -Id $srvProc.Id -Force -ErrorAction SilentlyContinue
+    Remove-Item Env:DH_DATA_DIR
+    $ErrorActionPreference = "Stop"
+    Remove-Item -Recurse -Force $srvDir
+    Fail "serve logged an error while serving"
+}
+Write-Host "  no collection round was started"
+
+# Same claim as the bash twin: `serve` refuses a flag it does not have instead of
+# ignoring its arguments and serving forever. WaitForExit(5000) bounds it so that a
+# regression which stops exiting shows up as "still running", not as a hung gate.
+$negProc = Start-Process -FilePath $srvExe `
+    -ArgumentList @("-config", (Join-Path $srvDir "config.json"), "serve", "-hold", "5s") `
+    -RedirectStandardOutput (Join-Path $srvDir "reject.log") -RedirectStandardError (Join-Path $srvDir "reject.err") `
+    -PassThru -NoNewWindow -ErrorAction SilentlyContinue
+$negExited = $negProc.WaitForExit(5000)
+if (-not $negExited) {
+    Stop-Process -Id $negProc.Id -Force -ErrorAction SilentlyContinue
+    $ErrorActionPreference = "Stop"
+    Fail "serve accepted a flag it does not have (-hold): still running after 5s, want exit 2"
+}
+if ($negProc.ExitCode -ne 2) {
+    $ErrorActionPreference = "Stop"
+    Fail ("serve accepted a flag it does not have (-hold): exited {0}, want 2" -f $negProc.ExitCode)
+}
+if (Select-String -Path (Join-Path $srvDir "reject.log") -Pattern 'listening' -Quiet) {
+    $ErrorActionPreference = "Stop"
+    Fail "serve listened even though it was handed a flag it does not have"
+}
+Write-Host "  a flag it does not have is refused with exit 2, before anything listens"
+Stop-Process -Id $srvProc.Id -Force -ErrorAction SilentlyContinue
+Remove-Item Env:DH_DATA_DIR
+$ErrorActionPreference = "Stop"
+Remove-Item -Recurse -Force $srvDir
+Write-Host "  stopped (the signal-exit leg belongs to the Linux gate)"
+
+
 # Same step as the bash gate. The drill itself exits 0 with a visible "skipped"
 # message when the host cannot set POSIX modes, so running it here is informative
 # either way - but only if bash is on PATH at all.
