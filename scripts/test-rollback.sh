@@ -108,14 +108,41 @@ fi
 # ---- no systemctl: the swap happens, and that is said out loud ----------------
 # Silently skipping the restart is how you end up with a rolled-back binary that no
 # process is running. The script must exit non-zero and name the command to run.
-P="$DIR/prefix/nosystemctl"; fresh_prefix "$P"
-printf 'live3\n' > "$P/deal-hunter"
-cp "$BIN" "$P/deal-hunter.bak-prev"
-out="$(PATH="/usr/bin:/bin" DH_DEPLOY_PREFIX="$P" bash "$ROLL" 2>&1)"; rc=$?
-if [[ "$rc" != 0 ]] && grep -q "systemctl restart" <<<"$out" && ! grep -q 'live3' "$P/deal-hunter"; then
-	pass "没有 systemctl 时照样换回上一版，但非零退出并给出该跑的命令"
+#
+# The premise is proved before it is used, twice over. The first version of this leg
+# narrowed PATH to /usr/bin:/bin - and on Linux that *contains* the real systemctl,
+# so the "missing" case quietly turned into a genuine `systemctl restart` fired at a
+# shared builder. The second version used an empty PATH and the script's own `mv`
+# stopped resolving (127 is not "no systemctl"). So the leg now builds a private bin
+# dir with just the one external command the script needs, then checks that the copy
+# actually runs and that systemctl is genuinely absent from it - and says which of
+# those the host refused. On MSYS a copied PE cannot load its own DLLs from an
+# isolated PATH, so that host reports the skip; Linux runs the leg.
+SAFE="$DIR/path-without-systemctl"
+mkdir -p "$SAFE"
+mv_src="$(command -v mv)"
+isolation=""
+if [[ -z "$mv_src" ]] || ! cp "$mv_src" "$SAFE/mv" 2>/dev/null; then
+	isolation="本机连一个私有的 mv 都造不出来（${mv_src:-PATH 里没有 mv}）"
+elif ! env -i PATH="$SAFE" "$BASH" -c 'mv --version >/dev/null 2>&1'; then
+	isolation="私有的 mv 在隔离 PATH 下跑不起来（复制来的二进制找不到自己的库）"
+elif env -i PATH="$SAFE" "$BASH" -c 'command -v systemctl' >/dev/null 2>&1; then
+	isolation="私有 PATH 里仍解析到 systemctl，那是主机事实"
+fi
+if [[ -n "$isolation" ]]; then
+	pass "跳过 systemctl 缺失那条：$isolation（Linux 侧由本机与 office 构建机执行这一腿）"
 else
-	bad "expected a loud swap-without-restart, rc=$rc out=$out"
+	P="$DIR/prefix/nosystemctl"
+	fresh_prefix "$P"
+	printf 'live3\n' > "$P/deal-hunter"
+	cp "$BIN" "$P/deal-hunter.bak-prev"
+	out="$(env -i PATH="$SAFE" DH_DEPLOY_PREFIX="$P" "$BASH" "$ROLL" 2>&1)"
+	rc=$?
+	if [[ "$rc" != 0 ]] && grep -q "systemctl restart" <<<"$out" && ! grep -q 'live3' "$P/deal-hunter"; then
+		pass "没有 systemctl 时照样换回上一版，但非零退出并给出该跑的命令"
+	else
+		bad "expected a loud swap-without-restart, rc=$rc out=$out"
+	fi
 fi
 
 # ---- install.sh must actually call it on the failed-health path ----------------
