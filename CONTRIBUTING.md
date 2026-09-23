@@ -42,7 +42,9 @@ scripts/               ci-local.{sh,ps1} 与 ci-office.sh
 3. **补一个离线 fixture 测试**：`internal/sources/testdata/` 放样本，
    用 `stubFetcher` 断言标题、链接归一化、时间解析、关键词闸门与限制条数。
    CI 不允许需要联网的测试。
-4. 若是新默认源，确认它在部署网络下真的可达（`dealhunter probe -source <name>`），
+4. 若是新默认源，确认它在部署网络下真的可达（已接入的用 `dealhunter probe -source <name>`，
+   还在候选阶段的直接 `dealhunter probe -url <地址> -kind <rss|html|json|…>`——不必先往
+   生产配置里加一条再删掉；表格报的就是排程那一套判定，含"这行为什么进不了日报"），
    并按「自主探测 > 官方页 > 聚合」的顺序给 `trust`。probe 表格里的分数、读出的时刻与
    挡下的原因就是排程那一套判定（`pipeline.Screen`），所以"这一页能不能喂出日报"在这里
    问得出；它不读状态库，因此"今天已经见过"与"标题被更早一行占位"两条要留给 `once` 之后再看。

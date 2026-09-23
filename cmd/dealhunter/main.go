@@ -289,26 +289,47 @@ func cmdServe(ctx context.Context, cfg *config.Config, log *slog.Logger, stdout 
 	return exitFromError(api.Serve(ctx))
 }
 
-// probe fetches one configured source and reports, row by row, what a round
-// would do with it. It is the source-admission tool, so it has to speak with
-// the scorer's voice: an earlier version kept a second formula here and printed
-// scores production never assigns, which is the worst possible answer for a
-// command whose only job is to predict what the reader will see.
+// probe reports what a round would do with one source, row by row. It is the
+// source-admission tool, so it has to speak with the scorer's voice: an earlier
+// version kept a second formula here and printed scores production never assigns,
+// which is the worst possible answer for a command whose only job is to predict
+// what the reader will see.
+//
+// -source measures a source this host already runs; -url measures a candidate that
+// is not in any config yet. The second one is what the admission flow actually
+// needs - "should this column be added" - and without it the only way to ask was to
+// edit the production config and delete it afterwards.
 func cmdProbe(ctx context.Context, cfg *config.Config, log *slog.Logger, stdout io.Writer, args []string) int {
 	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
 	fs.SetOutput(stdout)
-	name := fs.String("source", "", "要探测的信息源名称（必填）")
+	name := fs.String("source", "", "已配置的信息源名称（与 -url 二选一）")
+	urlFlag := fs.String("url", "", "探测一个还没写进配置的候选地址（与 -source 二选一）")
+	kind := fs.String("kind", config.KindRSS, "配 -url 时用哪种采集器解析")
+	trust := fs.Int("trust", 5, "配 -url 时按多少信息源可信度打分（0-10）")
 	limit := fs.Int("n", 15, "最多打印条数")
 	_ = fs.Parse(args)
-	if *name == "" {
-		fmt.Fprintln(stdout, "probe 需要 -source <name>；用 `sources` 查看可用名称")
+	if *name == "" && *urlFlag == "" {
+		fmt.Fprintln(stdout, "probe 需要 -source <name>（已配置的源）或 -url <地址>（候选源）；用 `sources` 看可用名称")
+		return 2
+	}
+	if *name != "" && *urlFlag != "" {
+		fmt.Fprintln(stdout, "-source 与 -url 只能给一个：前者测已在跑的源，后者测还没接入的候选")
 		return 2
 	}
 	var found *config.Source
-	for i := range cfg.Sources {
-		if cfg.Sources[i].Name == *name {
-			found = &cfg.Sources[i]
-			break
+	if *urlFlag != "" {
+		// Limit 0 on purpose: every collector defaults it sensibly, and a
+		// candidate should not be capped by a number nobody chose. It has no
+		// `sites`, so no link from it can earn the official-domain bonus - which
+		// is honest, since nobody has vouched for this domain yet. Trust is passed
+		// raw; the scorer clamps it, so there is one range rule, not two.
+		found = &config.Source{Name: "候选源", Kind: *kind, URL: *urlFlag, Trust: *trust}
+	} else {
+		for i := range cfg.Sources {
+			if cfg.Sources[i].Name == *name {
+				found = &cfg.Sources[i]
+				break
+			}
 		}
 	}
 	if found == nil {

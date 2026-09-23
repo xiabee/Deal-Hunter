@@ -158,6 +158,8 @@ DH_FEISHU_ENABLED=0 ./dist/dealhunter once
 
 # 4) 只盯一个源，看它到底能抓到什么：每一行的分数与"为什么进不了日报"就是排程那一份判定
 ./dist/dealhunter probe -source search-ai-free-cn
+#    还没接入的候选地址也能量（信源准入那道题问的就是这个，不必先改生产配置）
+./dist/dealhunter probe -url https://example.gov.cn/xxgk/tzgg/index.shtml -kind html -trust 7
 
 # 5) 配好飞书群机器人后自检推送链路
 export DH_FEISHU_WEBHOOK='https://open.feishu.cn/open-apis/bot/v2/hook/...'
@@ -498,7 +500,8 @@ dealhunter [全局参数] <命令>
   run           常驻：定时采集 + 每天一份日报 + 只读面板
   once          跑一轮就退出（-serve 可保持面板）
   serve         只开面板不采集
-  probe         单源探测：报出每行会被生产怎么用（分数、时刻、挡下的原因），不写库、不推送
+  probe         单源探测（-source 已配置的源 / -url 还没接入的候选）：报出每行会被生产怎么用
+                （分数、时刻、挡下的原因），不写库、不推送
   sources       列出信息源
   deals         查看最近入库（-min 按分数筛着看）
   daily         立刻发送今天的日报（占用当天那一份）；-dry 只列出

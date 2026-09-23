@@ -391,6 +391,20 @@ func TestTheCLINeverComputesAScoreItself(t *testing.T) {
 	}
 }
 
+// officialDomainBonus is scoring's +10 for a link matching a source's own
+// `sites`. Spelled out here because the point of the test is that a candidate has
+// not been granted it yet.
+const officialDomainBonus = 10
+
+func atoiScore(t *testing.T, s string) int {
+	t.Helper()
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		t.Fatalf("%q is not a score", s)
+	}
+	return n
+}
+
 func rssItem(url, title, summary string) string {
 	return "<item><title>" + title + "</title><link>" + url + "</link><description>" + summary + "</description></item>"
 }
@@ -1370,5 +1384,87 @@ func TestDoctorReportsDelivery(t *testing.T) {
 	}
 	if !strings.Contains(aged, "probe") {
 		t.Errorf("the warning should say what to run next: %s", aged)
+	}
+}
+
+// 准入那道题问的是"这一栏要不要接进来"，而被测的那个地址按定义还没在配置里。以前
+// 唯一的办法是去生产机的 /etc 里加一条 extra_sources 再删掉 - 于是一条没通过的候选
+// 会在生产配置里留一会儿。现在 `-url` 直接测。
+func TestProbeCandidateSourceNeedsNoConfig(t *testing.T) {
+	body := rssFeed(t,
+		rssItem("https://feed.test/free", "智谱 GLM-5.3-flash 限时免费开放", "官方公告：面向所有用户免费开放，API 调用 0 元。"),
+		rssItem("https://feed.test/news", "本周例会议程", "讨论季度安排与值班"),
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		_, _ = io.WriteString(w, body)
+	}))
+	t.Cleanup(srv.Close)
+
+	dir := t.TempDir()
+	// 一个空的 sources 清单：候选源不属于任何配置，这条命令也不该因此罢工。
+	cfgPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"timezone":"Asia/Shanghai","server":{"enabled":false},`+
+		`"notify":{"console":false},"http":{"allow_private_hosts":true},"sources":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	data := filepath.Join(dir, "data")
+	code, out := run(t, "-config", cfgPath, "-data", data, "probe",
+		"-url", srv.URL+"/feed.xml", "-kind", "rss", "-trust", "3")
+	if code != 0 {
+		t.Fatalf("a candidate must be probeable without a config entry: code=%d out=%s", code, out)
+	}
+	if !strings.Contains(out, "候选源") || !strings.Contains(out, "(rss)") {
+		t.Errorf("the header should say what it actually probed: %s", out)
+	}
+	rows := probeRows(t, out)
+	if len(rows) != 2 {
+		t.Fatalf("both rows should be listed with their verdicts, got:\n%s", out)
+	}
+	if rows["https://feed.test/free"][0] != "收" {
+		t.Errorf("the live offer should read as admitted: %v", rows["https://feed.test/free"])
+	}
+	if rows["https://feed.test/free"][1] == "-" {
+		t.Errorf("an admitted candidate row must carry a score: %v", rows["https://feed.test/free"])
+	}
+	if rows["https://feed.test/news"][0] != "无优惠命中词" {
+		t.Errorf("the plain news row should be refused for the same reason a round would: %v", rows["https://feed.test/news"])
+	}
+	// The candidate has no `sites`, so nothing from it may earn the official-domain
+	// bonus: admission is exactly the moment that bonus has not been granted yet.
+	// The witness is the same bytes through the configured path with a domain
+	// somebody did vouch for - the two scores must differ by exactly that bonus,
+	// which is a pair, not a magic number. Trust is deliberately low: at 8 both
+	// sides of the pair reached the scorer's 100 ceiling, and the delta came out 9
+	// - the clamp, not the bonus, would have been what the test measured.
+	vouched := filepath.Join(dir, "vouched.json")
+	if err := os.WriteFile(vouched, []byte(`{"timezone":"Asia/Shanghai","server":{"enabled":false},`+
+		`"notify":{"console":false},"http":{"allow_private_hosts":true},"sources":[`+
+		`{"name":"vouched","kind":"rss","url":"`+srv.URL+`/feed.xml","trust":3,"sites":["feed.test"]}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, vOut := run(t, "-config", vouched, "-data", filepath.Join(dir, "data2"), "probe", "-source", "vouched")
+	cand := probeRows(t, out)["https://feed.test/free"]
+	sites := probeRows(t, vOut)["https://feed.test/free"]
+	if len(cand) < 2 || len(sites) < 2 || sites[0] != "收" {
+		t.Fatalf("both probes must admit the same row to compare scores: candidate=%v vouched=%v", cand, sites)
+	}
+	if delta := atoiScore(t, sites[1]) - atoiScore(t, cand[1]); delta != officialDomainBonus {
+		t.Errorf("an unvouched candidate should sit exactly %d below the same row from a vouched domain, got %d",
+			officialDomainBonus, delta)
+	}
+}
+
+// 两个入口同时给（或都不给）时必须拒绝，而不是猜一个：猜错的那次探测会给出一个
+// 看着像结论的表，而它测的是另一个地址。
+func TestProbeNeedsExactlyOneOfSourceAndURL(t *testing.T) {
+	dir := t.TempDir()
+	code, out := run(t, "-data", dir, "probe")
+	if code != 2 || !strings.Contains(out, "-source") || !strings.Contains(out, "-url") {
+		t.Fatalf("giving neither should list both options: code=%d out=%s", code, out)
+	}
+	code, out = run(t, "-data", dir, "probe", "-source", "openrouter-free-models", "-url", "https://x.test/feed")
+	if code != 2 || !strings.Contains(out, "只能给一个") {
+		t.Fatalf("giving both must be refused: code=%d out=%s", code, out)
 	}
 }
