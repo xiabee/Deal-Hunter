@@ -124,6 +124,18 @@
 
 ## 已实测否决的方向（别再试第二遍）
 
+- **「把 HN 两条源换成 `search_by_date` 就能让它开口」**（2026-09-23 量过，**没用，别再试**）：
+  `hn-free-api` 与 `hn-ai-promo` 上线以来一条都没交付过，`probe` 给出的原因全是同一句
+  「发布已 N 小时」（18256h / 29560h 这种年纪），看着像"端点按热度排序所以拿回旧帖"。换端点这个
+  猜测一测就倒：`search_by_date` 配同样的参数，最新一条仍然是 **20 天前**，而 `max_age_hours` 是
+  336 小时（14 天）——两个端点在 14 天窗口内都是 **0 条**。真正的原因是查询本身太窄：
+  `query="free API credits"` + `numericFilters="points>10"` 在 30 条结果里 0 条落在 14 天内。
+  同一套量法把两个旋钮各自的价格量出来（30 条一批，2026-09-23，部署出口实测）：
+  `free API` + points>10 → 14 天内 **10** 条；`AI free` + points>10 → **17**；
+  `free API credits` + points>3 → **2**。所以"要不要让它们开口"是**改读者看到的内容**（放宽查询
+  会带进更多与"羊毛"无关的帖子），不是修 bug，留给操作员判；本文只负责把"换端点"这条假修法关掉。
+  复现（部署机上一条命令）：`curl -s "https://hn.algolia.com/api/v1/search_by_date?query=free%20API%20credits&tags=story&numericFilters=points%3E10&hitsPerPage=30" | 统计 created_at`。
+
 - **「加区县级或省级商务栏目」**（2026-09-23 用 `probe -url` 量过，**今天不做**，三条理由各自成立）：
   入口是**发现**来的不是猜的——`http://www.nc.gov.cn/ncszf/tzgg/2021_nav_list.shtml` 页脚发布着
   `dhq`/`anyi`/`hgt` 等 12+ 个区县与部门门户，`http://www.jiangxi.gov.cn/` 上有一条"省商务厅 →
