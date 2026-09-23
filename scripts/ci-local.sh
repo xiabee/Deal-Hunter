@@ -259,6 +259,12 @@ bash scripts/test-backup.sh || fail "backup drill"
 step "run: the daemon command boots, serves, and honours -no-first"
 bash scripts/test-run-daemon.sh || fail "run drill"
 
+# A failed health check is only half a fix: the host must not be left sitting on the
+# binary that failed. deploy/rollback-prev.sh is that move, and it is destructive on
+# a live path, so it gets drilled with a fake prefix and a stub systemctl.
+step "rollback: a failed upgrade goes back to the version that answered"
+bash scripts/test-rollback.sh || fail "rollback drill"
+
 # install.sh now fails an upgrade when the panel does not answer, so the probe it
 # waits on is on the deploy path. It is drilled against a real listener and a dead
 # port; install.sh's own wiring is asserted from the script text (that file needs

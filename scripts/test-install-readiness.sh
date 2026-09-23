@@ -88,19 +88,32 @@ TABLE
 # ---- install.sh must treat a failed probe as a failed install ----------------
 # The old shape warned and continued, so `installer rc=0` meant "systemd said active
 # once". This is the wiring half of that claim; the probe itself is covered above.
-# The call is matched by what only a *call* looks like (the URL argument), so the
-# line that installs the script is not counted as a second check.
+# A call is matched by what only a *call* looks like (the URL argument), so the line
+# that installs the script is not counted. Two calls is the honest shape since M48:
+# the acceptance probe, then the same probe again to confirm the rollback restored
+# service. What must not exist is a warn-only path that neither passes nor fails.
 calls="$(grep -c 'wait-healthy\.sh" "http' deploy/install.sh)"
-if [[ "$calls" == "1" ]]; then
-	pass "install.sh 里健康检查恰好一处调用（没有留下第二份旧的 warn-only 路径）"
+if [[ "$calls" == "2" ]]; then
+	pass "健康检查恰好两处调用：验收一次、退回后复确认一次"
 else
-	bad "install.sh calls the probe $calls times, want exactly 1"
+	bad "install.sh calls the probe $calls times, want 2 (acceptance + post-rollback confirmation)"
 fi
-block="$(grep -A 4 'wait-healthy\.sh" "http' deploy/install.sh)"
+if grep -qF 'if ! "$PREFIX/wait-healthy.sh"' deploy/install.sh; then
+	pass "验收那一处是反向守卫（if ! 健康检查），不健康才走退回"
+else
+	bad "the acceptance call is not negated - a dead panel would read as success"
+fi
+block="$(grep -A 12 'wait-healthy\.sh" "http' deploy/install.sh | head -26)"
 if grep -q 'die ' <<<"$block"; then
 	pass "检查失败那一路走 die，安装判为失败"
 else
 	bad "the failed-probe branch must die, not warn: $block"
+fi
+first="$(grep -n 'wait-healthy\.sh" "http' deploy/install.sh | head -1 | cut -d: -f1)"
+if (( first > 100 )); then
+	pass "健康检查排在单元安装与重启之后（第 $first 行）"
+else
+	bad "the probe runs at line $first, before the service was even installed"
 fi
 if grep -q 'install -m 0755 "$REPO_ROOT/deploy/wait-healthy.sh"' deploy/install.sh; then
 	pass '探针脚本随部署装到 /opt/deal-hunter（运维可以自己对着重跑）'

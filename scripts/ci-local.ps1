@@ -280,6 +280,15 @@ if (Get-Command bash -ErrorAction SilentlyContinue) {
 
 # Same as the bash gate. The drill prints a visible "skipped" under MINGW (its
 # failure legs are built from POSIX permission bits), so this step is informative
+# Same drill as the bash gate; see the rollback script for what it promises.
+Step "rollback: a failed upgrade goes back to the version that answered"
+if (Get-Command bash -ErrorAction SilentlyContinue) {
+    & bash scripts/test-rollback.sh
+    if ($LASTEXITCODE -ne 0) { Fail "rollback drill" }
+} else {
+    Write-Host "  ! 本机没有 bash，跳过（Linux 侧由 ci-office.sh 执行同一条）" -ForegroundColor Yellow
+}
+
 # The `run` drill needs bash (it is a bash script on both hosts); the Linux-only
 # signal leg inside it reports itself as skipped on Windows.
 Step "run: the daemon command boots, serves, and honours -no-first"

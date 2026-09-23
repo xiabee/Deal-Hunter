@@ -59,6 +59,7 @@ fi
 install -m 0755 "$BIN_SRC" "$PREFIX/deal-hunter"
 install -m 0755 "$REPO_ROOT/deploy/backup.sh" "$PREFIX/backup.sh"
 install -m 0755 "$REPO_ROOT/deploy/wait-healthy.sh" "$PREFIX/wait-healthy.sh"
+install -m 0755 "$REPO_ROOT/deploy/rollback-prev.sh" "$PREFIX/rollback-prev.sh"
 install -m 0644 "$REPO_ROOT/deploy/deal-hunter-backup.service" "/etc/systemd/system/deal-hunter-backup.service"
 install -m 0644 "$REPO_ROOT/deploy/deal-hunter-backup.timer" "/etc/systemd/system/deal-hunter-backup.timer"
 # Deliberately not enabled: turning on a recurring job that writes outside the
@@ -132,7 +133,15 @@ else
 	if ! "$PREFIX/wait-healthy.sh" "http://$BIND" 30; then
 		warn "服务未就绪，最近的日志："
 		journalctl -u "$SERVICE" -n 25 --no-pager || true
-		die "重启后 $BIND/healthz 没有答 200：安装判为失败，而不是「装好了但没起来」"
+		# A failed upgrade must not leave the host sitting on the binary that just
+		# failed. Put the previous version back and restart, then say which one is
+		# answering - the install still exits non-zero either way, because "upgraded"
+		# and "the box is back where it was" are different things to report.
+		"$PREFIX/rollback-prev.sh" || warn "退回上一版没成功：$PREFIX/deal-hunter 仍是刚装的那份"
+		if "$PREFIX/wait-healthy.sh" "http://$BIND" 30; then
+			die "安装判为失败：新版没应答，已退回上一版并恢复服务（原因见上面的日志）"
+		fi
+		die "安装判为失败：新版与退回后的上一版都不应答 $BIND/healthz - 那就不是这份二进制的问题"
 	fi
 	log "服务已运行，面板在 $BIND 上应答 200"
 fi
