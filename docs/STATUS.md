@@ -31,6 +31,7 @@
 
 | 项 | 结论 | 证据 |
 |---|---|---|
+| 装完的验收从"systemd 说过 active"变成"面板答 200"（M42） | VERIFIED（生产实装 + 四次变异） | 旧做法：`systemctl restart` 后 `is-active` 一次，不成立也只 warn，**install.sh 照样退 0**。现在 restart 之后由 `deploy/wait-healthy.sh` 有界轮询 `/healthz`（0=健康 / 1=始终不健康 / 2=参数不对），地址按运行时的优先级取（env 的 `DH_SERVER_BIND` 优先，退回 config.json 的 `server.bind`），面板被配置关掉就明说跳过，读不到地址就直接拒绝——不猜。地址是从 env 里读的，别抄进仓库。今晚实装：`healthy: http://127.0.0.1:8765/healthz = 200（等待 1s）`——那 1 秒就是在轮询，不是恰好碰上。演练两半都跑：对 M41 那条 `serve` 起出的真监听器必须退 0，对 127.0.0.1:1 必须退 1 且说"没有给出任何 HTTP 响应"（curl 连不上时报 000，把它当一个状态码读就是把死监听器藏在假数字后面）；install.sh 要 root+systemd 跑不进门禁，所以它的接线按脚本文本对表（调用恰好一处 / 失败分支走 die / 确实把探针装到 /opt/deal-hunter）。变异四次各红该红那条：探针把任何响应都算健康、失败分支改回 warn、去掉 http:// 守卫、允许零后端构造；还原后演练重新全绿。附带补上 `cmdNotifyTest` 从未被执行这一段：关掉全部通道时必须以"no notification backend enabled"拒绝启动，而不是对着零个出口说"✓ 已送达所有通道" |
 | `dealhunter serve` 被门禁执行，且真的不采集（M41） | VERIFIED（四次变异各红一处，含 Linux 上那条信号判决） | 此前"只开面板不采集"只在 README 与 help 里各写一遍，没有任何自动化跑过那条命令（门禁的 served panel 走 `once -serve`）。新增一步：临时库里**先塞一行 `deals.jsonl`** 再起 `serve`，要求监听、那行被 `/api/v1/deals` 读回、日志无 `round complete`/`source failed`（canary 源指向 `127.0.0.1:1`）、SIGTERM 后以 0 退出且无 ERROR。信号那一半按 `uname -s` 只在 Linux 断言（MSYS 对任何 kill 都报同一个数），office 构建机跑同一条。跑出来两处：`serve` 曾把 `api.Addr()` 在监听**之前**打出来（`127.0.0.1:0` 那个端口从未存在），删；`serve` 曾完全不解析参数（`-hold 5s` 被吞、然后一直服务），现在退 2，门禁用 `timeout 10` 有界钉住。**注意这条读数**：`cmdServe`/`exitFromError`/`httpapi.Serve` 在 `go test -cover` 里仍是 0% —— 门禁是**子进程**跑编译好的二进制，覆盖率插桩量不到，别再把它当缺口去"重新发现"一次。同删两处：`pipeline.sameLocalDay` 无调用者；`secretlint.Finding.String()` 原本只有测试在用，现在 secretscan 走它（一处读法） |
 | probe 报的是生产那一份判定，不是 CLI 自己抄的（M40） | VERIFIED（五次变异各红一处） | `cmd/dealhunter` 里那份 `40 + len(offers)*10 + …` 与 `internal/scoring` 已经分家很久了，而「信源准入」流程写着要去看 `probe` 的输出——它报的分数生产永远给不出，也读不出时刻。现在 `probe` 调 `pipeline.Screen`（= 一轮判定里不依赖状态库的那一半）。对表用真路径：httptest 起本地 RSS → `once` 真入库 → `probe` 再读同一批字节，要求**表格里的分数等于写进 `deals.jsonl` 的分数**、三条被挡的行各带原因（噪音词 / 无优惠命中词 / 截止已过）且不在库里、`probe` 前后 `deals.jsonl` 与 `state.json` 逐字节不变。另有一条 AST 闸：CLI 包里 `.Score` 只许读不许写（反空转的那一半是"同一个遍历必须还数得到读"）。变异：换回手抄公式 → 两条一起红；Screen 不报拒绝 / 时刻只在通过后才记 / 去掉允许词 / probe 写一字节 state.json → 各红该红那条 |
 | `dealhunter daily -dry` 被自动化跑过一次（M35） | VERIFIED（五次变异各红一处） | 覆盖率横扫剩下的 0% 里这是真缺口：daily 是"今天这一份日报长什么样"唯一的人工入口，从来没有任何东西执行过它。六行检材只该剩三行，三个被挡掉的理由各不同（差一分、时刻已过、`dup_of`），所以"正好 3 条"不是凑出来的；断条数、断渲染行数与条数一致、断在效的都在而被挡的不许漏、断报头点名配置里的时刻与时区，最要紧的一条是 **-dry 不许把 `daily:last_sent` 写进 state.json**（写进去就是今天再也没有第二份）。反向的一半同样钉住：用掉过必须报"今日已发过"（时刻取当天正午，避免跨午夜凭毫秒决定成败），空库必须明说"今天没有在效的羊毛"。不带 `-dry` 那一支故意不跑 —— 先量过：它会真的发送并往 `outreach/` 落文件。首跑即绿，于是五个变异一个个打：只渲染第一行 / 拿掉 dry 分支的 return / 关掉空报那行 / 报头抹掉时区 / 名额硬编码成"还没发"，每个各红一条 |
@@ -273,9 +274,11 @@ config/deploy/dist）与 `/tmp/dh-wire-feishu.sh`（9-19，把服务接到租户
   `work-vm` 上从未装过本项目 —— 它是 LIFE 域服务，不要挪过去。
   二进制在 `/opt/deal-hunter/deal-hunter`（不是 `/usr/local/bin`），状态目录 `/var/lib/deal-hunter`，
   配置 `/etc/deal-hunter/config.json`；env 与 state 只有 root 可读，探测要带 `sudo`。
-- 面板实际绑定地址来自 `/etc/deal-hunter/deal-hunter.env` 里的 `DH_SERVER_BIND`（当前是一台
-  Tailscale mesh 地址），**覆盖** config.json 的 `server.bind`；所以在本机 `curl 127.0.0.1:8765`
-  连不上不是故障，要用 env 里那个地址。
+- 面板实际绑定地址来自 `/etc/deal-hunter/deal-hunter.env` 里的 `DH_SERVER_BIND`，**覆盖** config.json
+  的 `server.bind`。**重钉（2026-09-23，M42 装机时实测）**：这台机器上当前的值是
+  `DH_SERVER_BIND=127.0.0.1:8765`（`sudo grep` 读出来的，安装脚本的健康检查也打的是这个地址、回了
+  200）——本条此前写着"当前是一台 Tailscale mesh 地址，所以本机 curl 127.0.0.1 连不上不是故障"，
+  那已经不成立，照它去排除故障反而会去查一个不存在的问题。要看现在的值就用上面那条命令，别抄本文。
 - 交付相关的状态键：`daily:last_sent`、`daily:watched_since`（进程启动即刷新）、
   `urgent:sent` 与 `event:sent`（都是 `{"date":"2006-01-02","n":1}`，按 `timezone` 的本地日记账）、
   `event:reminded:<fingerprint>`（每个事件一次；**开抢与到期共用这一个标记**，所以一张券不会说两遍）。
